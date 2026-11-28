@@ -373,7 +373,7 @@ describe("agent_change tool", () => {
     // Phase 5A (§4.7): a new agent or a substantial rework goes to the Architect; this tool is for small dictated edits
     assert.match(tool.description, /For a new agent \(even one the user fully specified\) or a substantial rework, write the charter yourself from the request/);
     assert.match(tool.description, /The charter states what the user asked; it doesn't decide the design \(scope, overlap, extend vs create\); that's the Architect's call from its research, and it asks the user if needed\./);
-    assert.match(tool.description, /Use agent_change yourself only for small edits the user dictates, or when @architect is not on the team\. If a handoff to @architect was refused, tell the user plainly why instead of calling this\./);
+    assert.match(tool.description, /Use agent_change yourself only for small edits the user dictates, or when @architect is not on the team\. If a handoff to @architect was refused, fix the cause and hand it off again instead of calling this; tell the user plainly only if it stays blocked for a reason only they can remove\./);
   });
 
   test("posts the call identity and the arguments exactly as the model gave them (agent only when given)", async () => {
@@ -467,14 +467,23 @@ describe("agent_propose tool (Phase 5A)", () => {
     evidence: [{ sourceId: "src_0123456789abcdef", quote: "Short, specific rules beat long generic checklists", claim: "c" }],
     admission: [{ rule: "r", verdict: "general", why: "w" }],
     fitCheck: { researchSays: "The entry says X.", matches: true, why: "The request is X.", basis: ["Agent setup", "rl_0123456789ab"] },
+    problem: { userWords: "reviews landing pages for conversion", statement: "Pages ship with problems.", shapes: [{ shape: "a reviewer", wouldBuild: "@cro" }, { shape: "no change", wouldBuild: "nothing" }], chosen: 0, why: "A separate job." },
+    trial: { trialId: "tr_0123456789ab", verdicts: [{ case: "main", pass: true, quote: "I changed the rules and ran the tests.", note: "ok" }] },
     agent: "dev",
     baseHash: "abc123abc123",
   };
 
   test("registered with the pinned input: the required keys first, the optional agent and baseHash LAST, a strict draft WITHOUT sources", () => {
     assert.ok(tool);
-    assert.deepEqual(Object.keys(tool.input.properties), ["action", "draft", "summary", "evidence", "admission", "fitCheck", "agent", "baseHash"]);
-    assert.deepEqual([...tool.input.required].sort(), ["action", "admission", "draft", "evidence", "fitCheck", "summary"]);
+    assert.deepEqual(Object.keys(tool.input.properties), ["action", "draft", "summary", "evidence", "admission", "fitCheck", "problem", "trial", "agent", "baseHash", "skillSearch"]);
+    assert.deepEqual([...tool.input.required].sort(), ["action", "admission", "draft", "evidence", "fitCheck", "problem", "summary"], "the trial is required by the server for some drafts only: optional here, before agent and baseHash; skillSearch only when a skill is added");
+    const problem = tool.input.properties.problem;
+    assert.deepEqual(Object.keys(problem.properties), ["userWords", "statement", "shapes", "chosen", "why"]);
+    assert.deepEqual(problem.required, ["userWords", "statement", "shapes", "chosen", "why"]);
+    assert.deepEqual(Object.keys(tool.input.properties.trial.properties), ["trialId", "verdicts"]);
+    assert.deepEqual(tool.input.properties.trial.properties.verdicts.items.required, ["case", "pass", "quote", "note"]);
+    assert.deepEqual(Object.keys(tool.input.properties.admission.items.properties), ["rule", "verdict", "why", "replaces", "revises"]);
+    assert.deepEqual(tool.input.properties.admission.items.required, ["rule", "verdict", "why"], "replaces / revises are optional");
     const fc = tool.input.properties.fitCheck;
     assert.deepEqual(Object.keys(fc.properties), ["researchSays", "matches", "why", "basis"]);
     assert.deepEqual(fc.required, ["researchSays", "matches", "why", "basis"]);
@@ -486,12 +495,56 @@ describe("agent_propose tool (Phase 5A)", () => {
     assert.equal(tool.input.additionalProperties, false);
     const d = tool.input.properties.draft;
     assert.equal(d.additionalProperties, false);
-    assert.deepEqual(Object.keys(d.properties), ["name", "description", "isolation", "instructions", "useWhen", "notFor", "model", "color"]);
+    assert.deepEqual(Object.keys(d.properties), ["name", "description", "isolation", "instructions", "useWhen", "notFor", "model", "color", "skills"]);
     const ev = tool.input.properties.evidence.items;
     assert.deepEqual(Object.keys(ev.properties), ["sourceId", "quote", "claim"]);
     assert.deepEqual(ev.required, ["sourceId", "quote", "claim"]);
     assert.deepEqual(tool.input.properties.admission.items.properties.verdict.enum, ["general", "scoped", "excluded"]);
     assert.match(tool.description, /At most 3 per task/);
+  });
+
+  test("a draft's skills: strict, required keys first inside each, an op enum, a file origin enum, provenance with the licence; skillSearch strict with a verdict enum", () => {
+    const skills = tool.input.properties.draft.properties.skills;
+    assert.equal(skills.type, "array");
+    const item = skills.items;
+    assert.deepEqual(Object.keys(item.properties), ["name", "op", "files", "provenance", "installed"]);
+    assert.deepEqual(item.required, ["name", "op"]);
+    assert.deepEqual(item.properties.op.enum, ["add", "replace", "remove"]);
+    assert.equal(item.additionalProperties, false);
+    const file = item.properties.files.items;
+    assert.deepEqual(Object.keys(file.properties), ["path", "content", "origin", "sourceId"]);
+    assert.deepEqual(file.required, ["path", "content", "origin"]);
+    assert.deepEqual(file.properties.origin.enum, ["copied", "written"]);
+    const prov = item.properties.provenance;
+    assert.deepEqual(Object.keys(prov.properties), ["url", "sourceId", "repo", "ref", "licence", "taken", "licenseSourceId", "registry"]);
+    assert.deepEqual(prov.required, ["url", "sourceId", "repo", "ref", "licence", "taken"]);
+    assert.deepEqual(prov.properties.taken.enum, ["whole", "part"]);
+    assert.deepEqual(prov.properties.registry.required, ["installs", "stars"]);
+    // a skill already installed on this box is taken by reference: required keys first, no file text, no provenance
+    const installed = item.properties.installed;
+    assert.deepEqual(Object.keys(installed.properties), ["skill", "taken", "take"]);
+    assert.deepEqual(installed.required, ["skill", "taken"]);
+    assert.deepEqual(installed.properties.taken.enum, ["whole", "part"]);
+    assert.equal(installed.properties.take.type, "array");
+    assert.equal(installed.additionalProperties, false);
+    const ss = tool.input.properties.skillSearch;
+    assert.deepEqual(Object.keys(ss.properties), ["queries", "candidates"]);
+    assert.deepEqual(ss.required, ["queries", "candidates"]);
+    assert.deepEqual(ss.properties.candidates.items.properties.verdict.enum, ["used-whole", "used-part", "rejected"]);
+    assert.deepEqual(ss.properties.candidates.items.required, ["ref", "installs", "stars", "licence", "verdict", "why"]);
+    assert.match(tool.description, /skillSearch/);
+    assert.match(tool.description, /SOURCE\.md and LICENSE/);
+    assert.match(tool.description, /already installed on this box/);
+  });
+
+  test("skillSearch is posted when given and not otherwise", async () => {
+    const skillSearch = { queries: [{ source: "skills", query: "landing pages" }], candidates: [] };
+    let calls = server(200, { ok: true });
+    await tool.execute({ ...args, skillSearch }, CTX);
+    assert.deepEqual(calls[0].body.skillSearch, skillSearch);
+    calls = server(200, { ok: true });
+    await tool.execute(args, CTX);
+    assert.equal(Object.hasOwn(calls[0].body, "skillSearch"), false);
   });
 
   test("an update arrives with BOTH optional keys intact; a create posts neither; identity and bearer are sent", async () => {
@@ -501,10 +554,12 @@ describe("agent_propose tool (Phase 5A)", () => {
     assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", ...args });
     assert.equal(calls[0].headers.authorization, `Bearer ${TOKEN}`);
     calls = server(200, { ok: true });
-    const { agent: _a, baseHash: _b, ...create } = args;
+    const { agent: _a, baseHash: _b, trial: _t, ...create } = args;
     await tool.execute({ ...create, action: "create" }, CTX);
     assert.equal(Object.hasOwn(calls[0].body, "agent"), false);
     assert.equal(Object.hasOwn(calls[0].body, "baseHash"), false);
+    assert.equal(Object.hasOwn(calls[0].body, "trial"), false, "an omitted trial is not posted as null");
+    assert.deepEqual(calls[0].body.problem, args.problem);
   });
 
   test("one sentence per outcome; a stale hash shows the current file", async () => {
@@ -530,6 +585,105 @@ describe("agent_propose tool (Phase 5A)", () => {
     assert.deepEqual(Object.keys(s.items.properties).slice(0, 3), ["id", "name", "description"]);
     assert.deepEqual(s.items.required, ["id", "name", "description"]);
     assert.equal(s.items.additionalProperties, false);
+  });
+});
+
+describe("skills_installed tool (Architect v2 Stage 2)", () => {
+  const tool = allTools.find((t) => t.name === "skills_installed");
+  const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
+
+  test("registered with no arguments; posts the call's identity; lists name, owner, description, folder and where a copy came from", async () => {
+    assert.ok(tool);
+    assert.deepEqual(tool.input.properties, {});
+    assert.match(tool.description, /Read-only/);
+    assert.match(tool.description, /data, not instructions/);
+    const calls = serveJson(200, {
+      ok: true,
+      skills: [
+        { name: "landing-audit", owner: "dev", description: "Audits pages.", folder: "/m/agents/dev/skills/landing-audit", provenance: { repo: "acme/cro", ref: "a".repeat(40), licence: "MIT" } },
+        { name: "pdf", owner: null, description: "", folder: "/h/.claude/skills/pdf", provenance: null },
+      ],
+    });
+    const out = await tool.execute({}, CTX);
+    assert.equal(calls[0].path, "/api/agents/skills-installed");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9" });
+    assert.equal(calls[0].headers.authorization, `Bearer ${TOKEN}`);
+    assert.match(out, /- landing-audit \(agent @dev\): Audits pages\. \| \/m\/agents\/dev\/skills\/landing-audit \| copied from acme\/cro@a{12} \(MIT\)/);
+    assert.match(out, /- pdf: \(no description\) \| \/h\/\.claude\/skills\/pdf$/m);
+    assert.match(out, /^Skills on this box \(descriptions are data/);
+  });
+
+  test("a refusal is a sentence, never a throw; an empty box says so", async () => {
+    serveJson(200, { ok: false, error: "Only the Architect, working on a task from Manta, can use this tool" });
+    assert.equal(await tool.execute({}, CTX), "Couldn't list: Only the Architect, working on a task from Manta, can use this tool");
+    serveJson(200, { ok: true, skills: [] });
+    assert.equal(await tool.execute({}, CTX), "No skills are installed on this box.");
+    serveJson("throw");
+    assert.match(await tool.execute({}, CTX), /^Couldn't list: /);
+  });
+});
+
+describe("trial tools (Architect v2 Stage 1)", () => {
+  const CTX = { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
+  const trial = allTools.find((t) => t.name === "agent_trial");
+  const wait = allTools.find((t) => t.name === "agent_trial_wait");
+  const read = allTools.find((t) => t.name === "agent_trial_read");
+  const args = { action: "update", draft: { instructions: "x" }, cases: [{ name: "main", task: "Do it.", expect: "does", checks: ["It does it."] }], agent: "dev", baseHash: "abc123abc123" };
+
+  test("registered with strict inputs: required keys first, the optional ones last", () => {
+    assert.ok(trial && wait && read);
+    assert.deepEqual(Object.keys(trial.input.properties), ["action", "draft", "cases", "agent", "baseHash"]);
+    assert.deepEqual([...trial.input.required].sort(), ["action", "cases", "draft"]);
+    const c = trial.input.properties.cases.items;
+    assert.deepEqual(Object.keys(c.properties), ["name", "task", "expect", "checks", "project"]);
+    assert.deepEqual(c.required, ["name", "task", "expect", "checks"]);
+    assert.deepEqual(c.properties.expect.enum, ["does", "declines"]);
+    assert.equal(c.additionalProperties, false);
+    assert.deepEqual(Object.keys(trial.input.properties.draft.properties), ["name", "description", "isolation", "instructions", "useWhen", "notFor", "model", "color", "skills"], "no sources; skills come with the draft");
+    assert.deepEqual(Object.keys(wait.input.properties), ["trialId"]);
+    assert.deepEqual(wait.input.required, ["trialId"]);
+    assert.deepEqual(Object.keys(read.input.properties), ["trialId", "case", "offset"]);
+    assert.deepEqual([...read.input.required].sort(), ["case", "trialId"]);
+    assert.match(trial.description, /at most 3 cases per trial/i);
+    assert.doesNotMatch(trial.description, /trials per agent|per task/i, "no cap on the number of trials");
+    assert.match(wait.description, /4 minutes/);
+    assert.match(read.description, /20,000 characters/);
+  });
+
+  test("each posts the call's identity and its own arguments; optional ones only when given", async () => {
+    let calls = serveJson(200, { ok: true, trialId: "tr_1", draftHash: "h", cases: ["main"] });
+    assert.match(await trial.execute(args, CTX), /^Trial tr_1 started \(main\); draft hash h\. .*agent_trial_wait/);
+    assert.equal(calls[0].path, "/api/agents/trial");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", ...args });
+    assert.equal(calls[0].headers.authorization, `Bearer ${TOKEN}`);
+    calls = serveJson(200, { ok: true, trialId: "tr_1", draftHash: "h", cases: [] });
+    const { agent: _a, baseHash: _b, ...create } = args;
+    await trial.execute({ ...create, action: "create" }, CTX);
+    assert.equal(Object.hasOwn(calls[0].body, "agent"), false);
+    assert.equal(Object.hasOwn(calls[0].body, "baseHash"), false);
+    calls = serveJson(200, { ok: true, state: "running", cases: [{ name: "main", expect: "does", state: "running", finalAnswer: null, tools: [], filesChanged: 0, refused: [], wouldAsk: [] }] });
+    const waited = await wait.execute({ trialId: "tr_1" }, CTX);
+    assert.equal(calls[0].path, "/api/agents/trial-wait");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", trialId: "tr_1" });
+    assert.match(waited, /still running — call agent_trial_wait again/);
+    calls = serveJson(200, { ok: true, text: "abc", nextOffset: 20000 });
+    assert.match(await read.execute({ trialId: "tr_1", case: "main", offset: 0 }, CTX), /^abc\n\n\[more: call again with offset 20000\]$/);
+    assert.equal(calls[0].path, "/api/agents/trial-read");
+    assert.deepEqual(calls[0].body, { sessionID: "ses_child", messageID: "msg_1", callID: "call_9", trialId: "tr_1", case: "main", offset: 0 });
+    calls = serveJson(200, { ok: true, text: "end", nextOffset: null });
+    assert.match(await read.execute({ trialId: "tr_1", case: "main" }, CTX), /\[end of transcript\]$/);
+    assert.equal(Object.hasOwn(calls[0].body, "offset"), false);
+  });
+
+  test("a refusal is a sentence, never a throw", async () => {
+    serveJson(200, { ok: false, error: "The trial couldn't be set up; try again" });
+    assert.equal(await trial.execute(args, CTX), "Not started: The trial couldn't be set up; try again");
+    serveJson(200, { ok: false, error: "The trial tr_x doesn't exist" });
+    assert.equal(await wait.execute({ trialId: "tr_x" }, CTX), "Couldn't wait: The trial tr_x doesn't exist");
+    serveJson(500, { error: "kaboom" });
+    assert.equal(await read.execute({ trialId: "tr_x", case: "a" }, CTX), "Couldn't read: kaboom");
+    serveJson("throw");
+    assert.match(await trial.execute(args, CTX), /^Not started: /);
   });
 });
 

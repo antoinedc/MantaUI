@@ -140,7 +140,7 @@ macOS box (Apple Silicon):
 
 Pairing codes are one-time with a ~5 minute TTL. If the printed code expires
 before the user enters it, mint a fresh one:
-`curl -s http://127.0.0.1:8787/auth/pair` (loopback-only, run on the box).
+`curl -s -X POST -H 'X-Manta-Pair: 1' http://127.0.0.1:8787/auth/pair` (loopback-only, run on the box).
 
 ## Step 5 — failure playbook
 

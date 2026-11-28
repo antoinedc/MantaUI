@@ -11,13 +11,14 @@
 //     complete on purpose: clear / delete-session, the handoff channels and
 //     prompts the box injects itself (schedule, webhooks, peers_message) are
 //     deliberately unguarded — they are follow-ups, not part of this contract;
-//   - decorateList(jobs): `statusLabel` + `summary` on every delegate:list row;
+//   - decorateList(jobs): `statusLabel` + `summary` + the plain-language `title` on every delegate:list row;
 //   - validateApprovalTools(tools): the rule check behind delegate:approve.
 //
 // Pure rules are exported for tests; `createDelegateView` takes its I/O as
 // dependencies (no live box needed to test it).
 
 import { newestRecordFor } from "./delegate.mjs";
+import { displayTitle } from "./jobTitle.mjs";
 
 export const READ_ONLY_JOB_MESSAGE = "This is a background job — it can't take messages";
 export const APPROVAL_RULES_MESSAGE = "A job needs at least one rule with a permission and a pattern.";
@@ -178,7 +179,7 @@ export function createDelegateView({ loadJobs, listProjects, listModels, now = D
 
     decorateList(jobs) {
       if (!Array.isArray(jobs)) return jobs;
-      return jobs.map((j) => ({ ...j, statusLabel: jobStatusLabel(j), summary: jobSummary(j) }));
+      return jobs.map((j) => ({ ...j, statusLabel: jobStatusLabel(j), summary: jobSummary(j), title: displayTitle(j) }));
     },
 
     validateApprovalTools,

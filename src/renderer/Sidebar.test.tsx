@@ -33,7 +33,8 @@ const BASE_PROPS = {
   onOpenRoutines: () => {},
   routinesBadge: { needsYou: 0, unread: 0 },
   agentsView: null,
-  needsYouCount: 0,
+  needsBadge: { decisions: 0, questionDot: false },
+  fleetCount: 0,
   onOpenAgents: () => {},
 };
 
@@ -761,7 +762,7 @@ describe("Sidebar — agent pages (agent screens spec §1.1)", () => {
 
   const DEV = { slug: "dev", name: "Dev", description: "Writes code", isolation: "worktree", model: null, color: null, builtIn: true, role: "specialist", useWhen: null, notFor: null, notice: null };
 
-  async function mountWith(props: { needsYouCount?: number; agentsView?: AgentsView } = {}) {
+  async function mountWith(props: { needsBadge?: { decisions: number; questionDot: boolean }; fleetCount?: number; agentsView?: AgentsView } = {}) {
     installMockApi({ agentsList: () => Promise.resolve([DEV]) });
     resetPackageAgentsForTest();
     resetStore({ projects: [] });
@@ -770,7 +771,8 @@ describe("Sidebar — agent pages (agent screens spec §1.1)", () => {
       <Sidebar
         {...BASE_PROPS}
         agentsView={props.agentsView ?? null}
-        needsYouCount={props.needsYouCount ?? 0}
+        needsBadge={props.needsBadge ?? { decisions: 0, questionDot: false }}
+        fleetCount={props.fleetCount ?? 0}
         onOpenAgents={onOpenAgents}
       />,
     );
@@ -786,11 +788,46 @@ describe("Sidebar — agent pages (agent screens spec §1.1)", () => {
     expect(open).toHaveBeenCalledWith({ page: "profile", slug: "dev" });
   });
 
-  it("the Needs you row carries the box-wide count and opens the Fleet page's first section", async () => {
-    const open = await mountWith({ needsYouCount: 4 });
+  it("the Needs you row carries one red number — decisions waiting on you — and opens the Needs you page", async () => {
+    const open = await mountWith({ needsBadge: { decisions: 4, questionDot: false } });
     const row = h!.container.querySelector<HTMLButtonElement>('[data-testid="agents-nav-needs"]')!;
     expect(row.querySelector('[data-testid="agents-needs-badge"]')?.textContent).toBe("4");
+    expect(row.querySelector('[data-testid="agents-needs-dot"]')).toBeNull();
+    expect(row.getAttribute("aria-label")).toBe("Needs you, 4 decisions waiting");
     act(() => row.click());
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ page: "fleet", focus: "needs" }));
+    expect(open).toHaveBeenCalledWith({ page: "needs" });
+  });
+
+  it("with only open questions, Needs you shows a small blue dot instead of a number", async () => {
+    await mountWith({ needsBadge: { decisions: 0, questionDot: true } });
+    const row = h!.container.querySelector<HTMLButtonElement>('[data-testid="agents-nav-needs"]')!;
+    expect(row.querySelector('[data-testid="agents-needs-badge"]')).toBeNull();
+    expect(row.querySelector('[data-testid="agents-needs-dot"]')).toBeTruthy();
+    expect(row.getAttribute("aria-label")).toBe("Needs you, an optional question is open");
+  });
+
+  it("nothing waiting: no number and no dot", async () => {
+    await mountWith();
+    const row = h!.container.querySelector<HTMLButtonElement>('[data-testid="agents-nav-needs"]')!;
+    expect(row.querySelector('[data-testid="agents-needs-badge"], [data-testid="agents-needs-dot"]')).toBeNull();
+    expect(row.getAttribute("aria-label")).toBe("Needs you");
+  });
+
+  it("the Fleet row shows how many tasks are in progress (a plain number, not an alert) and opens the Fleet page", async () => {
+    const open = await mountWith({ fleetCount: 3 });
+    const row = h!.container.querySelector<HTMLButtonElement>('[data-testid="agents-nav-fleet"]')!;
+    expect(row.querySelector('[data-testid="agents-fleet-count"]')?.textContent).toBe("3");
+    expect(row.getAttribute("aria-label")).toBe("Fleet, 3 in progress");
+    act(() => row.click());
+    expect(open).toHaveBeenCalledWith({ page: "fleet" });
+  });
+
+  it("the Needs you row is selected on the Needs you page, the Fleet row on the Fleet page", async () => {
+    await mountWith({ agentsView: { page: "needs" } });
+    expect(h!.container.querySelector('[data-testid="agents-nav-needs"]')?.getAttribute("aria-current")).toBe("page");
+    expect(h!.container.querySelector('[data-testid="agents-nav-fleet"]')?.getAttribute("aria-current")).toBeNull();
+    h!.unmount();
+    await mountWith({ agentsView: { page: "fleet" } });
+    expect(h!.container.querySelector('[data-testid="agents-nav-fleet"]')?.getAttribute("aria-current")).toBe("page");
   });
 });

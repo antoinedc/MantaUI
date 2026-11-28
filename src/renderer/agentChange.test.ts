@@ -14,6 +14,7 @@ import {
   isAgentChangePart,
   parseAgentMdView,
   verdictLabel,
+  changeAuthor,
 } from "./agentChange";
 
 describe("isAgentChangePart", () => {
@@ -52,11 +53,20 @@ describe("chip, title, reason, buttons", () => {
   it("titles a create and an update", () => {
     expect(agentChangeTitle({ kind: "create", agentName: "Reviewer" })).toBe("New agent: Reviewer");
     expect(agentChangeTitle({ kind: "update", agentName: "Dev" })).toBe("Change to Dev");
+    expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "template-update", templateHash: "h" } })).toBe("Built-in update: Dev");
+    expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "learned" } })).toBe("Learned by Dev");
+    expect(agentChangeTitle({ kind: "update", agentName: "Dev", origin: { kind: "learned" }, learned: { removedId: "lr_00000001" } })).toBe("Dev forgot a preference");
+    expect(changeAuthor({ origin: { kind: "learned" } })).toBe("Manta");
   });
 
   it("gives a reason line only for a change that raises power", () => {
     expect(agentChangeReason({ needsClick: true, reason: "lead", agentName: "Manta" })).toBe("This changes Manta's own instructions");
     expect(agentChangeReason({ needsClick: true, reason: "isolation", agentName: "Dev" })).toBe("This lets Dev edit code");
+    expect(agentChangeReason({ needsClick: true, reason: "script-flagged", agentName: "Dev" })).toBe("An independent check flagged a script — read the reasons before applying");
+    expect(agentChangeReason({ needsClick: true, reason: "script-unchecked", agentName: "Dev" })).toBe("The independent script check couldn't run — read the scripts before applying");
+    expect(agentChangeReason({ needsClick: true, reason: "change-flagged", agentName: "Dev" })).toMatch(/flagged this scheduled change/);
+    expect(agentChangeReason({ needsClick: true, reason: "change-unchecked", agentName: "Dev" })).toMatch(/couldn't run/);
+    expect(agentChangeReason({ needsClick: true, reason: "routine-create", agentName: "Dev" })).toMatch(/new agent/);
     expect(agentChangeReason({ needsClick: true, reason: "ask", agentName: "Dev" })).toBeNull();
     expect(agentChangeReason({ needsClick: false, reason: null, agentName: "Dev" })).toBeNull();
   });
@@ -232,5 +242,15 @@ describe("architectSourceBlocks (the Architect card's source blocks)", () => {
   it("text that can't be read has no blocks", () => {
     expect(architectSourceBlocks(null, "no frontmatter")).toEqual([]);
     expect(architectSourceBlocks("x", null as never)).toEqual([]);
+  });
+});
+
+describe("changeAuthor", () => {
+  it("names who made the change: the Architect, you, a shipped built-in version, else Manta", () => {
+    expect(changeAuthor({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } })).toBe("Architect");
+    expect(changeAuthor({ origin: { kind: "restore", fromChangeId: "x" } })).toBe("You");
+    expect(changeAuthor({ origin: { kind: "settings", field: "isolation" } })).toBe("You"); // a raise from the profile waits in Needs you
+    expect(changeAuthor({ origin: { kind: "template-update", templateHash: "h" } })).toBe("Built-in update");
+    expect(changeAuthor({ origin: { kind: "chat" } })).toBe("Manta");
   });
 });

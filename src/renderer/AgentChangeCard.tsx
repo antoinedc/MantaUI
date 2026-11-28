@@ -12,7 +12,7 @@
 // tuple when the tool part settles, on every hint for it and after a reconnect. A read that lands after a newer one
 // (or after the user's own press) never rolls the card back.
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Bot, ChevronRight } from "lucide-react";
 import type { AgentChange, OpencodePart } from "../shared/types";
 import { Button } from "./Button";
@@ -36,8 +36,12 @@ import {
   parseAgentMdView,
   verdictLabel,
   type AgentChangeAction,
-  type DiffRow,
 } from "./agentChange";
+import { isTemplateConflict, sizeLine } from "./agentTrial";
+import { ProblemBlock, TrialBlock } from "./TrialParts";
+import { ScriptReviewBlock, SkillsDiffBlock } from "./SkillParts";
+import { skillsFoldPart } from "./agentSkills";
+import { DiffLine } from "./DiffLine";
 
 type Notice = { tone: "ok" | "error"; text: string; state: AgentChange["state"] };
 
@@ -85,23 +89,19 @@ function CreateView({ change }: { change: AgentChange }) {
   );
 }
 
-function DiffLine({ row }: { row: DiffRow }) {
-  if (row.kind === "gap") {
-    return (
-      <div className="flex whitespace-pre text-text-faint" data-diff="gap">
-        <span className="select-none shrink-0 w-3" aria-hidden="true" />
-        <span className="flex-1">⋯ {row.count} unchanged line{row.count === 1 ? "" : "s"}</span>
-      </div>
-    );
-  }
-  const add = row.kind === "add";
-  const del = row.kind === "del";
+/** A learned preference (Architect v2 §5.1): the rule, where it applies, the user's own words behind it — the agent's file doesn't change. */
+function LearnedView({ change }: { change: AgentChange }) {
+  const r = change.learned?.added;
+  if (!r) return null;
   return (
-    <div className={`flex whitespace-pre${add ? " bg-[var(--diff-add)]" : del ? " bg-[var(--diff-del)]" : ""}`} data-diff={row.kind}>
-      <span className={`select-none shrink-0 w-3 ${add ? "text-ok" : del ? "text-danger" : "text-text-faint"}`} aria-hidden="true">
-        {add ? "+" : del ? "−" : " "}
-      </span>
-      <span className="flex-1 text-text">{row.text || " "}</span>
+    <div className="flex flex-col gap-1 break-words" data-testid="agent-change-learned">
+      <div className="text-text">{r.rule}</div>
+      <div className="text-text-muted">
+        Applies in {r.scope === "_all" ? "every project" : r.scope}
+        {r.whyIsInferred ? " · inferred: a little beyond your words" : ""}
+      </div>
+      {r.quote && <blockquote className="m-0 border-l-2 border-border pl-3 text-text-muted">“{r.quote}”</blockquote>}
+      {r.why && <div className="text-text-faint">{r.why}</div>}
     </div>
   );
 }
@@ -246,10 +246,12 @@ const plural = (n: number, one: string): string => `${n} ${n === 1 ? one : `${on
 
 /** The fold's label when the card is collapsed: "Show the change · 2 lines · based on 3 sources". */
 function foldLabel(change: AgentChange): string {
-  if (change.kind === "create") return "Show the new agent";
+  if (change.origin?.kind === "learned") return "Show what was learned";
+  const skills = skillsFoldPart(change.skillsDiff);
+  if (change.kind === "create") return ["Show the new agent", ...(skills ? [skills] : [])].join(" · ");
   const lines = changedLineCount(change);
   const sources = change.evidence?.length ?? 0;
-  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
+  return ["Show the change", ...(lines > 0 ? [plural(lines, "line")] : []), ...(skills ? [skills] : []), ...(sources > 0 ? [`based on ${plural(sources, "source")}`] : [])].join(" · ");
 }
 
 /**
@@ -266,15 +268,20 @@ export function AgentChangeView({
   onChange,
   collapsed = false,
   actions: offered,
+  note,
 }: {
   change: AgentChange;
   onChange: (next: AgentChange) => void;
+  /** A line from the page inside the card, before the buttons (Needs you: "Manta recommends …"). */
+  note?: ReactNode;
   collapsed?: boolean;
   /** Which of the buttons the state allows to show (default: all). The history shows a card per row and offers each button once on the page. */
   actions?: ReadonlyArray<AgentChangeAction>;
 }) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // the press that last failed: its button reads "<label> again" until a press of it succeeds
+  const [failedAction, setFailedAction] = useState<AgentChangeAction | null>(null);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -296,12 +303,16 @@ export function AgentChangeView({
             : await window.api.agentsChangeUndo(change.id);
       if (!alive.current) return;
       if (!next) throw new Error("The box didn't answer. Check the card again in a moment.");
+      setFailedAction(null);
       onChange(next);
       const outcome = agentChangeOutcome(action, next);
       // The new chip says it; add the short line only when it ended where the press aimed (a refusal says why instead).
       setNotice(next.state === outcome.state ? { tone: "ok", text: outcome.text, state: next.state } : null);
     } catch (e) {
-      if (alive.current) setNotice({ tone: "error", text: errText(e), state: change.state });
+      if (alive.current) {
+        setNotice({ tone: "error", text: errText(e), state: change.state });
+        setFailedAction(action);
+      }
     } finally {
       if (alive.current) setBusy(null);
     }
@@ -326,7 +337,7 @@ export function AgentChangeView({
             disabled={anyBusy}
             onClick={() => void press(action)}
           >
-            {agentChangeButtonLabel(action, change, busy === action)}
+            {agentChangeButtonLabel(action, change, busy === action, failedAction === action)}
           </Button>
         ));
 
@@ -336,6 +347,12 @@ export function AgentChangeView({
       {reason && (
         <div className="text-warn" data-testid="agent-change-reason">
           {reason}
+        </div>
+      )}
+      <ScriptReviewBlock change={change} />
+      {isTemplateConflict(change) && (
+        <div className="text-warn break-words" data-testid="agent-change-conflict">
+          Conflict: your edits and the new built-in version change the same part, so it waits for your click.
         </div>
       )}
       {change.state === "held" && (
@@ -351,12 +368,22 @@ export function AgentChangeView({
       )}
     </>
   );
+  const size = sizeLine(change);
+  // Architect v2 §3.4: the problem first, then the change and its size, the trial, then what it rests on
   const detail = (
     <>
+      {change.problem && <ProblemBlock problem={change.problem} />}
+      {change.kind === "create" ? <CreateView change={change} /> : change.origin?.kind === "learned" ? <LearnedView change={change} /> : <UpdateView change={change} />}
+      {size && (
+        <div className="text-text-muted" data-testid="agent-change-size">
+          {size}
+        </div>
+      )}
+      <SkillsDiffBlock change={change} />
+      <SourceBlocks change={change} />
+      {change.trial && <TrialBlock change={change} />}
       <EvidenceSection change={change} />
       <AdmissionSection change={change} />
-      {change.kind === "create" ? <CreateView change={change} /> : <UpdateView change={change} />}
-      <SourceBlocks change={change} />
     </>
   );
   const outcome = (
@@ -402,6 +429,9 @@ export function AgentChangeView({
           <div className="flex flex-col gap-2">
             {lead}
             {outcome}
+            {note}
+            {/* a taken-back learned rule has nothing to unfold: its summary line says it all */}
+            {!(change.origin?.kind === "learned" && !change.learned?.added) && (
             <details data-testid="agent-change-fold" className="group">
               <summary className="flex cursor-pointer list-none items-center gap-1 text-meta font-medium text-text-faint hover:text-text [&::-webkit-details-marker]:hidden">
                 <ChevronRight size={12} aria-hidden="true" className="shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" />
@@ -409,6 +439,7 @@ export function AgentChangeView({
               </summary>
               <div className="mt-2 flex flex-col gap-2">{detail}</div>
             </details>
+            )}
           </div>
         </Card>
       </div>
@@ -445,6 +476,7 @@ export function AgentChangeView({
           )}
           {lead}
           {detail}
+          {note}
           {outcome}
         </div>
       </Card>

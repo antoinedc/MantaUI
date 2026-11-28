@@ -62,9 +62,13 @@ export const WORK_CLASS = Object.freeze({
   "curator-rules": CLASS.CONTINUOUS,
   "curator-skills": CLASS.CONTINUOUS,
   "knowledge-corrections": CLASS.BATCH,
+  // one cheap call per finished agent task, reading the user's corrections of it (Architect v2 §5.1); nobody waits for it
+  "agent-learning": CLASS.BATCH,
   "knowledge-actions": CLASS.CONTINUOUS,
   "knowledge-tidy": CLASS.BATCH,
   "knowledge-trial": CLASS.BATCH,
+  // an Architect's trial run of a drafted agent: asked for by a person's request, so it is not deferred to a quiet moment
+  "agent-trial": CLASS.CONTINUOUS,
   "cto-ambient": CLASS.CONTINUOUS,
   "cto-overnight": CLASS.BATCH,
   "cto-backfill": CLASS.BATCH,
@@ -74,9 +78,11 @@ export const WORK_TYPES = Object.freeze(Object.keys(WORK_CLASS));
 export const WORK_BANDS = Object.freeze({
   "knowledge-capture": "fast",
   "knowledge-corrections": "fast",
+  "agent-learning": "fast",
   "knowledge-actions": "fast",
   "knowledge-tidy": "fast",
   "knowledge-trial": "balanced",
+  "agent-trial": "balanced",
   "curator-notes": "balanced",
   "curator-rules": "deep",
   "curator-skills": "deep",

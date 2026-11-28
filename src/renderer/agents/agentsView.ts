@@ -3,7 +3,7 @@
 // Everything the Fleet page and the agent profile decide that has no DOM in it: which page is showing, how a fleet cell
 // reads, what a history row says, whether Restore is offered, how a tab key moves. The components stay thin.
 
-import type { AgentChange, AgentFleet, AgentProfile, AgentResearchEntry, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
+import type { AgentChange, AgentProfile, AgentResearchEntry, FleetCell, NeedsYouReview } from "../../shared/types";
 import type { BackgroundResultPart } from "../backgroundRun";
 import { PACKAGE_AGENT_PREFIX, resolvePickerProject } from "../agentDispatch";
 import { agentChangeTitle } from "../agentChange";
@@ -13,21 +13,37 @@ import { isUnknownChannelError } from "../chatUtils";
 
 export const FLEET_REFETCH_DEBOUNCE_MS = 1000;
 export const HISTORY_LIMIT = 50;
-export const OVERVIEW_PREVIEW = { research: 4 } as const;
 export const SEAT_BRIEF_MAX = 4000;
 
 // ---- which page is showing ----
 
-/** null = closed. "needs" is the Needs you row: the Fleet page, scrolled to its first section. */
-export type AgentsView = null | { page: "fleet"; focus?: "needs"; nonce?: number } | { page: "profile"; slug: string };
+/** null = closed. Needs you is its own page (Fleet redesign): the Fleet page, the Needs you page, or one agent's profile. */
+export type AgentsView = null | { page: "fleet" } | { page: "needs" } | { page: "profile"; slug: string };
 
-export type ProfileTab = "overview" | "research" | "seats" | "history";
-export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
-  { id: "overview", label: "Overview" },
-  { id: "research", label: "Research" },
-  { id: "seats", label: "Seats" },
-  { id: "history", label: "History" },
-];
+export type ProfileTab = "overview" | "skills" | "seats" | "learned" | "history" | "research" | "settings";
+const TAB_LABEL: Record<ProfileTab, string> = {
+  overview: "Overview",
+  skills: "Skills",
+  seats: "Seats",
+  learned: "Learned",
+  history: "History",
+  research: "Research",
+  settings: "Settings",
+};
+
+/**
+ * The tabs a profile shows, in this order: Overview, Skills, Seats, Learned, History, Research, Settings. The Architect works in every
+ * project, so it has no Seats; Learned is shown when the box sends the agent's rules (even none), never for the lead. Trial runs are
+ * part of History, so there is no Tests tab.
+ */
+export function profileTabs(profile: { learned?: ReadonlyArray<unknown>; info?: { role?: string } }): ReadonlyArray<{ id: ProfileTab; label: string }> {
+  const role = profile.info?.role;
+  const ids: ProfileTab[] = ["overview", "skills"];
+  if (role !== "architect") ids.push("seats");
+  if (Array.isArray(profile.learned) && role !== "lead") ids.push("learned");
+  ids.push("history", "research", "settings");
+  return ids.map((id) => ({ id, label: TAB_LABEL[id] }));
+}
 
 /** The tab a key press moves to (arrows wrap, Home / End jump); null for any other key. Selection follows focus. */
 export function nextTab(current: ProfileTab, key: string, ids: ReadonlyArray<ProfileTab>): ProfileTab | null {
@@ -58,30 +74,19 @@ export function firstLine(text: string | null | undefined): string {
   return "";
 }
 
+/** The instructions without a first line that is just the agent's own name as a title (`# Product Designer`): the page already has it. */
+export function stripTitle(text: string, name: string): string {
+  const m = /^\s*#\s+(.+?)\s*(?:\r?\n|$)/.exec(text);
+  if (!m || m[1].trim().toLowerCase() !== name.trim().toLowerCase()) return text;
+  return text.slice(m[0].length).replace(/^\s*\n/, "");
+}
+
 /** "12 Nov". */
 export function dateLabel(ms: number): string {
   return new Date(ms).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
 // ---- Fleet ----
-
-/** The highest percentage of the plan windows in force right now (what the composer's dial calls usage); null when unknown. */
-export function planUsagePercent(snapshots: ReadonlyArray<UsageSnapshot> | null | undefined): number | null {
-  let top: number | null = null;
-  for (const snap of snapshots ?? []) {
-    for (const w of snap.windows ?? []) {
-      if (w.active === false || !Number.isFinite(w.pct)) continue;
-      if (top === null || w.pct > top) top = w.pct;
-    }
-  }
-  return top === null ? null : Math.round(top);
-}
-
-/** "This week: 41 tasks · plan usage 38%" — the task count, and the plan usage when known. No dollars. */
-export function weekPill(tasks: number, planPct: number | null): string {
-  const base = `This week: ${tasks} ${tasks === 1 ? "task" : "tasks"}`;
-  return planPct == null ? base : `${base} · plan usage ${planPct}%`;
-}
 
 export type CellTone = "running" | "warn" | "ok" | "error" | "idle";
 export type CellView = { kind: "none" } | { kind: "cell"; title: string; line: string; tone: CellTone; openable: boolean };
@@ -105,20 +110,6 @@ export function cellView(cell: FleetCell | null | undefined): CellView {
   }
 }
 
-/** "Since yesterday 18:40:" — the recap's lead-in; with no earlier visit on record it covers the last day. */
-export function recapLead(since: number | null, now: number): string {
-  if (since == null) return "In the last 24 hours:";
-  const at = new Date(since);
-  const clock = at.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const gap = Math.round((day(new Date(now)) - day(at)) / 86_400_000);
-  const when = gap <= 0 ? "today" : gap === 1 ? "yesterday" : dateLabel(since);
-  return `Since ${when} ${clock}:`;
-}
-
-/** Rows of the grid worth drawing at all: a fleet with no agents says so instead. */
-export const hasFleetRows = (fleet: AgentFleet | null | undefined): boolean => (fleet?.rows.length ?? 0) > 0;
-
 /** The part the finished-task card is fed with from a Needs-you review item (spec §2.1). No `sessionID`: no chat to open a panel in. */
 export function reviewPart(r: NeedsYouReview): BackgroundResultPart {
   return {
@@ -137,31 +128,14 @@ export function reviewPart(r: NeedsYouReview): BackgroundResultPart {
 
 // ---- Profile ----
 
-const BUILT_BY: Record<AgentProfile["builtBy"], string> = {
-  architect: "Architect",
-  manta: "Manta",
-  user: "You",
-  "built-in": "Built in",
-};
-
 const ROLE_LABEL: Record<AgentProfile["info"]["role"], string> = { lead: "Lead", architect: "Architect", specialist: "Specialist" };
 
-/** The header's one line of who it is: `@seo · Specialist · 2 seats`. What the details pane says (model, works, built by) is not repeated. */
+/** The header's one line: `@seo · Specialist · Edits code · Auto` (and where it works, for Manta and the Architect). */
 export function factsLine(profile: AgentProfile): string[] {
-  const { info, seats } = profile;
-  const where = info.role === "specialist" ? (seats.length === 0 ? "No seats yet" : `${seats.length} ${seats.length === 1 ? "seat" : "seats"}`) : "Works in every project";
-  return [`@${info.slug}`, ROLE_LABEL[info.role] ?? "Specialist", where];
-}
-
-/** The details pane's rows `[key, value]`: model, what it does to code, who built it, when it last changed (left out when never). */
-export function detailRows(profile: AgentProfile): Array<[string, string]> {
-  const rows: Array<[string, string]> = [
-    ["Model", profile.info.model || "Auto"],
-    ["Works", profile.info.isolation === "worktree" ? "Edits code" : "Read-only"],
-    ["Built by", BUILT_BY[profile.builtBy] ?? "You"],
-  ];
-  if (profile.lastChangedAt != null) rows.push(["Changed", dateLabel(profile.lastChangedAt)]);
-  return rows;
+  const { info } = profile;
+  const facts = [`@${info.slug}`, ROLE_LABEL[info.role] ?? "Specialist", info.isolation === "worktree" ? "Edits code" : "Read-only", info.model || "Auto"];
+  if (info.role !== "specialist") facts.push("Works in every project");
+  return facts;
 }
 
 export const seatNotesLabel = (notes: number | null): string => (notes == null ? "—" : `${notes} ${notes === 1 ? "note" : "notes"}`);
@@ -176,6 +150,8 @@ export function memoryLabel(access: "read" | "read-write" | "none"): string {
 export function historyWho(change: Pick<AgentChange, "origin">): string {
   if (change.origin.kind === "job") return "Architect";
   if (change.origin.kind === "restore") return "You";
+  if (change.origin.kind === "settings") return "You · in Settings";
+  if (change.origin.kind === "learned") return "Manta · learned from you";
   return "Manta · for you";
 }
 
@@ -208,10 +184,17 @@ export function historyStatus(change: Pick<AgentChange, "state" | "decidedBy" | 
   }
 }
 
-/** The history pane's counts: live (applied), waiting (pending), undone. */
-export function historyCounts(records: ReadonlyArray<Pick<AgentChange, "state">>): { live: number; waiting: number; undone: number } {
-  const n = (state: AgentChange["state"]) => records.filter((r) => r.state === state).length;
-  return { live: n("applied"), waiting: n("pending"), undone: n("undone") };
+/** History lists only changes that went live (applied), newest first. Pending, undone, refused and held ones never appear. */
+export function appliedHistory<T extends Pick<AgentChange, "state" | "decidedAt" | "createdAt">>(records: ReadonlyArray<T>): T[] {
+  return records.filter((r) => r.state === "applied").sort((a, b) => (b.decidedAt ?? b.createdAt) - (a.decidedAt ?? a.createdAt));
+}
+
+/** Who made a live change and how it landed, for the expanded row: "Architect · you approved it". */
+export function historyHow(change: Pick<AgentChange, "origin" | "decidedBy">): string {
+  const kind = change.origin.kind;
+  if (kind === "settings") return historyWho(change);
+  if (kind === "restore") return `${historyWho(change)} · restored an earlier version`;
+  return `${historyWho(change)} · ${change.decidedBy === "click" ? "you approved it" : "applied automatically"}`;
 }
 
 /** The id of the newest live (applied) change — the one whose card carries the page's Undo; null when none is live. */
@@ -253,8 +236,9 @@ export function currentSnapshot(history: ReadonlyArray<AgentChange>): string | n
 }
 
 /** "Restore before this" is offered on an applied or undone update, only where restoring would change something. */
-export function canRestore(change: Pick<AgentChange, "kind" | "state" | "before">, current: string | null): boolean {
+export function canRestore(change: Pick<AgentChange, "kind" | "state" | "before"> & { origin?: AgentChange["origin"] }, current: string | null): boolean {
   if (change.kind !== "update" || change.before == null) return false;
+  if (change.origin?.kind === "learned") return false; // it changed no agent file: a rule is taken back from the Learned tab
   if (change.state !== "applied" && change.state !== "undone") return false;
   return current == null || change.before !== current;
 }

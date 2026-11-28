@@ -7,9 +7,8 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, cp, symlink, lstat } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODES } from "../shared/autonomyShared.mjs";
 import { createAgentsEngine, pruneChangeRecords, fleetRecap, refreshDay, AgentError, CHANGE_KEEP_MS, CHANGE_MAX, AGENT_CHANGE_OFF, AGENTS_TMUX_SESSION } from "./agents.mjs";
-import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
+import { baseEngineDeps } from "./fixtures/agentEngineDeps.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const DAY = 24 * 60 * 60 * 1000;
@@ -56,18 +55,8 @@ async function fixture({ extra = {}, level = "auto", templates = ["dev", "manta"
   const config = { cfg: { agent: {} }, edits: [], reloads: 0 };
   const make = (over = {}) =>
     createAgentsEngine({
-      root,
-      templatesDir,
-      home: "/h",
-      now: () => w.clock,
-      isGitRepo: async () => true,
+      ...baseEngineDeps({ root, templatesDir, config, w }),
       branchState: async (i) => (w.branchCalls.push(i), w.branches[i.branch] ?? "unmerged"),
-      editConfig: fakeConfigWriter(config),
-      reload: async () => ({ ok: true, reloaded: true }),
-      log: { warn: () => {} },
-      retryDelayMs: 0,
-      autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: w.level }),
-      publish: (p) => w.pubs.push(p),
       oc: { listMessages: async () => [], readSession: async () => ({ state: "found", session: { id: "ses", directory: "/repo/site" } }) },
       delegate: {
         startJob: async (i) => (w.startJobs.push(i), w.startResult),
@@ -540,13 +529,13 @@ test("fleet: rows are team agents without the lead and the Architect; columns ar
   }
 });
 
-test("fleet: a seat with no task is idle; an old finished task reads 'last task Nd ago'; a user-requested task with an unmerged branch nobody opened needs you; a quiet finished one is done", async () => {
+test("fleet: a seat with no task is idle; an old finished task reads 'last task Nd ago'; a task that ended on a decision nobody opened needs you; a finished branch is just done; a quiet finished one is done", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
     await f.engine.seatAdd({ slug: "dev", project: API, brief: "b" });
     f.w.jobs = [
-      job({ id: "needs", filesChanged: 3, branch: "agent/dev-1" }),
+      job({ id: "needs", endedBlocked: true, filesChanged: 3, branch: "agent/dev-1" }),
       job({ id: "quiet", parentDirectory: "/repo/other", status: "done", filesChanged: 0, finishedAt: T0 - 2 * 3600_000 }),
       job({ id: "ancient", parentDirectory: "/repo/api", createdAt: T0 - 9 * DAY, finishedAt: T0 - 9 * DAY }),
     ];
@@ -555,13 +544,16 @@ test("fleet: a seat with no task is idle; an old finished task reads 'last task 
     const fleet = await f.engine.fleet();
     const cells = fleet.rows[0].cells;
     assert.equal(cells[SITE].state, "needs-you");
-    assert.equal(cells[SITE].detail, "Branch ready to merge · 3 files");
+    assert.equal(cells[SITE].detail, "Needs a decision");
     assert.equal(cells["other-cccccccccc"].state, "done");
     assert.match(cells["other-cccccccccc"].detail, /ago/);
     assert.equal(cells[API].state, "idle");
     assert.equal(cells[API].detail, "last task 9d ago");
     await f.engine.reviewDone("needs");
     assert.equal((await f.engine.fleet()).rows[0].cells[SITE].state, "done", "a reviewed task no longer needs you");
+    // an unmerged finished branch is not a reason to ask the user
+    f.w.jobs = [job({ id: "branch", filesChanged: 3, branch: "agent/dev-9" })];
+    assert.equal((await f.engine.fleet()).rows[0].cells[SITE].state, "done");
     // a seat with no task at all
     f.w.jobs = [];
     const idle = (await f.engine.fleet()).rows[0].cells[API];
@@ -642,7 +634,7 @@ test("fleetRecap: pure templates for changes and answers, plural forms, six line
   assert.deepEqual(fleetRecap([], [], T0), []);
 });
 
-test("needs you: open questions, pending changes box-wide (not expired), and finished worktree tasks nobody reviewed — newest first, one count", async () => {
+test("needs you: open questions, pending changes box-wide (not expired), and finished tasks that ended on a decision — newest first, one count; an unmerged branch is not an item", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -659,14 +651,16 @@ test("needs you: open questions, pending changes box-wide (not expired), and fin
       job({ id: "r3", filesChanged: 0, branch: "agent/dev-4" }),
       job({ id: "r4", status: "running", filesChanged: 5, finishedAt: null }),
       job({ id: "r5", agent: "agent-architect", agentName: "Architect", filesChanged: 1, branch: "b" }),
+      job({ id: "d1", endedBlocked: true, filesChanged: 2, branch: "agent/dev-5", finishedAt: T0 - 1000, result: "Needs a choice." }),
     ];
     await f.engine.reviewDone("r2");
     const ny = await f.engine.needsYou();
     assert.deepEqual(ny.questions.map((q) => q.id), ["tq_1"]);
     assert.deepEqual(ny.changes.map((c) => c.id), ["p2", "p1"]);
-    assert.deepEqual(ny.reviews.map((r) => r.jobId), ["r1"]);
-    assert.deepEqual(ny.reviews[0], { jobId: "r1", agentSlug: "dev", project: SITE, name: "fix the build", finishedAt: T0 - 1000, filesChanged: 2, branch: "agent/dev-2", resultText: "Fixed the build.", reason: "Branch ready to merge · 2 files", endedBlocked: false });
+    assert.deepEqual(ny.reviews.map((r) => r.jobId), ["d1"], "r1..r5 are finished branches nobody merged: not items");
+    assert.deepEqual(ny.reviews[0], { jobId: "d1", agentSlug: "dev", project: SITE, name: "fix the build", finishedAt: T0 - 1000, filesChanged: 2, branch: "agent/dev-5", resultText: "Needs a choice.", reason: "Needs a decision", endedBlocked: true });
     assert.equal(ny.count, 4);
+    assert.equal(f.w.branchCalls.length, 0, "Needs you never asks git");
     assert.ok(!("prior" in ny.changes[0]), "the wire shape");
     // the review is remembered (≤200) in the counters file
     assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).reviewed, ["r2"]);
@@ -679,7 +673,7 @@ test("needs you: open questions, pending changes box-wide (not expired), and fin
 
 // ---- rule set P1: what needs the user (docs/superpowers/specs/2026-11-26-agents-screens.md §2.1) ----
 
-test("needs you (P1): only a decision the task is blocked on, or the user's own unmerged branch — Manta-handed, no-change, failed and merged work is not an item", async () => {
+test("needs you (P1): only a decision the task is blocked on — Manta-handed, no-change, failed, merged and the user's own unmerged work is not an item", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -698,17 +692,30 @@ test("needs you (P1): only a decision the task is blocked on, or the user's own 
     const ny = await f.engine.needsYou();
     assert.deepEqual(ny.reviews.map((r) => [r.jobId, r.reason, r.endedBlocked]), [
       ["blocked-mine", "Needs a decision", true],
-      ["mine", "Branch ready to merge · 3 files", false],
-      ["unk", "Branch ready to merge · 1 file", false],
       ["blocked-handed", "Needs a decision", true],
     ]);
-    assert.equal(ny.count, 4);
-    // a decision needs no git; only a user-requested, changed, finished branch is looked up
-    assert.deepEqual(f.w.branchCalls.map((c) => c.branch).sort(), ["b/landed", "b/mine", "b/unknown"]);
-    assert.ok(f.w.branchCalls.every((c) => c.directory === "/repo/site"));
+    assert.equal(ny.count, 2);
+    assert.equal(f.w.branchCalls.length, 0, "a decision needs no git, and nothing else is looked up");
     // a decision is cleared by Done too
     await f.engine.reviewDone("blocked-mine");
-    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["mine", "unk", "blocked-handed"]);
+    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["blocked-handed"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("needs you: a pending change carries the project of the task that proposed it (changeProjects); a chat-made or unknown one has none", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.jobs = [job({ id: "arch1", agent: "agent-architect", parentDirectory: "/repo/api" })];
+    await f.putChanges([
+      change({ id: "from-task", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 1000, createdAt: T0 - 1000, decidedAt: null, origin: { kind: "job", jobId: "arch1", rootJobId: "arch1", attempt: 1 } }),
+      change({ id: "from-chat", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 2000, createdAt: T0 - 2000, decidedAt: null, origin: { kind: "chat" } }),
+      change({ id: "gone-task", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 3000, createdAt: T0 - 3000, decidedAt: null, origin: { kind: "job", jobId: "old", rootJobId: "old", attempt: 1 } }),
+    ]);
+    const ny = await f.engine.needsYou();
+    assert.deepEqual(ny.changeProjects, { "from-task": API, "from-chat": null, "gone-task": null });
   } finally {
     await f.cleanup();
   }
@@ -728,37 +735,18 @@ test("needs you (P1): a task's newest round decides; an old round's decision doe
   }
 });
 
-test("needs you (P1): git answers are cached for a short while, then asked again", async () => {
-  const f = await fixture();
-  try {
-    await f.engine.init();
-    f.w.jobs = [job({ id: "mine", filesChanged: 3, branch: "b/mine" })];
-    await f.engine.needsYou();
-    await f.engine.needsYou();
-    await f.engine.fleet();
-    assert.equal(f.w.branchCalls.length, 1, "one lookup serves the list and the grid");
-    f.w.clock += 60_000;
-    f.w.branches["b/mine"] = "landed";
-    const ny = await f.engine.needsYou();
-    assert.equal(f.w.branchCalls.length, 2);
-    assert.deepEqual(ny.reviews, [], "merged since: it clears itself");
-  } finally {
-    await f.cleanup();
-  }
-});
-
-test("needs you (P1): a failing branch check keeps the item and never fails the read", async () => {
+test("needs you (P1): the list never depends on git, so a failing branch check cannot touch it", async () => {
   const f = await fixture({ extra: { branchState: async () => { throw new Error("git exploded"); } } });
   try {
     await f.engine.init();
-    f.w.jobs = [job({ id: "mine", filesChanged: 3, branch: "b/mine" })];
-    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["mine"]);
+    f.w.jobs = [job({ id: "mine", filesChanged: 3, branch: "b/mine" }), job({ id: "blocked", endedBlocked: true })];
+    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["blocked"]);
   } finally {
     await f.cleanup();
   }
 });
 
-test("fleet (P1): a cell says needs-you for exactly what Needs you lists — a decision, or the user's own unmerged branch; Manta-handed work is done", async () => {
+test("fleet (P1): a cell says needs-you for exactly what Needs you lists — a decision; finished work is done, merged or not", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -810,14 +798,102 @@ test("fleet recap (P1): Manta-handed tasks are one line per agent, a user's fail
   }
 });
 
+test("fleetTasks (agents:tasks): in-progress and paused tasks, today's ended ones with a sentence, the project name, and the box-full flag", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.branches = { "b/landed": "landed" };
+    const today = new Date(T0);
+    today.setHours(0, 0, 0, 0);
+    f.w.jobs = [
+      job({ id: "run", status: "running", finishedAt: null, startedAt: T0 - 600_000, branch: "agent/dev/run" }),
+      job({ id: "pz", status: "paused", finishedAt: null, pausedAt: T0 - 3600_000, parentDirectory: "/repo/api" }),
+      job({ id: "fin", filesChanged: 2, branch: "b/landed", finishedAt: T0 - 1000 }),
+      job({ id: "blocked", endedBlocked: true, finishedAt: T0 - 2000 }),
+      job({ id: "yday", finishedAt: today.getTime() - 1000 }),
+      job({ id: "nonspec", specialist: false, status: "running", finishedAt: null }),
+      job({ id: "other", specialist: false, status: "running", finishedAt: null, origin: "delegate" }),
+    ];
+    await f.putChanges([change({ id: "pr1", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 1000, createdAt: T0 - 1000, decidedAt: null, origin: { kind: "job", jobId: "fin", rootJobId: "fin", attempt: 1 } })]);
+    const t = await f.engine.fleetTasks();
+    assert.deepEqual(t.running.map((r) => [r.jobId, r.status, r.projectName]), [["run", "in-progress", "Site"], ["pz", "paused-by-you", "API"]]);
+    // a pending proposal of the task wins the sentence over the landed branch
+    assert.deepEqual(t.ended.map((e) => [e.jobId, e.outcome]), [["fin", "done"], ["blocked", "didnt-finish"]]);
+    assert.equal(t.ended[0].sentence, "It suggests a change that needs your approval.");
+    assert.equal(t.ended[1].sentence, "It stopped to ask for your decision. It's in Needs you.");
+    assert.equal(t.full, false);
+    assert.ok(t.cap >= 1);
+    // the landed branch is the sentence once nothing is waiting
+    await f.putChanges([]);
+    assert.equal((await f.engine.fleetTasks()).ended[0].sentence, "Its changes are in the project.");
+    // after Done, the decision no longer says it is in Needs you
+    await f.engine.reviewDone("blocked");
+    assert.equal((await f.engine.fleetTasks()).ended[1].sentence, "It stopped to ask for a decision.");
+    // box full: every kind of running job counts
+    f.w.jobs.push(...Array.from({ length: 12 }, (_, i) => job({ id: `bg${i}`, specialist: false, status: "running", finishedAt: null })));
+    assert.equal((await f.engine.fleetTasks()).full, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleetTasks with the box's session tree: a running chat is the row, the specialist job started from it is in its subs, the line comes from the reader", async () => {
+  const tree = [
+    {
+      key: "ses_chat",
+      sessionId: "ses_chat",
+      kind: "window",
+      windowIndex: 2,
+      title: "Fleet: one row per session",
+      job: null,
+      outside: false,
+      children: [{ key: "ses_run", sessionId: "ses_run", kind: "virtual", windowIndex: null, title: "Session", job: { id: "run", status: "running", origin: "delegate" }, outside: false, children: [] }],
+    },
+  ];
+  const asked = [];
+  const f = await fixture({
+    extra: {
+      fleetSessions: () => ({
+        projects: [{ tmuxSession: "manta", defaultCwd: "/repo/site", windows: [{ index: 2, name: "Fleet: one row per session", paneCurrentPath: "/repo/site", opencodeSessionId: "ses_chat" }], tree }],
+        statusOf: (sid) => (sid === "ses_chat" || sid === "ses_run" ? { running: true, busy: true, startedAt: T0 - 60_000 } : {}),
+      }),
+      sessionLines: { read: async (targets) => (asked.push(targets.map((t) => t.sessionId).sort()), Object.fromEntries(targets.map((t) => [t.sessionId, `doing ${t.sessionId}`]))) },
+    },
+  });
+  try {
+    await f.engine.init();
+    f.w.jobs = [job({ id: "run", status: "running", finishedAt: null, childSessionID: "ses_run", parentSessionID: "ses_chat", title: "Build the Fleet fixes" })];
+    const t = await f.engine.fleetTasks();
+    assert.equal(t.running.length, 1);
+    const [row] = t.running;
+    assert.deepEqual([row.kind, row.key, row.title, row.oneLiner, row.agentSlug, row.projectName], ["chat", "ses_chat", "Fleet: one row per session", "doing ses_chat", "manta", "Site"]);
+    assert.deepEqual(row.subs.map((s) => [s.jobId, s.title, s.status]), [["run", "Build the Fleet fixes", "in-progress"]]);
+    assert.deepEqual(asked, [["ses_chat"]], "the lines are read once, for the rows that exist");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleetTasks: an unreadable session tree gives job rows, never an error", async () => {
+  const f = await fixture({ extra: { fleetSessions: () => { throw new Error("tree is cold"); }, sessionLines: { read: async () => { throw new Error("nope"); } } } });
+  try {
+    await f.engine.init();
+    f.w.jobs = [job({ id: "run", status: "running", finishedAt: null })];
+    const t = await f.engine.fleetTasks();
+    assert.deepEqual(t.running.map((r) => [r.kind, r.jobId]), [["task", "run"]]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("opening a task's session counts as looking at it: every round of the task leaves Needs you, and only specialist tasks are recorded", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
     f.w.jobs = [
-      job({ id: "a1", rootJobId: "a1", filesChanged: 2, branch: "b/a", finishedAt: T0 - 9000, supersededBy: "a2" }),
-      job({ id: "a2", rootJobId: "a1", continues: "a1", filesChanged: 2, branch: "b/a", finishedAt: T0 - 1000 }),
-      job({ id: "z", filesChanged: 1, branch: "b/z" }),
+      job({ id: "a1", rootJobId: "a1", endedBlocked: true, finishedAt: T0 - 9000, supersededBy: "a2" }),
+      job({ id: "a2", rootJobId: "a1", continues: "a1", endedBlocked: true, finishedAt: T0 - 1000 }),
+      job({ id: "z", endedBlocked: true }),
       job({ id: "plain", specialist: false }),
     ];
     assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId).sort(), ["a2", "z"]);
@@ -1008,14 +1084,14 @@ test("refresh provisioning: every team agent gets one monthly routine on sync; t
   const f = await fixture();
   try {
     await f.engine.init();
-    const created = f.w.routineCalls.filter((c) => c[0] === "create");
+    const created = f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh"); // (the team check-up routine is made beside them: agentsCheckup.test.mjs)
     assert.equal(created.length, 1, "Dev only");
     const input = created[0][1];
     assert.deepEqual({ kind: input.kind, agentSlug: input.agentSlug, name: input.name, enabled: input.enabled, rollUp: input.rollUp, access: input.access, directory: input.directory, cron: input.cron }, { kind: "agent-refresh", agentSlug: "dev", name: "Refresh @dev", enabled: true, rollUp: true, access: "read", directory: join(f.root, "dev", "home"), cron: `0 9 ${refreshDay("dev")} * *` });
     assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh, { dev: "rt1" });
     await f.engine.sync();
     await f.engine.list();
-    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create").length, 1, "idempotent");
+    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh").length, 1, "idempotent");
     // a new agent gets one at the next sync
     await mkdir(join(f.root, "scout", "home"), { recursive: true });
     await writeFile(join(f.root, "scout", "agent.md"), "---\nname: Scout\ndescription: Looks things up.\nisolation: none\n---\nScout.\n");
@@ -1023,12 +1099,12 @@ test("refresh provisioning: every team agent gets one monthly routine on sync; t
     assert.deepEqual(Object.keys(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh).sort(), ["dev", "scout"]);
     // Off (the routine disabled, or deleted on the Routines page) stays Off
     f.w.routines.get("rt1").enabled = false;
-    f.w.routines.delete("rt2");
+    f.w.routines.delete("rt3"); // (rt2 is the team check-up)
     await f.engine.sync();
-    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create").length, 2, "nothing recreated");
-    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1" });
-    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt2" });
-    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null });
+    assert.equal(f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh").length, 2, "nothing recreated");
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1", day: refreshDay("dev") });
+    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt3", day: refreshDay("scout") });
+    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null, day: null }, "the lead has no refresh, so no day");
   } finally {
     await f.cleanup();
   }
@@ -1038,14 +1114,14 @@ test("refresh toggle: Off disables the routine, On enables it, a missing routine
   const f = await fixture();
   try {
     await f.engine.init();
-    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1" });
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1", day: refreshDay("dev") });
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: false }), { enabled: false, routineId: "rt1" });
     assert.deepEqual(f.w.routineCalls.at(-1), ["update", "rt1", { enabled: false }]);
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: true }), { enabled: true, routineId: "rt1" });
     f.w.routines.delete("rt1");
     const back = await f.engine.refreshSet({ slug: "dev", enabled: true });
-    assert.deepEqual(back, { enabled: true, routineId: "rt2" });
-    assert.equal(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh.dev, "rt2");
+    assert.deepEqual(back, { enabled: true, routineId: "rt3" }); // (rt2 is the team check-up)
+    assert.equal(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).refresh.dev, "rt3");
     for (const slug of ["manta", "architect", "ghost"]) await assert.rejects(f.engine.refreshSet({ slug, enabled: true }), /team agents|No agent named/);
     await assert.rejects(f.engine.refreshSet({ slug: "dev", enabled: "yes" }), /on or off/i);
   } finally {
@@ -1066,7 +1142,7 @@ test("refresh provisioning: a deleted or invalid agent's routine is removed with
   }
 });
 
-test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, round mode unknown; refusals are sentences", async () => {
+test("agents.refresh: starts the Architect's task for @slug under the run's headless session — hidden workspace, no result posted, a routine round; refusals are sentences", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -1079,8 +1155,9 @@ test("agents.refresh: starts the Architect's task for @slug under the run's head
     assert.equal(input.parentDirectory, "/h", "the user's home: a task inside Manta's own folders is refused, and the read-only Architect needs no project");
     assert.equal(input.agent, "agent-architect");
     assert.equal(input.targetProject, AGENTS_TMUX_SESSION);
+    assert.equal(input.title, "Refresh @dev", "the task is titled like its routine");
     assert.equal(input.deliverResult, false);
-    assert.deepEqual(input.architect, { mode: "unknown" });
+    assert.deepEqual(input.architect, { mode: "routine" }, "a refresh is a routine round: its change quotes the brief, one shape is enough");
     assert.equal(input.specialist, true);
     assert.match(input.prompt, /Refresh @dev: check the research it rests on and propose only changes your research supports\./);
     assert.match(input.prompt, /Research library/, "the research guidance every task gets");
@@ -1119,4 +1196,19 @@ test("lead brief: a teammate's question is shown by the app and never asked agai
   const brief = buildLeadBrief({ body: "You are Manta.", roster: [] });
   assert.match(brief, /A teammate's question is shown to the user as a card in this chat; never ask it again or answer it\. The server sends the answer to the task\./);
   assert.match(brief, new RegExp(DECISION_MARKER));
+});
+
+test("profile: the Tests tab reads this agent's trials from the trials module; none without one", async () => {
+  const trial = { id: "tr_ab", rootJobId: "job_1", agentSlug: "dev", draftHash: "h", createdAt: T0, cases: [] };
+  const asked = [];
+  const f = await fixture({ extra: { trials: { list: (slug) => (asked.push(slug), slug === "dev" ? [trial] : []) } } });
+  try {
+    await f.engine.init();
+    assert.deepEqual((await f.engine.profile("dev")).trials, [trial]);
+    assert.deepEqual((await f.engine.profile("manta")).trials, []);
+    assert.deepEqual(asked, ["dev", "manta"]);
+    assert.deepEqual((await f.make().profile("dev")).trials, [], "no trials module: an empty list");
+  } finally {
+    await f.cleanup();
+  }
 });

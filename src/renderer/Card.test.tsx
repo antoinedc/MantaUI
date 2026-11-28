@@ -152,6 +152,20 @@ describe("Card migration — ask-card call sites (BET-531 two-adopter rule)", ()
     expect(h.text()).toContain("Submit");
   });
 
+  it("QuestionCard shows a page's note between the options and Submit, and says Submit again after a failed send (the choice stays)", () => {
+    h = mount(<QuestionCard request={question} onReply={() => {}} onReject={() => {}} note={<p data-testid="qnote">If no one answers, Dev goes with the recommended option.</p>} />);
+    const note = h.container.querySelector('[data-testid="qnote"]')!;
+    const submit = Array.from(h.container.querySelectorAll("button")).find((b) => b.textContent?.startsWith("Submit"))!;
+    expect(note.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(submit.textContent).toContain("Submit");
+    expect(submit.textContent).not.toContain("again");
+    h.rerender(<QuestionCard request={question} onReply={() => {}} onReject={() => {}} failed />);
+    const again = Array.from(h.container.querySelectorAll("button")).find((b) => b.textContent?.startsWith("Submit"))!;
+    expect(again.textContent).toContain("Submit again");
+    const inputs = Array.from(h.container.querySelectorAll("input[type='radio']")) as HTMLInputElement[];
+    expect(inputs[1].checked).toBe(true); // the recommended option is still the chosen one
+  });
+
   it("QuestionCard survives a malformed payload (missing options) without throwing", () => {
     const bad = {
       id: "qbad",

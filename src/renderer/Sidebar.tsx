@@ -13,7 +13,7 @@ import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } fro
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
 import { InboxPalette } from "./InboxPalette";
-import type { Project, SessionClosePreview, SessionCloseResult, SessionTreeNode, TmuxWindow } from "../shared/types";
+import type { AgentInfo, Project, SessionClosePreview, SessionCloseResult, SessionTreeNode, TmuxWindow } from "../shared/types";
 import { buildRailGroups, virtualRowStatus, windowRowStatus, type RailGroup } from "./sessionTree";
 import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import { useBoxCapability } from "./hooks/useBoxCapabilities";
@@ -45,6 +45,10 @@ import { Pill } from "./Pill";
 import { AgentsSection } from "./AgentsSection";
 import type { AgentsView } from "./agents/agentsView";
 import { AGENTS_TMUX_SESSION } from "./agentDispatch";
+import { openChatWindow } from "./agents/useOpenTask";
+import { usePackageAgents } from "./packageAgents";
+import { teamAgents, teamWindowsKey, windowOfAgent } from "./teamView";
+import { useAgentChats } from "./useAgentChats";
 import { shouldShowStoppedMarker, unarmedStoppedCount } from "./usageResume";
 
 const COLLAPSE_KEY = "manta:collapsed-projects";
@@ -119,16 +123,18 @@ type Props = {
   /** The Routines pane is the visible view (selected-row state). */
   routinesOpen?: boolean;
   // Agent screens (spec §1.1): the Needs you / Fleet rows and the agent rows open the agent pages. `agentsView` is the page
-  // showing now (selected row), `needsYouCount` the Needs you badge, `onOpenAgents` opens a page (an agent row → its profile).
+  // showing now (selected row), `needsBadge` the Needs you row's red number / blue dot, `fleetCount` the Fleet row's number, `onOpenAgents` opens a page (an agent row → its profile).
   agentsView: AgentsView;
-  needsYouCount: number;
+  needsBadge: { decisions: number; questionDot: boolean };
+  /** Tasks in progress, box-wide (the Fleet row's number). */
+  fleetCount: number;
   onOpenAgents: (view: AgentsView) => void;
   /** ⌘B: the sidebar slides away but stays mounted (`inert`, so nothing in it is reachable). */
   hidden?: boolean;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, agentsView, needsYouCount, onOpenAgents, hidden = false },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, agentsView, needsBadge, fleetCount, onOpenAgents, hidden = false },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -853,7 +859,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             )}
           </button>
         </div>
-        <AgentsSection view={agentsView} needsCount={needsYouCount} onOpenView={onOpenAgents} />
+        <AgentsSection view={agentsView} needs={needsBadge} fleetCount={fleetCount} onOpenView={onOpenAgents} />
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts whose mode is "new-project" live directly beneath
             the New workspace row that created them — they belong to no project.
@@ -1104,6 +1110,19 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             </div>
           );
         })}
+
+        {/* The agents' own conversations (profile v5): one session row per agent, after the workspaces. */}
+        <TeamBlock
+          projects={projects}
+          statusFor={statusFor}
+          selected={activeProjectName ? { session: activeProjectName, index: activeWindowByProject[activeProjectName] } : null}
+          selectable={rowsSelectable}
+          onActivate={(session, index) => {
+            const proj = projects.find((p) => p.tmuxSession === session);
+            if (proj) void activateWindow(proj, index);
+          }}
+          onError={showError}
+        />
       </div>
 
       <div className="mt-auto p-2 border-t border-border">
@@ -1470,6 +1489,116 @@ function WindowRow({
       }
       onRequestDelete={onClose}
     />
+  );
+}
+
+// One Team row: the session row of an agent's conversation — dot · name · age, the same dot as any session. The dot comes from the
+// window's live status (which already counts the agent's running tasks), so there is no second status kind; no badge (profile v5).
+function TeamRow({
+  agent,
+  status,
+  selected,
+  onOpen,
+}: {
+  agent: AgentInfo;
+  status: WindowStatusUI | undefined;
+  selected: boolean;
+  onOpen: () => void;
+}) {
+  const dot = dotFor(status);
+  const age = useAge(status);
+  return (
+    <div
+      data-testid="team-row"
+      data-slug={agent.slug}
+      role="presentation"
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        e.stopPropagation();
+        onOpen();
+      }}
+    >
+      <RailSessionRow
+        status={dot.variant}
+        statusTitle={dot.title}
+        selected={selected}
+        name={agent.name || agent.slug}
+        marquee
+        age={age.text}
+        ageStale={age.stale}
+        title={`${agent.description || agent.name} · ${dot.title ?? "Idle"}`}
+        tabIndex={0}
+        ariaSelected={selected}
+        onClick={onOpen}
+      />
+    </div>
+  );
+}
+
+/**
+ * The Team section (profile v5): the agents' own conversations, each a session row in the agents' tmux session. A row selects its
+ * window when the agent has one (found by the stored conversation, not by name); otherwise the box makes it first. A refusal is
+ * reported, never swallowed.
+ */
+export function TeamBlock({
+  projects,
+  statusFor,
+  selected,
+  selectable,
+  onActivate,
+  onError,
+}: {
+  projects: ReadonlyArray<Project>;
+  statusFor: (session: string, index: number) => WindowStatusUI | undefined;
+  selected: { session: string; index: number } | null;
+  selectable: boolean;
+  onActivate: (session: string, index: number) => void;
+  onError: (e: unknown) => void;
+}) {
+  const { agents } = usePackageAgents();
+  const windows = projects.find((p) => p.tmuxSession === AGENTS_TMUX_SESSION)?.windows;
+  const chats = useAgentChats(teamWindowsKey(windows));
+  const [opening, setOpening] = useState<string | null>(null);
+  const rows = teamAgents(agents);
+  if (rows.length === 0) return null;
+
+  const open = async (agent: AgentInfo, window_: TmuxWindow | null) => {
+    if (window_) {
+      onActivate(AGENTS_TMUX_SESSION, window_.index);
+      return;
+    }
+    if (opening) return;
+    setOpening(agent.slug);
+    try {
+      const r = await window.api.agentsOpenChat({ slug: agent.slug });
+      await openChatWindow(r.tmuxSession, r.windowIndex);
+    } catch (e) {
+      onError(e);
+    } finally {
+      setOpening(null);
+    }
+  };
+
+  return (
+    <div className="mb-4" data-testid="team-section">
+      <h3 className="m-0 px-1 py-1 text-micro font-semibold uppercase tracking-wider text-text-quiet">Team</h3>
+      <div className="space-y-px" role="group" aria-label="Team">
+        {rows.map((a) => {
+          const w = windowOfAgent(windows, chats?.[a.slug]);
+          return (
+            <div key={a.slug} aria-busy={opening === a.slug || undefined} className={opening === a.slug ? "opacity-60" : undefined}>
+              <TeamRow
+                agent={a}
+                status={w ? statusFor(AGENTS_TMUX_SESSION, w.index) : undefined}
+                selected={selectable && !!w && selected?.session === AGENTS_TMUX_SESSION && selected.index === w.index}
+                onOpen={() => void open(a, w)}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

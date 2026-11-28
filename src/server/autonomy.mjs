@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   LEVELS,
   ACTION_KINDS,
+  SERVER_KINDS,
   BINARY_KINDS,
   MODES,
   MODE_NAMES,
@@ -20,7 +21,7 @@ import {
 } from "../shared/autonomyShared.mjs";
 import { TASK_KINDS, projectSection } from "./projectActions.mjs";
 
-export { LEVELS, ACTION_KINDS, BINARY_KINDS, MODES, MODE_NAMES, DEFAULT_MODE, KIND_LABELS, KIND_TITLES, LEVEL_TITLES, MODE_TITLES };
+export { LEVELS, ACTION_KINDS, SERVER_KINDS, BINARY_KINDS, MODES, MODE_NAMES, DEFAULT_MODE, KIND_LABELS, KIND_TITLES, LEVEL_TITLES, MODE_TITLES };
 
 /** Phase 2's fixed default is Balanced (same answers for the old kinds). */
 export const DEFAULT_POLICY = MODES.balanced;
@@ -44,6 +45,9 @@ export function effectivePolicy(cfg) {
   return policy;
 }
 
+/** The kinds an agent can be asked to follow: every kind but the ones the server decides itself (a change to those never alters a running task). */
+const AGENT_KINDS = ACTION_KINDS.filter((k) => !SERVER_KINDS.includes(k));
+
 /** The level of a kind under `policy`; an unknown kind, a missing kind or an unknown value is `"ask"`. */
 export function decide(kind, policy = DEFAULT_POLICY) {
   if (!ACTION_KINDS.includes(kind)) return "ask";
@@ -53,7 +57,7 @@ export function decide(kind, policy = DEFAULT_POLICY) {
 
 /** A stable string for a policy: two policies with the same answers have the same key. */
 export function policyKey(policy) {
-  return ACTION_KINDS.map((k) => `${k}=${decide(k, policy)}`).join(",");
+  return AGENT_KINDS.map((k) => `${k}=${decide(k, policy)}`).join(",");
 }
 
 /** The same policy as a plain `{kind: level}` object in fixed kind order (what a job record stores). */
@@ -66,7 +70,7 @@ export const SETTINGS_RULE =
 
 /** The "When to ask the user" markdown: fixed order, nothing time- or run-dependent (the lead brief must be byte-stable). */
 export function renderPolicy(policy = DEFAULT_POLICY) {
-  const group = (level) => ACTION_KINDS.filter((k) => decide(k, policy) === level).map((k) => `- ${KIND_LABELS[k]}`);
+  const group = (level) => AGENT_KINDS.filter((k) => decide(k, policy) === level).map((k) => `- ${KIND_LABELS[k]}`);
   const auto = group("auto");
   const tell = group("tell");
   const ask = group("ask");
@@ -85,7 +89,7 @@ export function renderPolicy(policy = DEFAULT_POLICY) {
     );
   }
   // what each action means, by its effect (only the kinds that are not Auto)
-  const meant = ACTION_KINDS.filter((k) => decide(k, policy) !== "auto");
+  const meant = AGENT_KINDS.filter((k) => decide(k, policy) !== "auto");
   if (meant.length > 0) {
     lines.push(
       "What these mean:",
@@ -248,6 +252,7 @@ export const KIND_PATTERNS = Object.freeze({
   },
 });
 
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]", "0.0.0.0"];
 const expandHome = (p, home) => (p === "~" ? home : p.startsWith("~/") ? join(home, p.slice(2)) : p);
 
 /** The files a task must not read, search or write (absolute), and the directories it must not write (`edit`/`write` only). */
@@ -320,9 +325,12 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [], session
   }
   // (see above: a search / read outside the working folder is checked per FOLDER)
   for (const t of writeTrees) deny("external_directory", `${t}/*`);
-  const agentFolder = typeof agentDir === "string" ? agentDir.replace(/\/+$/, "") : "";
-  const keepAgentFolder = agentFolder && writeTrees.some((t) => agentFolder.startsWith(`${t}/`));
+  const agentFolder = ownAgentFolder(agentDir, home);
+  const keepAgentFolder = agentFolder !== "";
   for (const fragment of PROTECTED_BASH_OTHER) deny("bash", `*${fragment}*`);
+
+  // Manta's own server, opencode and anything else listening on the box answer only to the box: a task never fetches them
+  for (const host of LOOPBACK_HOSTS) for (const scheme of ["http", "https"]) deny("webfetch", `${scheme}://${host}*`);
 
   // merge: always
   for (const [pattern] of MERGE_PATTERNS) deny("bash", pattern);
@@ -342,8 +350,37 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [], session
     const level = decide(p.kind, policy);
     if (level === "ask" || level === "never") deny("bash", p.pattern);
   }
-  if (keepAgentFolder) rules.push({ permission: "external_directory", pattern: `${agentFolder}/**`, action: "allow" });
+  if (keepAgentFolder) {
+    // the agent's own home folder: its workspace, where it may read, write and edit (a mockup, notes, drafts). Its
+    // agent.md, compiled prompt, skills and learned store stay denied above: they change only through proposals.
+    const agentHome = `${agentFolder}/${AGENT_HOME}`;
+    for (const permission of FILE_PERMISSIONS) {
+      allow(permission, agentHome);
+      allow(permission, `${agentHome}/**`);
+    }
+    // …but never a path that climbs out of it (`home/../agent.md`)
+    for (const permission of FILE_PERMISSIONS) deny(permission, `${agentHome}/*..*`);
+    rules.push({ permission: "external_directory", pattern: `${agentFolder}/**`, action: "allow" });
+  }
   return rules;
+}
+
+// The agent's own workspace folder, `~/.manta/agents/<slug>/home` (agents.mjs creates it).
+const AGENT_HOME = "home";
+
+/** The agent's folder when it sits under `~/.manta` (the only place it needs granting back), else "". */
+function ownAgentFolder(agentDir, home) {
+  const folder = typeof agentDir === "string" ? agentDir.replace(/\/+$/, "") : "";
+  if (!folder || folder.split("/").includes("..")) return "";
+  return protectedPaths(home).writeTrees.some((t) => folder.startsWith(`${t}/`)) ? folder : "";
+}
+
+/** Is `abs` inside the agent's own home folder (no `..` anywhere in it)? */
+function insideAgentHome(abs, agentDir, home) {
+  const folder = ownAgentFolder(agentDir, home);
+  if (!folder || abs.split("/").includes("..")) return false;
+  const agentHome = `${folder}/${AGENT_HOME}`;
+  return abs === agentHome || abs.startsWith(`${agentHome}/`);
 }
 
 // ---- matching a finished tool call against the same patterns (spec §5) ----
@@ -391,7 +428,7 @@ function touchesProtectedSecret(command, segments, sessionID) {
  * is matched per part of a compound command; a tool by its name; a file tool by its path. `summary` is a FIXED label
  * (the matched pattern's command words, the tool name, or "Manta settings or credentials"), never the arguments.
  */
-export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionID } = {}) {
+export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionID, agentDir } = {}) {
   const tool = String(toolPart?.tool ?? "");
   const input = toolPart?.state?.input ?? {};
   const found = [];
@@ -422,7 +459,7 @@ export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionI
       const abs = expandHome(raw, home);
       const writes = tool === "edit" || tool === "write" || tool === "apply_patch";
       const under = (dir) => abs === dir || abs.startsWith(`${dir}/`);
-      if (files.includes(abs) || trees.some(under) || (writes && writeTrees.some(under))) add("protected", PROTECTED_SUMMARY);
+      if (files.includes(abs) || trees.some(under) || (writes && writeTrees.some(under) && !insideAgentHome(abs, agentDir, home))) add("protected", PROTECTED_SUMMARY);
     }
   }
   return found;
@@ -569,7 +606,7 @@ function kindOfWord(raw) {
   const w = String(raw ?? "").toLowerCase().replace(/[\s_-]+/g, " ").trim();
   if (!w) return null;
   for (const [kind, word] of Object.entries(KIND_WORDS)) if (word === w) return kind;
-  for (const kind of ACTION_KINDS) if (kind.replace(/_/g, " ") === w) return kind;
+  for (const kind of AGENT_KINDS) if (kind.replace(/_/g, " ") === w) return kind;
   return ACTION_ALIASES[w] ?? null;
 }
 
@@ -627,7 +664,7 @@ export function parseSelfReport(text) {
  * - `selfReport`: "present" | "none" | "missing".
  * Entries are `{ kind, level?, summary, source? }` with a FIXED summary for commands, at most 10 each, de-duplicated.
  */
-export function extractActions({ messages, afterMessageId, continuation = false, policy, home = "", projectPatterns = [], resultText = null, sessionID }) {
+export function extractActions({ messages, afterMessageId, continuation = false, policy, home = "", projectPatterns = [], resultText = null, sessionID, agentDir }) {
   const list = Array.isArray(messages) ? messages : [];
   let from = 0;
   if (afterMessageId) {
@@ -649,7 +686,7 @@ export function extractActions({ messages, afterMessageId, continuation = false,
       if (part?.type !== "tool") continue;
       const status = part.state?.status;
       if (status !== "completed" && status !== "error") continue;
-      const matches = matchKinds(part, { home, projectPatterns, sessionID });
+      const matches = matchKinds(part, { home, projectPatterns, sessionID, agentDir });
       if (matches.length === 0) continue;
       if (status === "completed") {
         for (const { kind, summary } of matches) {

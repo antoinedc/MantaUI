@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { statePath } from "../shared/paths.mjs";
 import { SPECIALIST_TASK_TOOLS } from "../shared/researchTools.mjs";
+import { ARCHITECT_TRIAL_TOOLS, ARCHITECT_SKILL_TOOLS } from "../shared/agentsShared.mjs";
 import { decisionLines, decisionFromForm, waitingLine, TASK_GONE, TASK_PAUSED } from "./taskDecision.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
@@ -92,6 +93,7 @@ import {
   MANTA_FOLDER,
 } from "./autonomy.mjs";
 import { projectPatterns as buildProjectPatterns } from "./projectActions.mjs";
+import { displayTitle, firstSentence, sanitizeTitle } from "./jobTitle.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -535,7 +537,7 @@ export function withResearchToolAllows(rules) {
 
 // The tools the Architect's task may call, besides reading and searching (Agents Phase 5A §4.2).
 const ARCHITECT_TOOL_ALLOWS = ["read", "glob", "grep", "list", "websearch"];
-const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, "agent_propose"];
+const ARCHITECT_PLUGIN_TOOLS = [...SPECIALIST_TASK_TOOLS, ...ARCHITECT_TRIAL_TOOLS, ...ARCHITECT_SKILL_TOOLS, "agent_propose"];
 
 /**
  * The ruleset of the Architect's task, built for launch AND resume by this one function (spec §4.2). Last match wins, so:
@@ -1247,6 +1249,34 @@ function jobNameFor(input, prompt) {
     deriveName(prompt);
 }
 
+// The job's plain-language title (what Fleet, Needs you and the task cards show; `name` stays the branch / window slug). A caller's own
+// (a handoff's title) is kept as given; else the first sentence of what was asked at once, replaced by a generated one when the
+// one-shot answers (`titleLater`). The text is the user's request when there is one, else the prompt without what the server appends.
+function titleSourceText(input, prompt) {
+  return typeof input?.request === "string" && input.request.trim() ? input.request : String(prompt ?? "").split("\n\n---\n")[0];
+}
+function initialTitle(input, prompt) {
+  const given = sanitizeTitle(input?.title);
+  if (given) return { title: given, titleSource: "given" };
+  const title = firstSentence(titleSourceText(input, prompt));
+  return title ? { title, titleSource: "fallback" } : {};
+}
+
+// Write the title once, in the background, when the job starts: never delays the launch, never throws. A failure, an empty answer or a
+// slug leaves the first-sentence title in place.
+function titleLater(job, text, deps) {
+  if (typeof deps.generateTitle !== "function" || job.titleSource === "given") return;
+  void (async () => {
+    try {
+      const title = sanitizeTitle(await deps.generateTitle({ text, sessionID: job.parentSessionID, directory: job.parentDirectory }));
+      if (!title) return;
+      await patchJob(job.id, { title, titleSource: "generated" }, deps, { onlyIf: (j) => j.titleSource !== "given" && j.titleSource !== "generated" });
+    } catch (e) {
+      console.warn(`[delegate] writing the title of ${job.id} failed:`, e?.message ?? e);
+    }
+  })();
+}
+
 // Create the job's worktree + record its baseSha. A worktree failure continues
 // with worktree = branch = baseSha = null and cwd = parentDirectory — UNLESS the
 // caller demands isolation (§8.1: for implementation work, isolationRequired is
@@ -1703,6 +1733,19 @@ async function countFilesChanged(job, deps) {
     const status = await gitRun(["-C", job.worktree, "status", "--porcelain"]);
     for (const f of parseGitStatus(status?.stdout).files) if (f.status === "??") paths.add(f.path);
     return paths.size;
+  } catch {
+    return null;
+  }
+}
+
+// The commit the job's branch is at when its round ends (the learner reads what the user committed AFTER it, Architect v2 §5.1). null when
+// there is no worktree or git can't say; only a real commit id is kept.
+async function readEndHead(job, deps) {
+  if (!job.worktree || typeof deps.gitRun !== "function") return null;
+  try {
+    const out = await deps.gitRun(["-C", job.worktree, "rev-parse", "HEAD"]);
+    const sha = String(out?.stdout ?? "").trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
   } catch {
     return null;
   }
@@ -3010,6 +3053,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   // exactly one terminal write.
   let result = null;
   let filesChanged = null;
+  const endHead = await readEndHead(job, deps); // the branch head at the end of this round, before cleanup removes the worktree
   let actions = null; // a specialist's told / blocked / exceeded actions (Agents Phase 3 §5), read from this attempt's transcript
   const wantsActions = job.specialist === true && !!job.childSessionID && typeof listMessages === "function" && !(interrupted && job.pauseRequested);
   if (wantsActions && status !== "done") {
@@ -3101,6 +3145,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
       result: outcome.status === "done" ? result : null,
       filesChanged: outcome.status === "done" ? filesChanged : null,
       finishedAt: endedAt,
+      endHead: endHead ?? undefined,
       pauseRequested: false,
       endedBlocked,
       endReason: outcome.status === "failed" ? endReason : null,
@@ -3126,6 +3171,14 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   if (paused) {
     pauseInterrupts.delete(paused.id);
     await recordBudgetSpend(paused, deps); // outside the jobs lock (§17.14)
+    // an Architect's round that is parked stops the trial runs it started (they cost money and hold a copy of a project), as when it ends
+    if (paused.architect && typeof deps.onJobPaused === "function") {
+      try {
+        await deps.onJobPaused(paused);
+      } catch (e) {
+        console.warn(`[delegate] onJobPaused failed for ${paused.id}:`, e?.message ?? e);
+      }
+    }
     return { ok: true, paused: true, status: "paused" };
   }
   if (!updated) return { ok: true, alreadyTerminal: true };
@@ -3280,6 +3333,7 @@ function actionsOf(job, messages, deps, resultText) {
     home: deps.home ?? homedir(),
     projectPatterns: Array.isArray(job.projectPatterns) ? job.projectPatterns : [],
     sessionID: job.childSessionID,
+    agentDir: job.agentDir ?? null,
     resultText,
   });
 }
@@ -3346,7 +3400,7 @@ export function buildResultSynthetic(job) {
   return {
     id: job.completionMessageId,
     text: buildCompletionText(job),
-    description: job.name,
+    description: displayTitle(job),
     metadata: {
       source: "subagent",
       childID: job.childSessionID,
@@ -3354,7 +3408,7 @@ export function buildResultSynthetic(job) {
       state: STATE_FOR_STATUS[job.status] ?? job.status,
       manta: {
         jobId: job.id,
-        name: job.name,
+        name: displayTitle(job),
         ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
         ...(job.status === "done" && job.endedBlocked === true && job.decision ? { decision: { questions: job.decision.questions } } : {}),
         ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
@@ -4318,8 +4372,8 @@ async function continueJobRecord(id, input, deps) {
         // a lead handoff's fix round: the new title, who asked, and the turn it counts against (else inherited)
         ...(typeof input?.name === "string" && input.name.trim() ? { name: jobNameFor({ name: input.name }, followUp) } : {}),
         ...(typeof input?.request === "string" && input.request ? { request: input.request } : {}),
+        ...(sanitizeTitle(input?.title) ? { title: sanitizeTitle(input.title), titleSource: "given" } : {}),
         ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
-        ...(typeof input?.turnKey === "string" && input.turnKey ? { turnKey: input.turnKey } : {}),
         ...(input?.allowPr === false ? { allowPr: false } : {}),
         status: "running",
         createdAt: t,
@@ -4787,7 +4841,8 @@ function livenessFieldsAtLaunch(ceilingMs) {
 // child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
 // use) and reports ONE result through N7, whatever route it takes to a terminal state.
 
-const architectModeOf = (mode) => (mode === "build" || mode === "plan" ? mode : "unknown");
+/** The mode an Architect round is stamped with: build / plan (a lead's hand-off), routine (a refresh or check-up), else unknown. */
+export const architectModeOf = (mode) => (mode === "build" || mode === "plan" || mode === "routine" ? mode : "unknown");
 
 // The agent every delegate child runs. Today's jobs always ran the default agent; a
 // child created under a parent would otherwise be free to inherit a plan-mode one.
@@ -4881,7 +4936,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     }
     const refused = launchRefusal(jobs, parentSessionID);
     if (refused) return refused;
-    // The caller's admission check (agent handoffs: single writer, per-turn cap) runs BEFORE anything is allocated, so a
+    // The caller's admission check (a generic hook: a refusal leaves nothing allocated) runs BEFORE anything is allocated, so a
     // refusal leaves no record, worktree, branch or session id behind.
     if (typeof input?.admit === "function") {
       const refusal = await runAdmit(input.admit, jobs);
@@ -4952,6 +5007,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     const job = {
       id: jobId,
       name,
+      ...initialTitle(input, prompt),
       prompt,
       model: requestedModel ?? null,
       requestedModel: requestedModel ?? null,
@@ -4992,7 +5048,6 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
       // what admission reads later: where the agent works, who asked, in which user turn, and whether it may open a PR
       ...(input?.isolation === "worktree" || input?.isolation === "none" ? { isolation: input.isolation } : {}),
       ...(input?.requestedBy === "manta" ? { requestedBy: "manta" } : {}),
-      ...(typeof input?.turnKey === "string" && input.turnKey ? { turnKey: input.turnKey } : {}),
       ...(input?.allowPr === false ? { allowPr: false } : {}),
       // Background work budget (spec 2026-11-17 §17.14): set for overnight dispatches (`actor:"cto"` alone does not
       // identify them). The cursor is what has already been booked against the shared budget.
@@ -5053,6 +5108,7 @@ async function startJobV2({ input, prompt, parentSessionID, parentDirectory, req
     return { ok: true, job };
   });
   if (!reg.ok) return reg;
+  titleLater(reg.job, titleSourceText(input, prompt), deps);
   try {
     return await launchDelegate(reg.job, deps);
   } finally {
@@ -5737,6 +5793,25 @@ async function handleQuestion(form, deps) {
   return { captured: decision !== null };
 }
 
+/**
+ * A server-set progress label on a RUNNING round (Architect v2 §3.4: "Trial running · case 2 of 3"), shown as the task card's
+ * headline while fresh. `label: null` clears it, but only when the current label is still one that starts with `clearPrefix`
+ * (a model's own report since then is kept).
+ */
+export async function setJobLabel(id, label, { clearPrefix = "" } = {}, deps = {}) {
+  const at = (deps.now ?? (() => Date.now()))();
+  const out = await mutateJobProgress(id, deps, (job) => {
+    const jp = job.jobProgress;
+    if (typeof label === "string" && label.trim()) {
+      const text = label.trim().slice(0, 500);
+      return jp.label === text ? null : { jobProgress: { ...jp, label: text, labelAt: at } };
+    }
+    if (!jp.label || !clearPrefix || !jp.label.startsWith(clearPrefix)) return null;
+    return { jobProgress: { ...jp, label: "", labelAt: null } };
+  });
+  return !!out;
+}
+
 /** A guarded patch of a RUNNING record's progress fields under the jobs lock; publishes (throttled) when it wrote. */
 async function mutateJobProgress(id, deps, fn) {
   const { load = loadJobs, save = saveJobs } = deps;
@@ -6274,6 +6349,8 @@ export function createDelegateEngine(baseDeps) {
     rootJobOf,
     /** A milestone on the task's newest round (`rootJobId`). */
     addJobMilestone: (rootJobId, text) => addJobMilestone(rootJobId, text, deps),
+    /** A server-set progress label on a running round (null clears one that starts with `clearPrefix`). */
+    setJobLabel: (id, label, opts) => setJobLabel(id, label, opts, deps),
     /** The question store's engine is created AFTER this one (it needs this engine's functions): hand it over here. */
     setTaskQuestions: (taskQuestions) => {
       deps.taskQuestions = taskQuestions;

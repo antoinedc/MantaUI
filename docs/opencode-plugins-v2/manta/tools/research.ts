@@ -26,8 +26,9 @@ function searchText(res: any): string {
   const list = Array.isArray(res.results) ? res.results : [];
   if (list.length === 0) return `No results from ${res.source}.`;
   const lines = list.map((r: any, i: number) => {
-    const bits = [r.title ?? "(untitled)"];
+    const bits = [r.title ?? r.ref ?? "(untitled)"];
     if (r.url) bits.push(r.url);
+    if (r.installs !== undefined && r.installs !== null) bits.push(`${r.installs} installs`);
     if (r.points !== undefined) bits.push(`${r.points} points, ${r.comments} comments`);
     if (r.stars !== undefined) bits.push(`${r.stars} stars`, `pushed ${r.pushed || "unknown"}`, r.license ?? "no licence listed");
     if (r.item) bits.push(`discussion: ${r.item}`);
@@ -111,14 +112,14 @@ export const tools: ToolDef[] = [
   {
     name: "research_search",
     description: [
-      "Search one research source: hn (Hacker News stories), arxiv (papers), github (repositories: name, url, stars, last push, licence, description), reddit, x, or an extra source listed in your brief by its id (only the Architect has extra sources).",
+      "Search one research source: hn (Hacker News stories), arxiv (papers), github (repositories: name, url, stars, last push, licence, description), reddit, x, skills (existing skills, as owner/repo@skill with their install counts; the Architect only), or an extra source listed in your brief by its id (only the Architect has extra sources).",
       "GitHub results are leads: fetch a README or file (research_fetch) and read it as data before relying on it; stars and recency are hints, not proof.",
       "Use the built-in websearch for the web. Queries are at most 200 characters and never start with a dash.",
       "Results are leads: read a page with research_fetch before you rely on it.",
       "Reddit and X searches go through a third-party search service; keep anything private out of them.",
     ].join(" "),
     input: input({
-      source: str('One of "hn", "arxiv", "github", "reddit", "x", or an extra source id from your brief.'),
+      source: str('One of "hn", "arxiv", "github", "reddit", "x", "skills" (the Architect only), or an extra source id from your brief.'),
       query: str("What to search for, at most 200 characters."),
     }),
     async execute(args, context) {

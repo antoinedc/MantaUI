@@ -161,6 +161,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     questionAnswer: rec("questionAnswer", { id: "tq_1" }),
     questionDismiss: rec("questionDismiss", { id: "tq_1" }),
     needsYou: rec("needsYou", { count: 0 }),
+    fleetTasks: rec("fleetTasks", { running: [], ended: [] }),
     reviewDone: rec("reviewDone"),
     fleet: rec("fleet", { rows: [] }),
     fleetSeen: rec("fleetSeen"),
@@ -173,12 +174,17 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     refreshSet: rec("refreshSet", { enabled: true, routineId: "r" }),
     taskResearch: rec("taskResearch", []),
     projects: rec("projects", []),
+    trial: rec("trial", { id: "tr_1", cases: [] }),
+    trialTranscript: rec("trialTranscript", { text: "t", nextOffset: null }),
+    changeFile: rec("changeFile", { before: null, after: "x" }),
+    learnedUndo: rec("learnedUndo", { id: "ach_9", state: "applied" }),
   };
   const handlers = buildHandlers(deps);
   assert.deepEqual(await handlers["agents:questions"]({ sessionID: "s" }), []);
   assert.deepEqual(await handlers["agents:question-answer"]({ id: "tq_1", answers: [["a"]] }), { id: "tq_1" });
   await handlers["agents:question-dismiss"]({ id: "tq_1" });
   assert.deepEqual(await handlers["agents:needs-you"](), { count: 0 });
+  assert.deepEqual(await handlers["agents:tasks"](), { running: [], ended: [] });
   await handlers["agents:review-done"]({ jobId: "job_1" });
   await handlers["agents:fleet"]();
   await handlers["agents:fleet-seen"]();
@@ -191,11 +197,16 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
   await handlers["agents:refresh-set"]({ slug: "dev", enabled: true });
   await handlers["agents:task-research"]({ jobId: "job_1" });
   await handlers["agents:projects"]();
+  assert.deepEqual(await handlers["agents:trial"]({ id: "tr_1" }), { id: "tr_1", cases: [] });
+  assert.deepEqual(await handlers["agents:trial-transcript"]({ id: "tr_1", case: "main", offset: 20000 }), { text: "t", nextOffset: null });
+  assert.deepEqual(await handlers["agents:change-file"]({ id: "ach_1", path: "skills/a/run.sh" }), { before: null, after: "x" });
+  assert.deepEqual(await handlers["agents:learned-undo"]({ slug: "dev", id: "lr_00000001" }), { id: "ach_9", state: "applied" });
   assert.deepEqual(seen, [
     ["questions", { sessionID: "s" }],
     ["questionAnswer", { id: "tq_1", answers: [["a"]] }],
     ["questionDismiss", { id: "tq_1" }],
     ["needsYou"],
+    ["fleetTasks"],
     ["reviewDone", "job_1"],
     ["fleet"],
     ["fleetSeen"],
@@ -208,6 +219,10 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     ["refreshSet", { slug: "dev", enabled: true }],
     ["taskResearch", { jobId: "job_1" }],
     ["projects"],
+    ["trial", { id: "tr_1" }],
+    ["trialTranscript", { id: "tr_1", case: "main", offset: 20000 }],
+    ["changeFile", { id: "ach_1", path: "skills/a/run.sh" }],
+    ["learnedUndo", { slug: "dev", id: "lr_00000001" }],
   ]);
   // a refusal passes through as its sentence; an unexpected failure never shows a path
   deps.agents.questionAnswer = async () => {
@@ -2464,6 +2479,18 @@ test("delegate:open-session hands the job id to the engine and returns its answe
   assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "x" }), { ok: false, error: "no engine" });
 });
 
+test("delegate:resume goes to the engine and returns its answer untouched (a full box: the cap sentence, retriable); with no engine it is a refusal", async () => {
+  const { deps } = bgDeps();
+  const seen = [];
+  deps.delegate.resumeJob = async (id) => (seen.push(id), id === "full" ? { ok: false, error: "too many jobs", retriable: true } : { ok: true, job: { id } });
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["delegate:resume"]("job00001"), { ok: true, job: { id: "job00001" } });
+  assert.deepEqual(await handlers["delegate:resume"]("full"), { ok: false, error: "too many jobs", retriable: true });
+  assert.deepEqual(seen, ["job00001", "full"]);
+  deps.delegate = undefined;
+  assert.deepEqual(await buildHandlers(deps)["delegate:resume"]("x"), { ok: false, error: "no engine" });
+});
+
 test("delegate:open-session also tells the agents engine the task was opened (it leaves Needs you); a refusal, or an engine that fails, changes nothing", async () => {
   const opened = [];
   const { deps } = bgDeps();
@@ -2766,4 +2793,30 @@ test("sessions:close with nothing named is a refusal, not a silent success", asy
     assert.equal(res.reason, "invalid");
     assert.equal(res.message, "No window was named.");
   }
+});
+
+test("profile redesign: agents:settings-set, agents:clear-chat and agents:chats call the engine with their one object", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  deps.agents = {
+    settingsSet: async (i) => (seen.push(["settingsSet", i]), { outcome: "saved", change: { id: "ach_1" } }),
+    clearChat: async (i) => (seen.push(["clearChat", i]), { sessionId: "ses_2", windowIndex: 3 }),
+    chats: async () => (seen.push(["chats"]), { dev: "ses_1" }),
+    approvedModels: async () => ["a/b"],
+  };
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["agents:settings-set"]({ slug: "dev", field: "name", value: "Developer" }), { outcome: "saved", change: { id: "ach_1" } });
+  assert.deepEqual(await handlers["agents:clear-chat"]({ slug: "dev" }), { sessionId: "ses_2", windowIndex: 3 });
+  assert.deepEqual(await handlers["agents:chats"](), { dev: "ses_1" });
+  assert.deepEqual(await handlers["agents:approved-models"](), ["a/b"]);
+  assert.deepEqual(seen, [["settingsSet", { slug: "dev", field: "name", value: "Developer" }], ["clearChat", { slug: "dev" }], ["chats"]]);
+  // a refusal is its sentence (400); anything else is a safe literal
+  deps.agents.settingsSet = async () => {
+    throw Object.assign(new Error("The description can be at most 200 characters"), { rpcStatus: 400 });
+  };
+  await assert.rejects(handlers["agents:settings-set"]({ slug: "dev", field: "description", value: "x" }), /at most 200/);
+  deps.agents.clearChat = async () => {
+    throw new Error("EACCES: /home/dev/.manta/agents/dev/.chat.json");
+  };
+  await assert.rejects(handlers["agents:clear-chat"]({ slug: "dev" }), (e) => e.rpcStatus === 500 && !/EACCES|\.chat\.json/.test(e.message));
 });

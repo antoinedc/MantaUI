@@ -270,6 +270,17 @@ test("decorateList adds statusLabel and summary to every row and keeps the rest"
   assert.equal(out[1].summary, "0 files changed");
 });
 
+test("decorateList adds the plain-language title: the stored one, else the first sentence of what was asked — never the slug", () => {
+  const { v } = view([]);
+  const out = v.decorateList([
+    job({ id: "a", name: "fix-the-login-test", title: "Fix the login test" }),
+    job({ id: "b", name: "you-are-implementing-pr", title: undefined, prompt: "You are implementing PR 1768. Read the spec." }),
+  ]);
+  assert.equal(out[0].title, "Fix the login test");
+  assert.equal(out[1].title, "You are implementing PR 1768");
+  assert.equal(out[1].name, "you-are-implementing-pr", "the slug stays on the record for the branch and window");
+});
+
 test("decorateList passes a non-array through untouched", () => {
   const { v } = view([]);
   assert.deepEqual(v.decorateList({ jobs: [] }), { jobs: [] });

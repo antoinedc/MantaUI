@@ -1211,6 +1211,16 @@ test("helpers: display name, owner defaults, minted ids, the N7 body is a pure f
   assert.equal(buildResultSynthetic(job).metadata.agent, null);
 });
 
+test("the finished-task card in the chat is titled in plain words; the slug stays out of it", () => {
+  const job = v2Job({ origin: "delegate", status: "done", name: "build-the-fleet-needs-you-redesign", title: "Build the Fleet / Needs you redesign" });
+  const body = buildResultSynthetic(job);
+  assert.equal(body.description, "Build the Fleet / Needs you redesign");
+  assert.equal(body.metadata.manta.name, "Build the Fleet / Needs you redesign");
+  const untitled = buildResultSynthetic(v2Job({ origin: "delegate", status: "done", name: "you-are-implementing-pr", title: undefined, prompt: "You are implementing PR 1768. Read the spec." }));
+  assert.equal(untitled.description, "You are implementing PR 1768");
+  assert.match(buildResultSynthetic(job).text, /build-the-fleet-needs-you-redesign/, "what the model reads is unchanged");
+});
+
 test("deliverJobResult: concurrent callers post once (in-flight guard) and a non-pending record posts nothing", async () => {
   const w = world();
   const job = seedWrapped(w, { status: "done", finishedAt: T0, completionDelivery: "pending" });

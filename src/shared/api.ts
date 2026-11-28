@@ -45,9 +45,12 @@ import type {
   AgentInfo,
   AgentCreateInput,
   AgentChange,
+  AgentSettingsField,
   AgentChangeEvent,
   AgentFleet,
+  FleetTasks,
   AgentProfile,
+  AgentTrial,
   AgentSeat,
   NeedsYou,
   TaskQuestion,
@@ -1455,7 +1458,7 @@ export interface Api {
   // promise.
   authClaim(input: AuthClaimInput): Promise<ClaimOutcome>;
 
-  // Mobile pairing code mint (BET-80): GET /auth/pair over the SSH tunnel.
+  // Mobile pairing code mint (BET-80): POST /auth/pair over the SSH tunnel.
   // Returns { pairingCode, boxId, expiresAt } for the desktop to render as a
   // QR. Resolves to an AuthPairResult — a failure is { ok:false, error }, NOT
   // a rejected promise.
@@ -1981,6 +1984,8 @@ export interface Api {
     { ok: true; tmuxSession: string; windowIndex: number } | { ok: false; error: string }
   >;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
+  /** A task the user paused starts again; a full box answers `{ ok: false, error, retriable: true }` and the task stays paused. */
+  delegateResume(id: string): Promise<{ ok: boolean; error?: string; retriable?: boolean }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   // BET-418 §A pre-flight approval: the renderer polls pending approvals for
   // the viewed parent session and shows ONE approval card before the job is
@@ -1998,6 +2003,14 @@ export interface Api {
   agentsCreate(input: AgentCreateInput): Promise<AgentInfo>;
   agentsDispatch(input: AgentDispatchInput): Promise<{ jobId: string }>;
   agentsOpenChat(input: { slug: string }): Promise<{ tmuxSession: string; windowIndex: number }>;
+  /** One field of an agent saved from its profile, through the change flow. `waiting`: an isolation raise, which waits for a click in Needs you. */
+  agentsSettingsSet(input: { slug: string; field: AgentSettingsField; value: string | null }): Promise<{ outcome: "saved" | "waiting" | "unchanged"; change: AgentChange | null }>;
+  /** Clear conversation: a new session for the agent; `windowIndex` is the open window that now carries it (null when none is open). */
+  agentsClearChat(input: { slug: string }): Promise<{ sessionId: string; windowIndex: number | null }>;
+  /** Each agent's stored conversation, slug → session id (the sidebar's Team rows). */
+  agentsChats(): Promise<Record<string, string>>;
+  /** The models an agent may be pinned to (the Model select), "provider/model" keys; empty when the box can't tell. */
+  agentsApprovedModels(): Promise<string[]>;
   // Agents, Phase 4: Manta's proposed / applied agent changes (the card). Errors are thrown sentences.
   agentsChangeFor(input: { sessionID: string; messageID: string; callID: string }): Promise<AgentChange | null>;
   agentsChangeApply(id: string): Promise<AgentChange>;
@@ -2014,6 +2027,8 @@ export interface Api {
   agentsQuestionAnswer(input: { id: string; answers: string[][] }): Promise<TaskQuestion>;
   agentsQuestionDismiss(input: { id: string }): Promise<TaskQuestion>;
   agentsNeedsYou(): Promise<NeedsYou>;
+  /** The Fleet page: what is in progress or paused by the user, and what ended today (Fleet redesign 2026-11-28). */
+  agentsTasks(): Promise<FleetTasks>;
   agentsReviewDone(input: { jobId: string }): Promise<{ ok: true }>;
   agentsFleet(): Promise<AgentFleet>;
   agentsFleetSeen(): Promise<{ ok: true }>;
@@ -2029,6 +2044,14 @@ export interface Api {
   agentsTaskResearch(input: { jobId: string }): Promise<AgentProfile["research"]>;
   /** The registry's projects, for "Add a seat". */
   agentsProjects(): Promise<{ slug: string; name: string }[]>;
+  /** Architect v2 Stage 1: a trial run of a drafted agent — its cases and what each did (never a transcript). */
+  agentsTrial(input: { id: string }): Promise<AgentTrial>;
+  /** One trial case's redacted transcript, 20 000 characters from `offset`; `nextOffset` is null at the end. */
+  agentsTrialTranscript(input: { id: string; case: string; offset?: number }): Promise<{ text: string; nextOffset: number | null }>;
+  /** One file of a change record from its snapshots (`path` as in the record's bundles, e.g. "skills/<name>/run.sh"); null = the file didn't exist there. */
+  agentsChangeFile(input: { id: string; path: string }): Promise<{ before: string | null; after: string | null; truncated?: boolean }>;
+  /** Architect v2 Stage 3: take back one rule an agent learned (`id` = `lr_…`); the answer is the change record that removed it. Its words won't produce it again. */
+  agentsLearnedUndo(input: { slug: string; id: string }): Promise<AgentChange>;
   /** Bus kind `taskQuestion`: a question was asked, answered, dismissed or lost (a hint: refetch). */
   onTaskQuestion(cb: (p: TaskQuestionEvent) => void): () => void;
   /** Bus kind `agentFleet`: jobs, changes, seats or questions changed (a hint: refetch, debounced). */

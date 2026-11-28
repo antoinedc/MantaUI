@@ -44,7 +44,7 @@ extension MantaAPIClient {
     }
 
     /// `auth:pair` — mint a one-time pairing code. Runs in-process on the box, so
-    /// it works over the phone's authenticated `/rpc` (the HTTP `GET /auth/pair`
+    /// it works over the phone's authenticated `/rpc` (the HTTP `POST /auth/pair`
     /// is loopback-only and must not be used).
     func authPair() async throws -> AuthPairResult {
         try await callRequired("auth:pair", args: [], as: AuthPairResult.self)

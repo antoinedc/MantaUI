@@ -125,6 +125,8 @@ import type { OpencodeInboxItem, ScheduledJob, VoiceNoteRecord } from "../shared
 import { planBusySend, shouldClearDraft } from "./inboxState";
 import { pickAgentDispatch } from "./agentDispatch";
 import { usePackageAgents } from "./packageAgents";
+import { rememberAgentSession, useAgentConversation } from "./useAgentChats";
+import { agentModelSelection } from "./teamView";
 import { isTaskQuestionId, openQuestionCounts, taskQuestionRequest } from "./agentDispatch";
 import { OpenQuestionsByJobContext } from "./BackgroundCards";
 import { useTaskQuestions } from "./hooks/useTaskQuestions";
@@ -271,7 +273,13 @@ export function ChatPanel({
   // Path links in this transcript belong to this session's Explorer. Only a
   // real chat window has one: a read-only previous-session view, a routine run
   // or a pane whose window is gone gets no owner, so no path links render.
-  const hasExplorer = tmuxSession != null && windowIndex != null && !readOnlyView && !routineRun && !!cwd;
+  // An AGENT's conversation (profile v5): the ordinary chat with what doesn't apply taken away (branch chip, Explorer, fork, delete,
+  // plan mode, trust toggle, schedules / secrets / webhooks) and the model picker kept, starting on the agent's own model.
+  const agentChat = useAgentConversation(sessionId, tmuxSession);
+  const { agents: agentList } = usePackageAgents();
+  const agentModelId = agentChat ? agentList?.find((a) => a.slug === agentChat.slug)?.model : null;
+  const agentDefaultModel = useMemo(() => agentModelSelection(agentModelId), [agentModelId]);
+  const hasExplorer = tmuxSession != null && windowIndex != null && !readOnlyView && !routineRun && !agentChat && !!cwd;
   const explorerOwner = useMemo<ExplorerOwner | null>(
     () => (hasExplorer ? { sessionId, cwd } : null),
     [hasExplorer, sessionId, cwd],
@@ -568,7 +576,7 @@ export function ChatPanel({
     presetLabel: routingPreset
       ? `${titleCase(routingPreset)}${routingEco >= 1 ? " · eco" : ""}`
       : undefined,
-    configDefaultModel,
+    configDefaultModel: agentDefaultModel ?? configDefaultModel,
   });
   // Destructure the pieces ChatPanel's own send path + wiring read. The
   // composer-input state now lives in the controller; these aliases keep the
@@ -2351,6 +2359,10 @@ export function ChatPanel({
   const forkSession = useCallback(
     async (seedText?: string) => {
       if (!tmuxSession) return;
+      if (agentChat) {
+        setSendError(`${agentChat.name} has one conversation, so there is nothing to fork. Use Clear conversation to start over.`);
+        return;
+      }
       setSendError(null);
       try {
         const baseName = windowIndex != null ? `fork-${windowIndex}` : "fork";
@@ -2379,7 +2391,7 @@ export function ChatPanel({
         setSendError(String((e as Error)?.message ?? e));
       }
     },
-    [sessionId, tmuxSession, windowIndex, cwd, refresh, activateWindow],
+    [agentChat, sessionId, tmuxSession, windowIndex, cwd, refresh, activateWindow],
   );
 
   const compactSession = useCallback(async () => {
@@ -2398,6 +2410,24 @@ export function ChatPanel({
   // opencodeClearSession swaps in a new session id; the model override is
   // carried forward so the user doesn't re-pick after every clear.
   const clearSession = useCallback(async () => {
+    if (agentChat) {
+      // An agent's conversation: a new session for the AGENT (its own key, its home) through its own channel — the generic clear
+      // makes a session with no agent — and its stored chat record follows. What it learned and each project's notes are untouched.
+      if (running) {
+        setSendError(`Stop ${agentChat.name} first, then clear the conversation.`);
+        return;
+      }
+      setSendError(null);
+      try {
+        const cleared = await window.api.agentsClearChat({ slug: agentChat.slug });
+        rememberAgentSession(cleared.sessionId, agentChat.slug);
+        setSessionChoice(cleared.sessionId, sessionChoice);
+        await refresh();
+      } catch (e) {
+        setSendError(String((e as Error)?.message ?? e));
+      }
+      return;
+    }
     if (!tmuxSession || windowIndex == null) {
       setSendError("Can't clear — no owning tmux window.");
       return;
@@ -2425,7 +2455,7 @@ export function ChatPanel({
     } catch (e) {
       setSendError(String((e as Error)?.message ?? e));
     }
-  }, [tmuxSession, windowIndex, cwd, planOn, refresh, sessionChoice]);
+  }, [agentChat, running, tmuxSession, windowIndex, cwd, planOn, refresh, sessionChoice]);
 
   // Current-value ref mirrors for `submit` — declared AFTER submit in this file
   // (the established commandsRef pattern), so submit reads these instead of
@@ -3599,6 +3629,11 @@ export function ChatPanel({
         onClear={() => void clearSession()}
         onDelete={() => void deleteSession()}
         breadcrumb={projectName ? { project: projectName, window: winName } : null}
+        agentConversation={
+          agentChat
+            ? { name: agentChat.name, onOpenProfile: () => window.dispatchEvent(new CustomEvent("manta-open-agent-profile", { detail: { slug: agentChat.slug } })) }
+            : undefined
+        }
         mode={mode}
         onModeChange={onModeChange}
         availableLaunchers={availableLaunchers}
@@ -3742,7 +3777,8 @@ export function ChatPanel({
       ) : (
       <Composer
         {...composer.composerProps}
-        showHandoffMode={!routineRun}
+        showHandoffMode={!routineRun && !agentChat}
+        agentChat={!!agentChat}
         metaHint={routineRun ? "Replies stay with this run · “Keep in sidebar” makes it a normal session" : undefined}
         // The send transport is ChatPanel's own — its `submit` is entangled with
         // routing / optimistic transcript / compaction and is NOT composer state,

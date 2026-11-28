@@ -9,7 +9,7 @@
 import { parse as parseYaml, parseDocument, visit } from "yaml";
 
 export const SOURCE_ID_RE = /^[a-z][a-z0-9-]{0,29}$/;
-export const BASE_SOURCE_IDS = Object.freeze(["hn", "arxiv", "reddit", "x", "github", "web"]);
+export const BASE_SOURCE_IDS = Object.freeze(["hn", "arxiv", "reddit", "x", "github", "web", "skills"]);
 export const SOURCES_MAX = 10;
 export const SOURCE_NAME_MAX = 60;
 export const SOURCE_DESCRIPTION_MAX = 300;

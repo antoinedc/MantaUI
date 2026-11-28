@@ -41,6 +41,7 @@ const EXEMPT = {
   "index.mjs": { count: 6, why: "CTO conversation admission (a role session, never handed off), a delegate child's opening prompt, the CTO runner's own sessions, and the knowledge skill trial's session client (a headless session the trial creates itself, marked manta.knowledgeTrial and never auto-handed-off)" },
   "routines.mjs": { count: 3, why: "a routine run's own headless session (opening prompt, the one missing-report re-prompt, a crash-recovery resend): created by the engine, marked manta.routineId, and never auto-handed-off (maybeAuto skips it)" },
   "knowledge/trial.mjs": { count: 1, why: "the skill trial's opening prompt to a headless session it created seconds earlier, marked manta.knowledgeTrial; maybeAuto skips it and nothing can replace or fence it" },
+  "agentTrials.mjs": { count: 1, why: "an Architect trial case's opening prompt to a headless session it created seconds earlier, marked manta.agentTrial; maybeAuto skips it and nothing can replace or fence it" },
   "peers.mjs": { count: 1, why: "default dep; production injects promptDelivery.deliver (asserted below)" },
   "capNotifier.mjs": { count: 1, why: "default dep; production injects promptDelivery.deliver (asserted below)" },
   "forge/index.mjs": { count: 2, why: "forge ship-preview's own freshly created session" },

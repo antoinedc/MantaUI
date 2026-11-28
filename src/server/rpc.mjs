@@ -2878,6 +2878,11 @@ export function buildHandlers({
         return a.dispatch({ ...input, directory });
       }),
     "agents:open-chat": (input) => agentsCall("open-chat", (a) => a.openChat(input)),
+    // profile redesign: Settings saved through the change flow, Clear conversation, which session is whose (the Team rows)
+    "agents:settings-set": (input) => agentsCall("settings-set", (a) => a.settingsSet(input)),
+    "agents:clear-chat": (input) => agentsCall("clear-chat", (a) => a.clearChat(input)),
+    "agents:chats": () => agentsCall("chats", (a) => a.chats()),
+    "agents:approved-models": () => agentsCall("approved-models", (a) => a.approvedModels()),
     // Phase 4 (Manta creates and edits agents): the card's lookup and its three buttons. A refusal is a sentence (AgentError).
     "agents:change-for": (input) => agentsCall("change-for", (a) => a.forCall(input)),
     // Phase 5A: the records an Architect job proposed — by the delegate job id shown on the result card
@@ -2891,6 +2896,8 @@ export function buildHandlers({
     "agents:question-answer": (input) => agentsCall("question-answer", (a) => a.questionAnswer(input)),
     "agents:question-dismiss": (input) => agentsCall("question-dismiss", (a) => a.questionDismiss(input)),
     "agents:needs-you": () => agentsCall("needs-you", (a) => a.needsYou()),
+    // Fleet redesign (2026-11-28): the Fleet page's one read — running / paused-by-you tasks and today's ended ones
+    "agents:tasks": () => agentsCall("tasks", (a) => a.fleetTasks()),
     "agents:review-done": (input) => agentsCall("review-done", (a) => a.reviewDone(input && typeof input === "object" ? input.jobId : input)),
     "agents:fleet": () => agentsCall("fleet", (a) => a.fleet()),
     "agents:fleet-seen": () => agentsCall("fleet-seen", (a) => a.fleetSeen()),
@@ -2903,6 +2910,13 @@ export function buildHandlers({
     "agents:refresh-set": (input) => agentsCall("refresh-set", (a) => a.refreshSet(input)),
     "agents:task-research": (input) => agentsCall("task-research", (a) => a.taskResearch(input)),
     "agents:projects": () => agentsCall("projects", (a) => a.projects()),
+    // Architect v2 Stage 1: a trial run of a drafted agent (cases and what they did) and one case's transcript, a window at a time
+    "agents:trial": (input) => agentsCall("trial", (a) => a.trial(input)),
+    "agents:trial-transcript": (input) => agentsCall("trial-transcript", (a) => a.trialTranscript(input)),
+    // Architect v2 Stage 2: one file of a change record, before and after, from its snapshots (the card opens each skill file)
+    "agents:change-file": (input) => agentsCall("change-file", (a) => a.changeFile(input)),
+    // Architect v2 Stage 3: the Learned tab's Undo — one learned rule removed (its own change record); a refusal is a sentence
+    "agents:learned-undo": (input) => agentsCall("learned-undo", (a) => a.learnedUndo(input)),
     // Phase 3: the existence of these channels is the renderer's capability check (an older box: "unknown rpc channel")
     "agents:autonomy-get": () => autonomyCall("get", async () => autonomySettingsOf(await local.readAgentAutonomyStrict())),
     "agents:autonomy-set": (input) =>
@@ -3063,6 +3077,8 @@ export function buildHandlers({
     },
     // preload: ipcRenderer.invoke(IPC.delegateStop, id) → args[0] = id
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
+    // A task the user paused starts again (same worktree and branch). A full box refuses with the cap sentence; the task stays paused.
+    "delegate:resume": (id) => (delegate ? delegate.resumeJob(id) : { ok: false, error: "no engine" }),
     // P6: where a job's chat window is (re-created, stamped with the child
     // session id, when it was closed) → { ok, tmuxSession, windowIndex } | { ok:false, error }.
     // Opening a specialist task's session also counts as looking at it: the agents engine drops it from Needs you.
@@ -3195,7 +3211,7 @@ export function buildHandlers({
 
     // ---- auth pairing code mint (BET-161) ----
     // Mint a one-time mobile pairing code. Runs in-process on the box, so it
-    // satisfies the loopback-only minting invariant that the GET /auth/pair
+    // satisfies the loopback-only minting invariant that the POST /auth/pair
     // HTTP endpoint enforces (a remote httpApi caller can't hit that endpoint
     // — it 403s non-loopback). authEngine.pair() returns snake_case;
     // translate to the camelCase AuthPairResult the renderer expects.

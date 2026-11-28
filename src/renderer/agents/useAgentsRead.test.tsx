@@ -12,7 +12,14 @@ import { useAgentsRead } from "./useAgentsRead";
 function Probe({ read, k = 0 }: { read: (() => Promise<string | null>) | null; k?: number }) {
   const r = useAgentsRead<string>(read, k);
   return (
-    <div data-testid="p" data-loading={String(r.loading)} data-unsupported={String(r.unsupported)} data-error={r.error ?? ""}>
+    <div
+      data-testid="p"
+      data-loading={String(r.loading)}
+      data-unsupported={String(r.unsupported)}
+      data-error={r.error ?? ""}
+      data-refresh-error={r.refreshError ?? ""}
+      data-updated-at={String(r.updatedAt ?? "")}
+    >
       {r.data ?? ""}
     </div>
   );
@@ -96,6 +103,45 @@ describe("useAgentsRead", () => {
     h = mount(<Probe read={() => Promise.reject(new Error("busy"))} />);
     await h.flush();
     expect(p().dataset.error).toBe("busy");
+  });
+
+  it("a refetch that fails keeps the data and says so (refreshError); the next good one clears it; updatedAt is when data last arrived", async () => {
+    let n = 0;
+    h = mount(<Probe read={() => (++n === 2 ? Promise.reject(new Error("busy")) : Promise.resolve(`v${n}`))} />);
+    await h.flush();
+    expect(p().dataset.refreshError).toBe("");
+    const first = Number(p().dataset.updatedAt);
+    expect(first).toBeGreaterThan(0);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    act(() => hints.fleet?.());
+    await act(async () => {
+      vi.advanceTimersByTime(1100);
+    });
+    expect(p().textContent).toBe("v1");
+    expect(p().dataset.refreshError).toBe("busy");
+    expect(Number(p().dataset.updatedAt)).toBe(first);
+    act(() => hints.fleet?.());
+    await act(async () => {
+      vi.advanceTimersByTime(1100);
+    });
+    expect(p().textContent).toBe("v3");
+    expect(p().dataset.refreshError).toBe("");
+  });
+
+  it("reload() reports a failure the same way (the Try again button)", async () => {
+    let n = 0;
+    let reload: (() => Promise<void>) | null = null;
+    function Grab() {
+      const r = useAgentsRead<string>(() => (++n === 1 ? Promise.resolve("one") : Promise.reject(new Error("still busy"))), 0);
+      reload = r.reload;
+      return <div data-testid="p" data-refresh-error={r.refreshError ?? ""} />;
+    }
+    h = mount(<Grab />);
+    await h.flush();
+    await act(async () => {
+      await reload?.();
+    });
+    expect(p().dataset.refreshError).toBe("still busy");
   });
 
   it("every kind of hint and the resync frame refetch, one read per burst", async () => {

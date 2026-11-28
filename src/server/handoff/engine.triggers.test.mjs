@@ -115,8 +115,9 @@ test("a routine run's session (metadata manta.routineId) never auto-hands off, e
 for (const [label, manta] of [
   ["knowledgeTrial", { internal: true, knowledgeTrial: "ses_trial" }],
   ["knowledgeCurator", { internal: true, knowledgeCurator: "batch_1" }],
+  ["agentTrial", { internal: true, agentTrial: "tr_0123456789ab" }],
 ]) {
-  test(`a knowledge session (metadata manta.${label}) never auto-hands off`, async () => {
+  test(`a knowledge or trial session (metadata manta.${label}) never auto-hands off`, async () => {
     const w = createWorld();
     w.addSession("ses_p", { metadata: { manta } });
     w.addWindow("proj", 3, "work", "ses_p");

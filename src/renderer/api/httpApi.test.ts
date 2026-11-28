@@ -595,6 +595,14 @@ describe("httpApi background-run calls use the shared channel names", () => {
 
   const bodyOf = (init?: RequestInit) => JSON.parse(String(init?.body ?? "null"));
 
+  it("delegateResume → the shared IPC channel, returning the box's answer untouched", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ ok: false, error: "full", retriable: true }));
+    const res = await httpApi.delegateResume("job1");
+    expect(res).toEqual({ ok: false, error: "full", retriable: true });
+    expect(fetchMock.mock.calls[0][0]).toContain(`/rpc/${encodeURIComponent(IPC.delegateResume)}`);
+    expect(IPC.delegateResume).toBe("delegate:resume");
+  });
+
   it("delegateOpenSession → the shared IPC channel, returning the box's answer untouched", async () => {
     const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ ok: true, tmuxSession: "proj", windowIndex: 4 }));
     const res = await httpApi.delegateOpenSession({ jobId: "job1" });
@@ -894,11 +902,16 @@ describe("httpApi agent-screens channels", () => {
     },
     { name: "agentsQuestionDismiss", call: () => httpApi.agentsQuestionDismiss({ id: "tq_1" }), channel: "agents:question-dismiss", args: [{ id: "tq_1" }] },
     { name: "agentsNeedsYou", call: () => httpApi.agentsNeedsYou(), channel: "agents:needs-you", args: [] },
+    { name: "agentsTasks", call: () => httpApi.agentsTasks(), channel: "agents:tasks", args: [] },
     { name: "agentsReviewDone", call: () => httpApi.agentsReviewDone({ jobId: "j1" }), channel: "agents:review-done", args: [{ jobId: "j1" }] },
     { name: "agentsFleet", call: () => httpApi.agentsFleet(), channel: "agents:fleet", args: [] },
     { name: "agentsFleetSeen", call: () => httpApi.agentsFleetSeen(), channel: "agents:fleet-seen", args: [] },
     { name: "agentsProfile", call: () => httpApi.agentsProfile({ slug: "seo" }), channel: "agents:profile", args: [{ slug: "seo" }] },
     { name: "agentsHistory", call: () => httpApi.agentsHistory({ slug: "seo" }), channel: "agents:history", args: [{ slug: "seo" }] },
+    { name: "agentsSettingsSet", call: () => httpApi.agentsSettingsSet({ slug: "seo", field: "name", value: "SEO" }), channel: "agents:settings-set", args: [{ slug: "seo", field: "name", value: "SEO" }] },
+    { name: "agentsClearChat", call: () => httpApi.agentsClearChat({ slug: "seo" }), channel: "agents:clear-chat", args: [{ slug: "seo" }] },
+    { name: "agentsApprovedModels", call: () => httpApi.agentsApprovedModels(), channel: "agents:approved-models", args: [] },
+    { name: "agentsChats", call: () => httpApi.agentsChats(), channel: "agents:chats", args: [] },
     { name: "agentsChangeRestore", call: () => httpApi.agentsChangeRestore({ id: "ach_1" }), channel: "agents:change-restore", args: [{ id: "ach_1" }] },
     {
       name: "agentsSeatAdd",
@@ -921,6 +934,15 @@ describe("httpApi agent-screens channels", () => {
     { name: "agentsRefreshSet", call: () => httpApi.agentsRefreshSet({ slug: "seo", enabled: false }), channel: "agents:refresh-set", args: [{ slug: "seo", enabled: false }] },
     { name: "agentsTaskResearch", call: () => httpApi.agentsTaskResearch({ jobId: "j1" }), channel: "agents:task-research", args: [{ jobId: "j1" }] },
     { name: "agentsProjects", call: () => httpApi.agentsProjects(), channel: "agents:projects", args: [] },
+    { name: "agentsTrial", call: () => httpApi.agentsTrial({ id: "tr_1" }), channel: "agents:trial", args: [{ id: "tr_1" }] },
+    {
+      name: "agentsTrialTranscript",
+      call: () => httpApi.agentsTrialTranscript({ id: "tr_1", case: "main", offset: 20000 }),
+      channel: "agents:trial-transcript",
+      args: [{ id: "tr_1", case: "main", offset: 20000 }],
+    },
+    { name: "agentsChangeFile", call: () => httpApi.agentsChangeFile({ id: "ach_1", path: "skills/a/run.sh" }), channel: "agents:change-file", args: [{ id: "ach_1", path: "skills/a/run.sh" }] },
+    { name: "agentsLearnedUndo", call: () => httpApi.agentsLearnedUndo({ slug: "seo", id: "lr_00000001" }), channel: "agents:learned-undo", args: [{ slug: "seo", id: "lr_00000001" }] },
   ];
 
   channelTable(calls, (c) => ({ marker: c.name }), "Already sending your answer");

@@ -101,10 +101,10 @@ missing around it:
 
 ## From the Architect quick round (PDF reading, GitHub skill search, 2026-11-24)
 
-- **Existing boxes keep their old Architect.** `installBuiltIns` never overwrites an existing folder, so a box's
-  `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) does not get the new instructions by itself.
-  Phase 5B's built-in update feature should compare the shipped template with the installed one (and keep the user's
-  edits). Until then the files are copied by hand.
+- **Existing boxes keep their old Architect.** *(Resolved by Architect v2 Stage 0, 2026-11-27: `upgradeBuiltIns()` runs at
+  boot, merges the shipped template into the box's folder and records each upgrade as a change.)* `installBuiltIns` never
+  overwrites an existing folder, so a box's `~/.manta/agents/architect` (agent.md and `skills/research/SKILL.md`) did not
+  get new instructions by itself.
 - **PDF text is raw pdf.js text.** Two-column papers can interleave columns, hyphenated line breaks split words, and
   tables flatten. A quote that spans a column or hyphen break won't match; the model has to quote a single-column span.
   Possible later: join hyphenated line endings before storing.
@@ -376,10 +376,127 @@ Spec `docs/superpowers/specs/2026-11-26-agents-screens.md` §2.1, §2.2, §2.4. 
 - **Seat briefs are shown whole.** A 4000-character brief makes a tall row; clamp with "Show more" if that turns out to matter.
 
 
+## From Architect v2 PR A (template upgrades, bundle snapshots, problem + trials, 2026-11-27)
+
+- **The trial's progress line.** The spec has the trials module report "Trial running · case 2 of 3" through the Architect job's
+  `jobProgress` label; PR A only records the cases (`agents:trial`). The label belongs with the renderer's progress line (PR B).
+- **The profile's trials list.** `AgentProfile.trials` (the Tests tab) is not part of `agents:profile` yet; PR B adds it from `agentTrials.list(slug)`.
+- **A VM sandbox for trials.** Trials have no shell (an agent that needs commands gets a partial test: what it couldn't run shows
+  as a refusal in the case record), because no ruleset can confine a shell on this box. Real command runs need a throwaway VM
+  (the Freestyle account is the candidate); until then the Tests tab's wording says "no shell".
+- **A trial's folders live in a private 0700 base in the OS temp folder, not under `~/.manta/agents/.trials/`.** The task
+  rulesets protect `~/.manta` by absolute path, which only holds for a session whose folder is outside it. Each case works in a
+  standalone `git clone --local --no-hardlinks` of the project's current HEAD (uncommitted files are not copied).
+- **Clean template upgrades apply automatically at every level** (with Undo); only a merge conflict waits for a click (spec §2).
+  If the lead / Architect should always wait for a click, say so.
+- **A pending template update that nobody clicks expires after 24 h** like any change; the next boot offers it again
+  (an expired record doesn't count for the dedupe).
+
+## From Architect v2 PR C (skills, 2026-11-27)
+
+- **"Upstream moved" only knows commits.** The refresh brief compares a copied skill's `provenance.ref` with the upstream repository's
+  HEAD (`git ls-remote`, 5 repositories at most, asked once a day) and only when `ref` is a 40-character commit. A tag or a branch
+  name can't be compared with where the upstream is now without a stored commit, so such a skill is never listed. The template
+  tells the Architect to give a commit; resolving a tag to its commit at proposal time (one more network read) would close this.
+  The weekly check-up's fact sheet (PR D) reads the same `skillUpdatesFor(slug)` (it asks the network within the 10 s budget); it is not
+  wired there yet. The refresh brief reads the cache the sweep warms once a day, so the first refresh after a restart may carry nothing.
+- **Upstream diffs.** The brief says the upstream moved, not what changed in the skill's files (spec §11: "upstream skill diffs
+  before an update").
+- **The `skills` source needs `npm` on the box's PATH the first time.** It runs `npm ci --ignore-scripts` from the committed lockfile
+  (`src/server/research/skillsCli/`) into `~/.manta/tools/skills`; with no npm, or no network, the source answers with a fixed
+  sentence (and doesn't try again for 10 minutes) and the Architect uses GitHub or the web. Moving the pin = regenerate the lockfile
+  (`npm install --package-lock-only --ignore-scripts` in that folder) and bump `SKILLS_CLI_VERSION`. The tool folder is not swept.
+- **Searches are recorded per task session in `~/.manta/research/<session>/searches.json`** (last 200, swept with the sources).
+  A `skillSearch` is checked against the searches of every round of the root task; extra (user-defined) sources record the query
+  but no refs, so a candidate can't be justified by an extra source's result alone (it can by `skills_installed` or a base search).
+- **The script review is a model reading text.** It catches clearly harmful scripts, not subtle ones; Undo removes the skill, not what a
+  script already did. A real sandbox run of copied scripts (a throwaway VM) would be the next step, with the trials' VM item.
+- **The review's model pair is fixed** (opus ↔ sonnet, spec §4.1): a box with neither approved gets a verdict of `error` and a click.
+- **A removed skill's origin isn't shown on its card** (the record keeps what was removed, not where it came from).
+- **Skills are plain text only.** A skill folder that holds a binary or a non-UTF-8 file can't be replaced or snapshotted through
+  a proposal (the bundle is text); the agent's other files are untouched.
+- **Native OpenCode skill scoping per agent** (spec §8, §11) stays a spike: the compiled index still lists an agent's skills.
+
+## From Architect v2 PR D (learning, the weekly check-up, 2026-11-27)
+
+- **Give agents their own git identity.** Agents commit with the box's `user.email`, so signal 5 can't tell the agent's commits from the
+  user's by author: the runner reads commits on a task's branch made after `job.endHead` whose author email is not one the task's own
+  commits (`baseSha..endHead`) carry (no merges, nothing reachable from the default branch, messages only); a commit the user makes from the
+  same identity as the agent's is not seen, and one from a third person with another identity is read as the user's. Giving worktree tasks a
+  dedicated identity (e.g. `agent@manta.invalid`) and reading only commits by the box user's own identity would make the signal exact.
+- **A rule that is learned again is not "reinforced".** The spec's cap archives "the least recently reinforced" rule; a duplicate is dropped
+  without a write (a write per repeat would be a change record per repeat), so the oldest-learned rule is the one archived. If reinforcement
+  matters, keep a counter in the learned store (`~/.manta/agents/.learned/`).
+- **`agents:review-dismiss` ("Didn't need me") is not a signal yet:** the Fleet redesign that ships the control is out of scope. An undone or
+  turned-down change is read as context for the model (signal 4), and can't be quoted: only the user's words (messages, answers) and the
+  user's commits can be, so an undo alone never produces a rule.
+- **Unmerged branches of tasks the USER started still show in Needs you** ("Branch ready to merge", the P1 rule of the screens spec). PR D
+  puts every finished branch that waited more than a day (Manta-handed ones too) in the check-up's fact sheet and its report; removing the
+  user-started ones from Needs you belongs to the Fleet / Needs-you redesign.
+- **Learned records are change records with their own cap** (200 learned records beside the 200 others, evicted oldest first after
+  discarded / undone ones): a chatty learner never pushes Architect changes out of the history. Evicting an applied learned record only loses
+  its card's Undo; the rule stays and the Learned tab's Undo still works.
+- **The independent checks cost model calls outside the background budget.** The learned-rule check (one per candidate that passes the facts)
+  and the routine change review (one per routine update) run as tool-less sessions like the script review, not through the shared background
+  budget; a box with no model for them stores no rule / holds the routine change for a click. Booking them on the budget is a follow-up.
+- **The risky-token gate is lexical.** It catches a rule that names a site, address, path, package or command its quote doesn't; a rule that
+  paraphrases a smuggled instruction in plain words is left to the independent rule check.
+- **A learned write at Ask waits as a card and is planned again at the click** (other rules may have landed since); one that became a duplicate
+  is discarded with "That preference is already learned". Its 24 h expiry is the change store's.
+- **The check-up covers specialists only** (the lead and the Architect have no refresh routine either). The Architect's own facts (its learned
+  rules) reach it as its own `_all` block; a check-up of the Architect itself would always wait for a click ("core").
+- **Fact-sheet sources are read one by one:** a source that fails (the skills upstream not answering within its 10 s budget, the library) leaves
+  its numbers out of the sheet and the rest stand; nothing says so in the sheet. `brokenReferences` looks at agent.md and the `.md` / `.txt` files of
+  its skills, for `@slug` mentions and paths under `/home`, `/Users`, `/opt`, `/var`, `/etc`, `/srv`, `/usr`, `/root`, `/mnt` or `~/`.
+- **The check-up routine is made once the Architect exists and never again** (`.fleet.json` `checkup`, a tombstone): a box that deleted it on the
+  Routines page keeps it deleted. There is no way to bring it back short of removing the `checkup` key from `.fleet.json`; a profile-level switch doesn't fit (it belongs to the team, not an agent), so a control on the Fleet page would be the place.
+- **The learner's own state** (`~/.manta/agent-learning.json`: which tasks wait, which signals were read) is kept 30 days per task; the model
+  call is the `agent-learning` task class (nano band, batch work of the shared background budget).
+
 ## Parallel work by the same agent
 
-- **Dispatch the same agent several times in parallel.** Today a chat runs at most one code-editing task of a teammate at a
-  time, so independent pieces (e.g. a server PR and a renderer PR of the same spec) queue behind each other and the lead
-  falls back to generic background jobs. Allow several concurrent tasks of the same agent when they own disjoint files /
-  branches (each already gets its own worktree), with a per-chat cap, and show them as separate task cards. Asked by the
-  user on 2026-11-27.
+- **Done 2026-11-28: dispatching the same agent several times in parallel.** The one-code-editing-task-per-chat rule and the
+  three-handoffs-per-request cap are gone (asked by the user on 2026-11-27 and 2026-11-28). Each code task already gets its own
+  worktree and branch, so several run at once, also several of one agent; each is its own task card. Only the box-wide
+  running-jobs cap (`MAX_RUNNING_JOBS`) still bounds them, to protect the box's memory. Open question left for later: two tasks
+  of one agent that edit the same files will conflict when their branches merge; the lead's brief should split work by files.
+
+## Fleet statuses that need reliable tracking first
+
+Left out of the Fleet redesign (v8) until the box can track them deterministically (user's call, 2026-11-28):
+- **"Stuck"** (no progress for N minutes). Liveness is in memory only (`jobLiveness.mjs`): a restart resets it and the sweep fails open until rebuilt, and coverage differs by task type. Needs persisted last-progress per task, for every task type.
+- **"Taking much longer than usual"**: needs a durable per-agent duration history with enough runs.
+- **"Having trouble / retrying"**: needs a recorded retry/refusal signal per task.
+- **"Paused: usage limit reached · resumes automatically"**: usage limits only refuse new background work today; running tasks aren't paused or auto-resumed. Needs a real pause-and-resume on limits first.
+
+## Fleet: iterate on "Ended today"
+
+- The user isn't sure yet how the Ended today section should work (what it lists, for how long, what each row offers). The v9 mockup keeps a simple version (outcome badge, title, agent · project · when, one outcome sentence, Open session); revisit it in a dedicated design round before or after it ships (user, 2026-11-28).
+
+## From the Fleet and Needs you redesign (2026-11-28)
+
+Spec `docs/superpowers/specs/2026-11-28-fleet-redesign.md`; differences from the mockup in `docs/screens/fleet/conformance.md`.
+- **Decisions that ended a task have no option list.** A finished task that needs a decision shows its result card and Done. The mockup's
+  options-and-Submit form needs a way to send the answer back to the finished task without going through the lead's chat.
+- **"Should have asked me" and "Earlier days"** are not built: the first needs a learning signal (`agents:review-dismiss` was never built),
+  the second a read of earlier days' ended tasks (the jobs store keeps 7 days / 50 records).
+- **Old reads still on the box:** `agents:fleet-seen`, the recap lines and the grid fields of `agents:fleet` are no longer used by the Fleet
+  page (the profile still reads `agents:fleet` for each seat's current task). Remove them once the profile has its own per-seat read.
+- **A merge is still not an event** for the "Its changes are in the project" sentence: it follows the 30 s branch-check cache.
+- **Checklist step times** in Details need durations in the progress view.
+- **Container-query layout was verified in a browser only through the demo state** (Chromium via a dev server, three widths, light and dark); the
+  pixel baselines still need regenerating (`npm run visual:update`).
+
+## From the agent profile redesign (profile v5)
+
+Decided 2026-11-28 with the user; each is its own piece of work. Spec of what shipped: `docs/superpowers/specs/2026-11-28-agent-profile-redesign.md`.
+
+1. **The agent starting tasks in a project from its own chat.** Spec: `docs/superpowers/specs/2026-11-28-agent-chat-tasks.md`. This will be its own feature next. It needs two new tools for the agent — "list my projects" (its seats, with names and a one-line description, so it can match what the user said) and "start a task in project X" (the delegate path with a project argument; naming a project it has no seat in adds one, as today) — and loading that project's notes into its context once it picks one, and only that project's, so one project's memory never leaks into another. An ambiguous request asks with the ordinary question card (`question.asked`: the Team dot turns red, Needs you shows it). Until then the agent's own chat answers and plans, and work still goes through Manta; **task cards from the agent's chat are not built** (the v5 mockup sketches them, with a project chip and the branch).
+2. **Choosing the refresh day.** Each agent's refresh runs on a fixed day of the month (`refreshDay(slug)`), shown read-only in Settings. Letting the user pick it needs the routine's cron to be editable from the profile.
+3. **A learning setting per agent.** Learning has one team-wide setting (Settings → Sessions, "learn a preference"), shown read-only in each profile's Settings tab with a link. A per-agent level needs the autonomy policy to carry per-agent overrides.
+4. **Renaming the @handle.** The handle is the agent's folder name, its seats, its history and its mentions (`@dev` in old chats would stop working), so it is read-only for now. A rename has to move the folder, re-point seats, the stored chat, the refresh routine and the learned rules, and decide what an old mention does.
+
+Noted while building it:
+- **Auto-handoff can still move an agent's conversation to a successor session** (the engine knows nothing about agent chats), after which the stored chat record points at the old session. The profile hides the Hand off button; the engine should skip agent conversations the way it skips routine runs (a `manta.agentChat` marker on the session, set by `openChat` / `clearChat`).
+- **An isolation raise from Settings waits for a click in Needs you** (the change flow's rule for every caller). The user's own save could count as that click; today it does not, on purpose, because the raise gives an agent the power to edit files.
+- **An undone Settings change leaves History** (only applied changes are listed), so the reversal itself is not visible there.

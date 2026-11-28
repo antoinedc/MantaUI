@@ -14,7 +14,7 @@ import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat, mkdir, rm, readdir } from "node:fs/promises";
-import { createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname, normalize, basename } from "node:path";
 import { homedir, hostname } from "node:os";
@@ -45,6 +45,7 @@ import {
 } from "../shared/optimizerPolicy.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import * as tmux from "./tmux.mjs";
+import { gitRun } from "./gitExec.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
@@ -174,6 +175,7 @@ import {
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
 import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, completionOwnerOf as delegateCompletionOwnerOf, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
+import { buildTitleInstruction, displayTitle } from "./jobTitle.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -199,7 +201,9 @@ import {
   startCleanupPoller as startWidgetCleanupPoller,
 } from "./widgets.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
-import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
+import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace, summarizeTranscript } from "./peers.mjs";
+import { createSessionLines } from "./sessionLine.mjs";
+import { createFleetHint } from "./fleetHints.mjs";
 import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped, removeStopped } from "./stoppedStore.mjs";
 import { createStoppedReconciler } from "./stoppedReconcile.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
@@ -257,11 +261,16 @@ import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
+import { createAgentTrials, TRIAL_PROGRESS_PREFIX, trialScratchRoot } from "./agentTrials.mjs";
+import { createAgentLearning, createLearningStore, createUserCommitReader } from "./agentLearning.mjs";
+import { checkLearnedRule } from "./agentScriptReview.mjs";
+import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
+import { createSecretScanner } from "./knowledge/secretScan.mjs";
 import { createTaskQuestions } from "./taskQuestions.mjs";
 import { createResearchEngine } from "./research.mjs";
 import { createResearchLibrary } from "./researchLibrary.mjs";
 import { effectivePolicy } from "./autonomy.mjs";
-import { createProjectActions, knowledgeSeam } from "./projectActions.mjs";
+import { createProjectActions, knowledgeSeam, projectPatterns as buildProjectPatterns } from "./projectActions.mjs";
 import { parseMainWorktree } from "./knowledge/identity.mjs";
 import {
   ensureMantaPlanAgent,
@@ -312,6 +321,7 @@ import {
   ensureAuth,
   createAuthEngine,
   isLocalDirectRequest,
+  pairMintRefusal,
   parseBearer,
   authorizationForRequest,
   AUTH_RL_CAPACITY,
@@ -864,7 +874,7 @@ const routinesEngine = createRoutinesEngine({
   local: {
     gitAddWorktree: (a) => local.gitAddWorktree(a),
     gitRemoveWorktree: (a) => local.gitRemoveWorktree(a),
-    git: (args) => tmux.run("git", args),
+    git: (args) => gitRun(args),
   },
   push,
   // Agents Phase 2: a routine can run as an agent. The agents engine is created further down, so it is read at call time
@@ -1412,6 +1422,8 @@ let workOutcomeSink = null;
 // Agents Phase 5A: an Architect job reached a final state (finished, failed, stopped) — its held proposals are released.
 // Assigned once the agents engine exists (it is built much further down); until then a no-op.
 let architectJobEndedSink = null;
+let agentLearningSink = null; // set once the agents engine exists (Architect v2 §5.1)
+let architectJobPausedSink = null;
 // Agents Phase 3 (src/server/autonomy.mjs): the user's CURRENT autonomy policy, read strictly from `~/.manta/config.json`
 // (throws when the file can't be read or parsed, so the caller refuses instead of guessing). Shared by the delegate
 // engine (a specialist's task: start / continue / resume) and the agents engine (lead brief, handoff, dispatch).
@@ -1423,7 +1435,7 @@ const projectActions = createProjectActions({
   ...knowledgeSeam(() => knowledgeEngine),
   gitMainWorktree: async (dir) => {
     try {
-      return parseMainWorktree((await tmux.run("git", ["-C", dir, "worktree", "list", "--porcelain"]))?.stdout);
+      return parseMainWorktree((await gitRun(["-C", dir, "worktree", "list", "--porcelain"]))?.stdout);
     } catch {
       return null;
     }
@@ -1432,7 +1444,11 @@ const projectActions = createProjectActions({
 const delegateEngine = createDelegateEngine({
   autonomyPolicy,
   projectActions,
-  publish: (evt) => bus.publish(evt),
+  // a task started, paused, resumed or stopped is also a hint for the Fleet page (the client debounces its refetch)
+  publish: (evt) => {
+    bus.publish(evt);
+    if (evt?.kind === "delegate.updated") bus.publish({ kind: "agentFleet", payload: {} });
+  },
   deliver: (args) => promptDelivery.deliver(args),
   listProjects: () => tmux.listProjects(),
   newWindow: (input) => tmux.newWindow(input),
@@ -1443,11 +1459,17 @@ const delegateEngine = createDelegateEngine({
   onJobEnded: async (job) => {
     return architectJobEndedSink ? await architectJobEndedSink(job) : undefined;
   },
+  // a PAUSED Architect round stops its trial runs like an ended one (they would otherwise run on, unwatched, up to 15 minutes)
+  onJobPaused: async (job) => {
+    if (architectJobPausedSink) await architectJobPausedSink(job);
+  },
   // Agent screens §5.4: the one hook every Manta-owned task that ended (finished, failed, stopped) goes through, after its proposals
   // were released — it settles a refresh routine's run, and tells the Fleet page something changed.
   afterJobEnded: async (job) => {
     bus.publish({ kind: "agentFleet", payload: {} });
     await routinesEngine.settleFromJob(job);
+    // Architect v2 §5.1: a finished agent task is read for the user's corrections 30 minutes from now (never blocks, never throws)
+    if (agentLearningSink) await Promise.resolve(agentLearningSink(job)).catch((e) => console.warn("[agent-learning] noting a finished task failed:", e?.message ?? e));
   },
   // BET-1377: stamp the job's window owner as "job" (see tmux.stampOwner).
   stampOwner: (sessionName, windowIndex, owner) =>
@@ -1457,8 +1479,15 @@ const delegateEngine = createDelegateEngine({
   rebaseHolder: (s, i, dir) => tmux.rebaseHolder(s, i, dir),
   gitAddWorktree: (input) => local.gitAddWorktree(input),
   gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
-  gitRun: (args) => tmux.run("git", args),
+  gitRun: (args, opts) => gitRun(args, opts),
   listMessages: (sid) => oc.listMessages(sid),
+  // The plain-language title of a new task, written once when it starts (the same one-shot, on the same writer, as auto-rename): the
+  // Summary model, else the asking conversation's own. "" on any failure — the first sentence of the request stays.
+  generateTitle: async ({ text, sessionID }) => {
+    const writer = await summaryModel.resolveCheapWriter(sessionID);
+    if (!writer) return "";
+    return oc.generateText({ instruction: buildTitleInstruction(text), model: { providerID: writer.providerID, modelID: writer.modelID } });
+  },
   listModels: (overrides) => oc.listModels(overrides),
   // BET-1220: routing inputs for the subagent model decision in startJob.
   // configGet supplies the modelRouting policy (absent on a conversation that
@@ -1630,6 +1659,9 @@ sessionStatusRef.current = sessionStatus;
 const sessionLinkAction = createSessionLinkActions({ store: sessionLinks, readSession: (sid) => oc.readSession(sid), sessionStatus });
 push.setSessionProjectsReader(() => syncState.snapshot().projects ?? []);
 bus.subscribe((evt) => sessionStatus.observe(evt));
+// a session starting or stopping work, or a progress report, changes the Fleet page without any job event: one throttled hint
+const fleetHint = createFleetHint({ publish: () => bus.publish({ kind: "agentFleet", payload: {} }) });
+bus.subscribe((evt) => fleetHint.observe(evt));
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one
 // result; a `paused` one is upgraded in place so it can still be resumed. A healthy
@@ -1991,7 +2023,7 @@ if (!authEnforced) {
 }
 
 // Now that authEngine exists, wire the /rpc dispatch — the `auth:pair` channel
-// needs authEngine.pair() (GET /auth/pair is loopback-only, so the renderer can
+// needs authEngine.pair() (POST /auth/pair is loopback-only, so the renderer can
 // only reach it through this in-process call, not as an HTTP round-trip).
 //
 // `serverVersion` is the SAME value `GET /api/version` returns — read once at
@@ -2246,8 +2278,7 @@ const knowledgeEngine = createKnowledgeEngine({
       resolveModelForClass,
       configGet: () => local.configGet(),
       oc: { listMessages: forwardKnowledgeListMessages(oc), listMessagesSince: oc.listMessagesSince, createSession: oc.createSession, sendPrompt: oc.sendPrompt, abortSession: oc.abortSession, deleteSessionRaw: oc.deleteSessionRaw },
-      local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
-      runDbTask: knowledgeRunDbTask,
+          runDbTask: knowledgeRunDbTask,
       listTmuxProjects: () => tmux.listProjects(),
       isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
       getSession: async (sessionID) => {
@@ -2632,7 +2663,52 @@ const researchLibrary = createResearchLibrary({
   bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
   getSource: (child, id) => researchEngine.getSource(child, id),
 });
+// Architect v2 Stage 1 (src/server/agentTrials.mjs): the Architect's trial runs of a drafted agent. Headless internal sessions
+// in a throwaway copy of a project; the agents engine (built just below) plans each draft and checks the verdicts, read at call time.
+const trialScanner = createSecretScanner();
+const agentTrials = createAgentTrials({
+  root: statePath("agents"),
+  home: homedir(),
+  // test copies go to MANTA_TRIAL_DIR, else config `trialDir`, else the OS temp folder (read once, at start)
+  scratchRoot: trialScratchRoot({ env: process.env, config: await local.configGet() }),
+  agents: () => agentsEngine,
+  oc,
+  local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
+  gitRun: (args, opts) => gitRun(args, opts),
+  editConfig: (edits) => editOpencodeConfig(edits),
+  // the shared background budget is told what each case really cost, never asked: a trial is part of the task the user asked for,
+  // so the background level (even "off") must not refuse it
+  budget: { book: (a) => backgroundBudget.record(a) },
+  policy: autonomyPolicy,
+  // the most recently used checkout of a project that still exists on this box (the knowledge layer's own record of them)
+  projectDirectory: async (slug) => {
+    const db = knowledgeEngine.state?.db;
+    if (!db) return null;
+    for (const r of db.prepare("SELECT directory FROM session_project WHERE slug = ? AND directory IS NOT NULL GROUP BY directory ORDER BY MAX(pinned_at) DESC LIMIT 10").all(slug)) {
+      try {
+        if (statSync(r.directory).isDirectory()) return r.directory;
+      } catch {
+        /* gone */
+      }
+    }
+    return null;
+  },
+  // the project that owns a folder (the Architect task's own project, which a case may run in)
+  projectOf: async (directory) => (await knowledgeEngine.registry?.identify?.(directory))?.slug ?? null,
+  // the project's own "Actions in this project" commands, read like a specialist task's; unreadable → throws, the case fails
+  projectPatterns: async (directory) => {
+    const found = await projectActions.forTask({ directory });
+    const patterns = buildProjectPatterns(Array.isArray(found?.entries) ? found.entries : []);
+    if (patterns.error) throw new Error(patterns.error);
+    return patterns;
+  },
+  scanSymlinks: scanTrialSymlinks,
+  redact: (text) => trialScanner.redact(text),
+  // "Trial running · case 2 of 3" on the Architect's task card while a case runs; cleared when the trial ends
+  progress: (jobId, label) => delegateEngine.setJobLabel(jobId, label, { clearPrefix: TRIAL_PROGRESS_PREFIX }),
+});
 const agentsEngine = createAgentsEngine({
+  trials: agentTrials,
   research: researchEngine,
   library: researchLibrary, // the Architect's fit check is checked against the entries it names
   editConfig: (edits) => editOpencodeConfig(edits),
@@ -2657,6 +2733,17 @@ const agentsEngine = createAgentsEngine({
     return Number(db.prepare("SELECT COUNT(*) AS n FROM page_meta WHERE area = 'project' AND slug = ?").get(slug)?.n ?? 0);
   },
   onFleetChanged: () => bus.publish({ kind: "agentFleet", payload: {} }),
+  // Fleet rows are working sessions (spec 2026-11-28-fleet-redesign §5b): the box's session tree and each session's status ...
+  fleetSessions: () => {
+    const statuses = sessionStatus.windowStatusMap();
+    return { projects: syncState.snapshot().projects ?? [], statusOf: (sid) => statuses[sid] ?? {} };
+  },
+  // ... and the one line each row shows: the session's latest progress report, else its in-progress to-do, else its last short assistant line
+  sessionLines: createSessionLines({
+    readReports: () => listProgress(),
+    todosOf: (sid) => streamInterp.getState(sid)?.todos ?? null,
+    lastAssistantOf: async (sid) => summarizeTranscript(await oc.listMessages(sid, { limit: 6 })).lastAssistant ?? "",
+  }),
   delegateView,
   isCtoSession: (sid) => ctoConversation.isConversationSession(sid),
   // Phase 2 (the lead): "is this chat led?" must never read an unreadable store as "no" — both readers THROW instead
@@ -2688,9 +2775,47 @@ const agentsEngine = createAgentsEngine({
 });
 void agentsEngine.init().catch((e) => console.error("[agents] boot install/sync failed:", e?.message ?? e));
 architectJobEndedSink = async (job) => {
+  // the round is over (finished, failed or stopped): its trial cases that are still queued or running are aborted and cleaned up
+  await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the end of a round failed:", e?.message ?? e));
   await agentsEngine.reconcile(); // release first: the Outcome lines describe the records as released
-  return { outcome: await agentsEngine.outcomeLinesForJob(job.id) };
+  return { outcome: await agentsEngine.outcomeLinesForJob(job) };
 };
+architectJobPausedSink = async (job) => {
+  await agentTrials.abortForJob(job.id).catch((e) => console.warn("[agent-trials] abort at the pause of a round failed:", e?.message ?? e));
+};
+// Architect v2 Stage 3 (src/server/agentLearning.mjs): what a finished agent task taught the agent. Each ended task is read 30 minutes later
+// (the user's messages in it, their next message in the chat, their answers, what they undid, what they committed), by ONE cheap model call
+// of the shared background budget; the facts are checked and every rule is a change record. Nothing here ever asks the user anything.
+const agentLearning = createAgentLearning({
+  agents: agentsEngine,
+  canLearn: async (slug) => (await agentsEngine.scan()).entries.some((e) => e.slug === slug && !e.info.error && e.info.role !== "lead"),
+  agentName: async (slug) => (await agentsEngine.scan()).entries.find((e) => e.slug === slug)?.info.name || slug,
+  listJobs: () => delegateEngine.loadRecordsStrict(),
+  listMessages: (sid, opts) => oc.listMessages(sid, opts),
+  isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
+  questionsOf: (root) => agentsEngine.questionsForRoot(root),
+  changesOf: (root) => agentsEngine.changesForRoot(root),
+  userCommits: createUserCommitReader({ gitRun: (args) => gitRun(args) }),
+  // the same lookup the engine uses to give a task its project's rules (security review L3)
+  projectOf: (directory) => agentsEngine.learnedProjectOf(directory),
+  ask: async (prompt) => {
+    const r = await knowledgeRunner({ taskClass: "agent-learning", context: [{ priority: 10, text: prompt }], directory: "~" });
+    const model = typeof r?.model === "string" ? r.model : r?.model?.providerID && r?.model?.modelID ? `${r.model.providerID}/${r.model.modelID}` : null;
+    return r && r.ok !== false ? { ok: true, text: String(r.text ?? ""), model } : { ok: false, code: String(r?.code ?? "run-failed") };
+  },
+  // every rule is checked by another model, with no tools, against the user's words alone; anything but "clean" stores nothing
+  checkRule: ({ quote, rule, learnerModel }) => checkLearnedRule({ run: oc.runSynchronousSession, directory: homedir(), learnerModel, quote, rule }),
+  redact: async (text) => {
+    const r = await trialScanner.redact(String(text ?? ""));
+    return r.unavailable ? null : r.text;
+  },
+  store: createLearningStore({ path: statePath("agent-learning.json") }),
+});
+agentLearningSink = (job) => agentLearning.noteEnded(job);
+startPoller(() => agentLearning.runDue(), { intervalMs: 60_000, label: "agent-learning", immediate: false });
+// leftovers of a crashed trial (a session, a copy of a project, a block) are cleaned at boot; results are kept 30 days
+void agentTrials.recover().catch((e) => console.error("[agent-trials] boot cleanup failed:", e?.message ?? e));
+startPoller(() => agentTrials.sweep(), { intervalMs: 60 * 60_000, label: "agent-trials-sweep", immediate: false });
 // held proposals whose round ended while nobody was looking (a stop, a crash, a restart) are released every minute; the
 // research store drops what is older than 30 days or over its cap every five
 startPoller(() => agentsEngine.reconcile(), { intervalMs: 60_000, label: "agents-reconcile", immediate: false });
@@ -4132,7 +4257,8 @@ function observeLifecycleEvent(evt, raw) {
       getConfig: () => local.configGet(),
       reply: (a) => oc.replyPermission(a),
       // A background job cannot wait on a person: an ask in one of its sessions is rejected before trust mode sees it.
-      ownsSession: (sid) => delegateEngine.ownsSession(sid),
+      // (a trial run of a drafted agent has no user either: the ask is rejected and the refusal shows in its record)
+      ownsSession: (sid) => delegateEngine.ownsSession(sid) || agentTrials.ownsSession(sid),
       onRejectFailed: (a) => delegateEngine.queueRejection(a),
       interpret: () => interpretEvent(raw),
       publish: () => bus.publish({ kind: "opencode", payload: raw }),
@@ -4158,7 +4284,7 @@ const statusReconciler = createStatusReconciler({
   listQuestions: (sid, o) => oc.listQuestions(sid, o),
   interp: streamInterp,
   autoAllow: async () => !!(await local.configGet())?.chatAutoAllow,
-  ownsSession: (sid) => delegateEngine.ownsSession(sid),
+  ownsSession: (sid) => delegateEngine.ownsSession(sid) || agentTrials.ownsSession(sid),
   isAutoAnswered: (id) => autoAnsweredAsks.has(id),
   log: (...a) => console.log(...a),
   warn: (...a) => console.warn(...a),
@@ -4209,6 +4335,11 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   // A background job cannot wait on a person (spec 2026-11-14 A5): a question form raised in one of its sessions is
   // never interpreted, published or pushed. A specialist's task asking in its own session has it captured as the decision
   // (the task ends "needs a decision", spec 2026-11-24-ask-user-tool.md); any other is rejected. (The model learns why from its opening prompt.)
+  // A trial run of a drafted agent has no user: its question is recorded and answered by the server, never shown or pushed.
+  if (raw?.type === "form.created" && isQuestionForm(raw.data?.form) && agentTrials.ownsSession(raw.data.form.sessionID)) {
+    void agentTrials.handleQuestion(raw.data.form).catch((e) => console.warn("[agent-trials] handling a test run's question failed:", e?.message ?? e));
+    return;
+  }
   if (raw?.type === "form.created" && isQuestionForm(raw.data?.form) && delegateEngine.ownsSession(raw.data.form.sessionID)) {
     void delegateEngine
       .handleQuestion(raw.data.form)
@@ -4227,6 +4358,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   routinesEngine.observeRaw(raw).catch((e) => console.warn("[routines] observeRaw failed:", e?.message ?? e));
   // Shared knowledge: pins a session to its project at its first prompt; a subagent child inherits its parent's.
   knowledgeEngine.observeRaw(raw);
+  // Architect trials: how a test run's session ended
+  agentTrials.observeRaw(raw);
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
     if (evt.type === "session.idle" && evt.properties?.sessionID) {
@@ -4553,13 +4686,18 @@ const handleRequest = async (req, res) => {
   // token in an Authorization header, never a cookie.
   res.setHeader("Access-Control-Allow-Headers", "*, Authorization");
   res.setHeader("Access-Control-Max-Age", "600");
+  // Minting a pairing code is never a cross-origin request: no CORS grant on this route, so a page can't pass the preflight
+  // that its custom header would need (and the response is never readable by a page).
+  if (path === "/auth/pair") {
+    for (const h of ["Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers", "Access-Control-Max-Age"]) res.removeHeader(h);
+  }
   if (req.method === "OPTIONS") {
     res.writeHead(204).end();
     return;
   }
 
   // ---------- Auth pairing handshake (UNAUTHENTICATED, rate-limited) ----------
-  // GET    /auth/pair            → {pairing_code, box_id, expiresAt}
+  // POST   /auth/pair            → {pairing_code, box_id, expiresAt}   (header `X-Manta-Pair: 1`, no Origin; GET → 405)
   //                                Mint a one-time, ~5-min code. The desktop
   //                                shows it (and encodes box_id+code in a QR
   //                                for mobile).
@@ -4596,7 +4734,13 @@ const handleRequest = async (req, res) => {
       return;
     }
     try {
-      if (req.method === "GET" && path === "/auth/pair") {
+      if (path === "/auth/pair") {
+        const refusal = pairMintRefusal({ method: req.method, headers: req.headers });
+        if (refusal) {
+          if (refusal.allow) res.setHeader("Allow", refusal.allow);
+          respondJson(res, refusal.status, { error: refusal.error });
+          return;
+        }
         // Minting a code is LOCAL-ONLY (the `manta pair` CLI / SSH forward).
         // Remote-reachable minting would let anyone claim the box_token in two
         // requests. Loopback alone is insufficient — cloudflared proxies public
@@ -5084,6 +5228,38 @@ const handleRequest = async (req, res) => {
   // POST /api/research-library/{find,save}  the same shape (every specialist's task; src/server/researchLibrary.mjs)
   //                                         → {ok:true, ...} | {ok:false, error} (a refusal is HTTP 200: the tool relays the sentence)
   // Consumer is the `manta` plugin (class-2 errors: raw bodies). Engines: src/server/agents.mjs, src/server/research.mjs.
+  if (path === "/api/agents/trial" || path === "/api/agents/trial-wait" || path === "/api/agents/trial-read") {
+    // Architect v2 Stage 1: the trial tools (agent_trial / agent_trial_wait / agent_trial_read) — bound to the Architect's live call
+    // by the agents engine, same shape as agent_propose; a refusal is HTTP 200 {ok:false, error}. class-2 (BET-1460): the manta plugin.
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = (await readJsonBody(req)) ?? {};
+      const run = { "/api/agents/trial": agentTrials.create, "/api/agents/trial-wait": agentTrials.wait, "/api/agents/trial-read": agentTrials.read }[path];
+      respondJson(res, 200, await run(body));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (agent_trial* tools) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+  if (path === "/api/agents/skills-installed") {
+    // Architect v2 Stage 2: skills_installed — the skills on this box, bound to the Architect's live call; a refusal is HTTP 200 {ok:false, error}.
+    // class-2 (BET-1460): the manta plugin.
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      respondJson(res, 200, await agentsEngine.skillsInstalled((await readJsonBody(req)) ?? {}));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (skills_installed tool) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
   if (path === "/api/agents/propose" || path === "/api/research/fetch" || path === "/api/research/read" || path === "/api/research/search" || path === "/api/research-library/find" || path === "/api/research-library/save") {
     try {
       if (req.method !== "POST") {
@@ -6668,7 +6844,7 @@ const handleRequest = async (req, res) => {
           .map((j) => ({
             kind: "job",
             id: j.id,
-            name: j.name,
+            name: displayTitle(j),
             status: j.status,
             branch: j.branch ?? null,
             sessionID: j.childSessionID,

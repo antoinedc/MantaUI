@@ -1,0 +1,9 @@
+{
+  "name": "manta-skills-cli",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The pinned `skills` CLI the Architect's skills search runs (src/server/research/skillsCli.mjs). Installed with `npm ci --ignore-scripts` into ~/.manta/tools/skills; the lockfile pins every package by integrity hash.",
+  "dependencies": {
+    "skills": "1.9.1"
+  }
+}

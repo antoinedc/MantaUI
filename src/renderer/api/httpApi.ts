@@ -935,7 +935,7 @@ export const httpApi: Api = {
   authClaim: (input) => claimAgainst(input.serverUrl, input.code),
 
   // Mobile pairing code mint (BET-161): POST /rpc/auth:pair. Both desktop and
-  // mobile go through the same /rpc channel — GET /auth/pair is loopback-only
+  // mobile go through the same /rpc channel — POST /auth/pair is loopback-only
   // (cloudflared proxies public traffic from 127.0.0.1), so a remote renderer
   // can't reach it as HTTP. The /rpc handler calls authEngine.pair() in-process.
   // Returns { pairingCode, boxId, expiresAt } or { error }.
@@ -1353,6 +1353,7 @@ export const httpApi: Api = {
   // job through the existing delegate engine (own worktree + window + rail).
   delegateStart: (input) => rpc(IPC.delegateStart, input),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
+  delegateResume: (id) => rpc(IPC.delegateResume, id),
   // P6: focus (or re-create) a background job's chat window and say where it is.
   delegateOpenSession: (input) => rpc(IPC.delegateOpenSession, input),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
@@ -1361,6 +1362,10 @@ export const httpApi: Api = {
   agentsCreate: (input) => rpc(IPC.agentsCreate, input),
   agentsDispatch: (input) => rpc(IPC.agentsDispatch, input),
   agentsOpenChat: (input) => rpc(IPC.agentsOpenChat, input),
+  agentsSettingsSet: (input) => rpc(IPC.agentsSettingsSet, input),
+  agentsClearChat: (input) => rpc(IPC.agentsClearChat, input),
+  agentsChats: () => rpc(IPC.agentsChats),
+  agentsApprovedModels: () => rpc(IPC.agentsApprovedModels),
   agentsAutonomyGet: () => rpc(IPC.agentsAutonomyGet),
   agentsAutonomySet: (input) => rpc(IPC.agentsAutonomySet, input),
   // Agents Phase 4: Manta's proposed / applied agent changes (the chat card). A refusal is a thrown sentence.
@@ -1376,6 +1381,7 @@ export const httpApi: Api = {
   agentsQuestionAnswer: (input) => rpc("agents:question-answer", input),
   agentsQuestionDismiss: (input) => rpc("agents:question-dismiss", input),
   agentsNeedsYou: () => rpc("agents:needs-you"),
+  agentsTasks: () => rpc("agents:tasks"),
   agentsReviewDone: (input) => rpc("agents:review-done", input),
   agentsFleet: () => rpc("agents:fleet"),
   agentsFleetSeen: () => rpc("agents:fleet-seen"),
@@ -1388,6 +1394,10 @@ export const httpApi: Api = {
   agentsRefreshSet: (input) => rpc("agents:refresh-set", input),
   agentsTaskResearch: (input) => rpc("agents:task-research", input),
   agentsProjects: () => rpc("agents:projects"),
+  agentsTrial: (input) => rpc("agents:trial", input),
+  agentsTrialTranscript: (input) => rpc("agents:trial-transcript", input),
+  agentsChangeFile: (input) => rpc("agents:change-file", input),
+  agentsLearnedUndo: (input) => rpc("agents:learned-undo", input),
   // The box publishes `taskQuestion` ({id, parentSessionID, rootJobId, state}) and `agentFleet` ({}): hints, refetch.
   onTaskQuestion: (cb) => on<TaskQuestionEvent>("taskQuestion", cb),
   onAgentFleet: (cb) => on<unknown>("agentFleet", () => cb()),

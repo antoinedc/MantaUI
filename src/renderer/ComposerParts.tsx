@@ -734,10 +734,14 @@ export function TrustRow({
   setChatAutoAllow,
   trailing,
   status,
+  hideTrust = false,
 }: {
   planOn: boolean;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
+  /** An agent's conversation: what an agent may do is set by the user's autonomy settings, so there is no per-conversation bypass
+   *  (nor plan-mode claim) here — only the transient `status` line remains. */
+  hideTrust?: boolean;
   /** Another ambient control for the same line (the handoff mode), after the trust state. */
   trailing?: React.ReactNode;
   /** Transient key-hint text (busy send / voice), right-aligned. Lives here, not in
@@ -746,7 +750,7 @@ export function TrustRow({
 }) {
   return (
     <div className="pb-3 flex items-center gap-4 min-w-0">
-      {planOn ? (
+      {hideTrust ? null : planOn ? (
         <span className="shrink-0 whitespace-nowrap inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
           <Shield size={14} aria-hidden="true" />
           Plan mode — edits blocked

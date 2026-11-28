@@ -1,30 +1,28 @@
 // Pure logic of the agent screens' pages (agent screens spec §2.1, §2.2, §5.2).
 
 import { describe, expect, it } from "vitest";
-import type { AgentChange, AgentProfile, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
+import type { AgentChange, AgentProfile, FleetCell, NeedsYouReview } from "../../shared/types";
 import {
+  appliedHistory,
   canRestore,
+  historyHow,
+  type ProfileTab,
   cellView,
   currentSnapshot,
   errText,
-  detailRows,
   factsLine,
   firstLine,
-  historyCounts,
   historyStatus,
   historyWho,
   latestLiveId,
   isUnknownChannel,
   memoryLabel,
   nextTab,
-  planUsagePercent,
-  PROFILE_TABS,
+  profileTabs,
   researchHealth,
-  recapLead,
   reviewPart,
   seatFolder,
   seatNotesLabel,
-  weekPill,
 } from "./agentsView";
 
 const change = (over: Partial<AgentChange> = {}): AgentChange => ({
@@ -65,29 +63,6 @@ describe("isUnknownChannel / errText", () => {
   });
 });
 
-describe("planUsagePercent", () => {
-  const snap = (windows: Array<{ pct: number; active?: boolean }>): UsageSnapshot =>
-    ({ provider: "claude", providerIDs: [], fetchedAt: 1, windows: windows.map((w, i) => ({ kind: i ? "weekly" : "session", label: "x", ...w })) }) as UsageSnapshot;
-  it("is the highest percentage of the current windows, rounded", () => {
-    expect(planUsagePercent([snap([{ pct: 12.4 }, { pct: 37.6 }]), snap([{ pct: 20 }])])).toBe(38);
-  });
-  it("ignores windows the provider says are not in force, and says nothing when unknown", () => {
-    expect(planUsagePercent([snap([{ pct: 90, active: false }, { pct: 10 }])])).toBe(10);
-    expect(planUsagePercent([])).toBeNull();
-    expect(planUsagePercent([snap([])])).toBeNull();
-    expect(planUsagePercent(null)).toBeNull();
-  });
-});
-
-describe("weekPill", () => {
-  it("says the tasks and, when known, the plan usage; never a dollar amount", () => {
-    expect(weekPill(41, 38)).toBe("This week: 41 tasks · plan usage 38%");
-    expect(weekPill(1, null)).toBe("This week: 1 task");
-    expect(weekPill(0, null)).toBe("This week: 0 tasks");
-    expect(weekPill(5, 38)).not.toMatch(/\$/);
-  });
-});
-
 describe("cellView", () => {
   const cell = (over: Partial<FleetCell> = {}): FleetCell => ({ jobId: "j1", title: "Weekly audit", at: 1, state: "done", detail: "11 issues", ...over });
   it("no seat reads as a dash", () => {
@@ -120,21 +95,31 @@ describe("reviewPart", () => {
 });
 
 describe("tabs", () => {
-  it("lists Overview, Research, Seats, History", () => {
-    expect(PROFILE_TABS.map((t) => t.id)).toEqual(["overview", "research", "seats", "history"]);
+  const ids = (p: object) => profileTabs(p).map((t) => t.id);
+  it("lists Overview, Skills, Seats, Learned, History, Research, Settings — in that order", () => {
+    expect(ids({ learned: [] })).toEqual(["overview", "skills", "seats", "learned", "history", "research", "settings"]);
+  });
+  it("Learned only when the box sends the agent's rules (even none) and never for the lead; the Architect has no Seats", () => {
+    expect(ids({})).toEqual(["overview", "skills", "seats", "history", "research", "settings"]);
+    expect(ids({ learned: [], info: { role: "lead" } })).toEqual(["overview", "skills", "seats", "history", "research", "settings"]);
+    expect(ids({ learned: [], info: { role: "architect" } })).toEqual(["overview", "skills", "learned", "history", "research", "settings"]);
+    expect(ids({ info: { role: "specialist" } })).toEqual(["overview", "skills", "seats", "history", "research", "settings"]);
+  });
+  it("there is no Tests tab: the trial runs are part of History", () => {
+    expect(ids({ learned: [], trials: [{}] })).not.toContain("tests");
   });
   it("arrows move with wrap, Home and End jump, anything else is not a tab key", () => {
-    const ids = PROFILE_TABS.map((t) => t.id);
-    expect(nextTab("overview", "ArrowRight", ids)).toBe("research");
-    expect(nextTab("history", "ArrowRight", ids)).toBe("overview");
-    expect(nextTab("overview", "ArrowLeft", ids)).toBe("history");
-    expect(nextTab("seats", "Home", ids)).toBe("overview");
-    expect(nextTab("seats", "End", ids)).toBe("history");
-    expect(nextTab("seats", "Enter", ids)).toBeNull();
+    const all = ids({ learned: [] }) as ProfileTab[];
+    expect(nextTab("overview", "ArrowRight", all)).toBe("skills");
+    expect(nextTab("settings", "ArrowRight", all)).toBe("overview");
+    expect(nextTab("overview", "ArrowLeft", all)).toBe("settings");
+    expect(nextTab("seats", "Home", all)).toBe("overview");
+    expect(nextTab("seats", "End", all)).toBe("settings");
+    expect(nextTab("seats", "Enter", all)).toBeNull();
   });
 });
 
-describe("factsLine / detailRows / firstLine", () => {
+describe("factsLine / firstLine", () => {
   const profile = (over: Partial<AgentProfile> = {}): AgentProfile =>
     ({
       info: { slug: "seo", name: "SEO", description: "d", isolation: "none", model: "anthropic/sonnet", color: null, builtIn: false, role: "specialist", useWhen: null, notFor: null, notice: null },
@@ -145,35 +130,19 @@ describe("factsLine / detailRows / firstLine", () => {
       research: [],
       ...over,
     }) as AgentProfile;
-  it("the facts line is who it is: @slug, its role, its seats — nothing the description or the details pane says", () => {
-    expect(factsLine(profile())).toEqual(["@seo", "Specialist", "2 seats"]);
-    expect(factsLine(profile({ seats: [{} as never] }))[2]).toBe("1 seat");
-    expect(factsLine(profile({ seats: [] }))[2]).toBe("No seats yet");
+  it("the facts line is who it is and how it works: @slug, role, what it does to code, its model", () => {
+    expect(factsLine(profile())).toEqual(["@seo", "Specialist", "Read-only", "anthropic/sonnet"]);
+    const edits = profile();
+    edits.info = { ...edits.info, isolation: "worktree", model: null };
+    expect(factsLine(edits)).toEqual(["@seo", "Specialist", "Edits code", "Auto"]);
+  });
+  it("Manta and the Architect work in every project", () => {
     const lead = profile();
-    lead.info = { ...lead.info, slug: "manta", role: "lead" };
-    expect(factsLine(lead)).toEqual(["@manta", "Lead", "Works in every project"]);
+    lead.info = { ...lead.info, slug: "manta", role: "lead", isolation: "worktree" };
+    expect(factsLine(lead)).toEqual(["@manta", "Lead", "Edits code", "anthropic/sonnet", "Works in every project"]);
     const arch = profile();
     arch.info = { ...arch.info, slug: "architect", role: "architect" };
-    expect(factsLine(arch)).toEqual(["@architect", "Architect", "Works in every project"]);
-  });
-  it("the details pane rows: model, works, built by, changed", () => {
-    expect(detailRows(profile())).toEqual([
-      ["Model", "anthropic/sonnet"],
-      ["Works", "Read-only"],
-      ["Built by", "Architect"],
-      ["Changed", "12 Nov"],
-    ]);
-  });
-  it("Auto when no model, edits code for a worktree agent, built in / you / Manta, no Changed row when never changed", () => {
-    const p = profile({ lastChangedAt: null, builtBy: "built-in" });
-    p.info = { ...p.info, model: null, isolation: "worktree" };
-    expect(detailRows(p)).toEqual([
-      ["Model", "Auto"],
-      ["Works", "Edits code"],
-      ["Built by", "Built in"],
-    ]);
-    expect(detailRows(profile({ builtBy: "user" }))[2]).toEqual(["Built by", "You"]);
-    expect(detailRows(profile({ builtBy: "manta" }))[2]).toEqual(["Built by", "Manta"]);
+    expect(factsLine(arch).at(-1)).toBe("Works in every project");
   });
   it("firstLine takes the first non-empty line", () => {
     expect(firstLine("\n\n  Hello there  \nsecond")).toBe("Hello there");
@@ -184,8 +153,31 @@ describe("factsLine / detailRows / firstLine", () => {
 describe("history rows", () => {
   it("who: Manta for you (chat), Architect (job), You (restore)", () => {
     expect(historyWho(change({ origin: { kind: "chat" } }))).toBe("Manta · for you");
+    expect(historyWho(change({ origin: { kind: "learned" } }))).toBe("Manta · learned from you");
     expect(historyWho(change({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } }))).toBe("Architect");
     expect(historyWho(change({ origin: { kind: "restore", fromChangeId: "x" } }))).toBe("You");
+    expect(historyWho(change({ origin: { kind: "settings", field: "name" } }))).toBe("You · in Settings");
+  });
+  it("History lists only applied changes, newest first: pending, undone, refused and held ones never appear", () => {
+    const rows = [
+      change({ id: "old", state: "applied", decidedAt: 100 }),
+      change({ id: "p", state: "pending", decidedAt: null, createdAt: 900 }),
+      change({ id: "u", state: "undone", decidedAt: 400 }),
+      change({ id: "new", state: "applied", decidedAt: 300 }),
+      change({ id: "d", state: "discarded" }),
+      change({ id: "h", state: "held" }),
+      change({ id: "x", state: "expired" }),
+      change({ id: "c", state: "conflict" }),
+      change({ id: "f", state: "failed" }),
+    ];
+    expect(appliedHistory(rows).map((r) => r.id)).toEqual(["new", "old"]);
+    expect(appliedHistory([])).toEqual([]);
+  });
+  it("how it landed: who, then how — you approved it / applied automatically / you saved it in Settings", () => {
+    expect(historyHow(change({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 }, decidedBy: "click" }))).toBe("Architect · you approved it");
+    expect(historyHow(change({ origin: { kind: "chat" }, decidedBy: "auto" }))).toBe("Manta · for you · applied automatically");
+    expect(historyHow(change({ origin: { kind: "settings", field: "model" }, decidedBy: "click" }))).toBe("You · in Settings");
+    expect(historyHow(change({ origin: { kind: "restore", fromChangeId: "x" }, decidedBy: "click" }))).toBe("You · restored an earlier version");
   });
   it("the status is a label with a tone and, where there is one, the reason — live says how it went live, undone by whom", () => {
     expect(historyStatus(change({ state: "applied", decidedBy: "click" }))).toEqual({ tone: "ok", label: "Live", why: "you approved it" });
@@ -199,11 +191,6 @@ describe("history rows", () => {
     expect(historyStatus(change({ state: "failed", error: null }))).toEqual({ tone: "warn", label: "Not activated", why: null });
     expect(historyStatus(change({ state: "held" }))).toEqual({ tone: "faint", label: "Waiting for the Architect to finish", why: null });
     expect(historyStatus(change({ state: "applying" }))).toEqual({ tone: "accent", label: "Applying…", why: null });
-  });
-  it("the counts the pane shows: live (applied), waiting (pending), undone", () => {
-    const rows = [change({ state: "applied" }), change({ state: "applied" }), change({ state: "pending" }), change({ state: "undone" }), change({ state: "discarded" }), change({ state: "expired" })];
-    expect(historyCounts(rows)).toEqual({ live: 2, waiting: 1, undone: 1 });
-    expect(historyCounts([])).toEqual({ live: 0, waiting: 0, undone: 0 });
   });
   it("the one Undo belongs to the newest live change", () => {
     const rows = [change({ id: "p", state: "pending", decidedAt: null, createdAt: 900 }), change({ id: "a", state: "applied", decidedAt: 300 }), change({ id: "b", state: "applied", decidedAt: 200 }), change({ id: "u", state: "undone", decidedAt: 400 })];
@@ -239,6 +226,8 @@ describe("Restore before this", () => {
   });
   it("is not offered where it would change nothing (the version before the change is already live)", () => {
     expect(canRestore(rows[0], "V2")).toBe(false);
+    // a learned rule changes no agent file: undoing it is the Learned tab's job, not a restore of the whole folder
+    expect(canRestore(change({ state: "applied", before: "V2", origin: { kind: "learned" } }), "V3")).toBe(false);
   });
   it("never on a create, a record with no before, or a state that never applied", () => {
     expect(canRestore(rows[2], "V3")).toBe(false);
@@ -264,16 +253,6 @@ describe("seats", () => {
   });
 });
 
-describe("recapLead", () => {
-  const at = (d: number, h: number, m: number) => new Date(2026, 10, d, h, m).getTime();
-  it("today, yesterday, an older day; and the last day when there is no earlier visit", () => {
-    const now = at(26, 12, 0);
-    expect(recapLead(at(26, 9, 5), now)).toBe("Since today 09:05:");
-    expect(recapLead(at(25, 18, 40), now)).toBe("Since yesterday 18:40:");
-    expect(recapLead(at(12, 7, 0), now)).toBe("Since 12 Nov 07:00:");
-    expect(recapLead(null, now)).toBe("In the last 24 hours:");
-  });
-});
 
 describe("seatFolder", () => {
   const seat = { project: "manta-aaaaaaaaaa", projectName: "Manta" };

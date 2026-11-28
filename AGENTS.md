@@ -595,7 +595,7 @@ enabled — mirrors `src/main/index.ts` opencodeBusLoop. Config file is
 `/pty`, `/api/*`, `/push/*`) — `src/server/auth.mjs`, gate wired in
 `index.mjs`. Only `/auth/pair` (loopback-only mint), `/auth/claim`, and
 `/hook/<token>` are exempt. Token store: `~/.manta/auth.json` (0600).
-Devices pair via a 6-digit one-time code (`curl -s
+Devices pair via a 6-digit one-time code (`curl -s -X POST -H 'X-Manta-Pair: 1'
 http://127.0.0.1:8787/auth/pair` ON the box, then enter the code in the
 device's pairing screen); rollout runbook in `docs/auth-enforcement-rollout.md`.
 Escape hatch: `MANTA_AUTH_DISABLED=1` (temporary only). **GOTCHA — the
@@ -1284,6 +1284,22 @@ and worktree all belong to it.
   poll).
 - Jobs appear in the session graph's sidebar tree, with or without a window.
 - Nesting is the session graph (`sessionStatus.mjs`) and nothing else: Manta-owned job records, opencode's own `parentID`, and explicit `session_link`s. Nothing is inferred — an API-driven session with none of them is a root, and `session_unlink` records a suppression that makes it a root even if a link existed. `parentSessionID` on a record keeps its job listing/result routing meaning only. Records written before stage (c) may still carry a `displayParentID`; it is ignored and stripped from every wire read.
+- **A task has a plain-language TITLE; `name` is only a slug.** `job.name` names the branch and the tmux window (it is slugified, e.g.
+  `you-are-implementing-pr`) and must never be shown. Every row/card that shows a task (Fleet rows + Ended today + Details, Needs you, the
+  recap, the chat's task cards and result card, the task panel, the sidebar row of a window-less job) reads `displayTitle(job)`
+  (`src/server/jobTitle.mjs`): `job.title` → a routine task's routine name (`Refresh @x`, `Team check-up`) → a task subagent's / command's
+  own name → the first sentence of `request` → a non-slug `name` → the first sentence of the prompt (up to the project brief) → "Untitled
+  task". `delegate:list` rows carry it as `title`. At start `startJobV2` stores `title` + `titleSource`: a caller's own (a handoff's title,
+  a refresh / check-up) is `given`; else the first sentence of the request is stored at once (`fallback`) and one `generateText` call
+  (the `generateTitle` dependency: Summary model, else the asking conversation's own — same writer as auto-rename) replaces it in the
+  background (`generated`), never delaying the launch; a failure or a slug answer keeps the fallback. Do not show `name` anywhere new.
+- **Fleet rows are working SESSIONS, not jobs** (spec `docs/superpowers/specs/2026-11-28-fleet-redesign.md` §5b). `agents:tasks` shapes
+  (`shapeFleetTasks`, `agentsFleetTasks.mjs`) one row per busy top-level session of the sidebar's session tree (`syncState.snapshot().projects[].tree`
+  + `sessionStatus.windowStatusMap()`); a subagent or helper job beneath a session is never a row, it is in that row's `subs` (title + status, shown in
+  Details). A row's title is the session's own title; its one-liner (`sessionLine.mjs`) is the job card's line for any session: the fresh `progress_report`
+  label, else the in-progress to-do, else the last short assistant line. A job whose session isn't placed in a tree is its own `task` row; with no tree the
+  rows are jobs (older boxes). Ended today groups ended jobs per top-level session. `fleetHints.mjs` turns session status frames and progress reports into
+  the throttled `agentFleet` hint. Rows carry `key`/`kind`/`window` so Open session selects a chat's window; Stop and Resume belong to `task` rows only.
 - Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
   refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
   sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the
@@ -3503,7 +3519,7 @@ the dev box (`dev@157.90.224.92`) or the prod box.
   simulator over HTTPS with no tunnel. `GET /` returns **401** from outside;
   that is the auth gate working, not a broken box.
 - Pair a client against it by minting a code ON the box —
-  `ssh dev@135.181.255.249 'curl -s http://127.0.0.1:8787/auth/pair'` — then
+  `ssh dev@135.181.255.249 'curl -s -X POST -H "X-Manta-Pair: 1" http://127.0.0.1:8787/auth/pair'` — then
   entering the code plus the `https://<box_id>.boxes.mantaui.com` server URL in
   the client. `/auth/pair` is loopback-only by design, so the SSH hop is
   mandatory.
@@ -4265,6 +4281,68 @@ not `body` — the close-on-merge workflow shipped with both wrong plus a missin
 `MULTICA_TOKEN` env, so its "closed without merge" comment had never once
 posted. And `metadata` is not writable through a `PUT /issues/<key>` (it returns
 200 and silently discards it) — use the dedicated per-key route above.
+
+## Agents: learned preferences and the weekly team check-up (Architect v2 PR D)
+
+Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `docs/agents/follow-ups.md` ("From Architect v2 PR D").
+
+- **Learned preferences** (`src/server/agentLearning.mjs`, wired in `index.mjs`). `afterJobEnded` → `noteEnded(job)`; 30 minutes later (`runDue`, a 60 s
+  poller) the task is read for five kinds of signal (the first text part of the user's own messages in the task, their next chat message after a result
+  that was then continued / handed over again, TYPED answers to its questions [a picked label is context only], an undone change [context only], the
+  MESSAGES of commits by someone else after `job.endHead` [no merges, nothing reachable from the default branch, never a diff]); pasted-looking
+  messages are skipped and of the agent's result only the first line is given, as context. ONE `agent-learning` model call proposes 0–3 rules. The
+  server checks facts: the quote is verbatim in a quotable signal, the rule is one plain short paragraph naming no domain, path, address, package or
+  command its quote doesn't, not a duplicate, neither quote nor rule tombstoned, `replacesId` exists. Then an independent tool-less check on another
+  model (`checkLearnedRule` in `agentScriptReview.mjs`) sees only quote + rule; anything but "clean" stores nothing. Nothing ever asks the user.
+- **Storage and records.** Rules live in `~/.manta/agents/.learned/<slug>/<project>.md` and `_all.md` (`## lr_<hex>` blocks, JSON values) — beside the
+  change store, NEVER in the agent's snapshotted folder (agent.md + skills), so learning never breaks an Undo, a pending proposal or a Restore of the
+  agent. Every write is its own per-rule change record (`origin: {kind:"learned"}`, `before === after`, no bundles, `learnedOp` replanned at apply,
+  Undo inverts exactly that rule), with its own 200-record cap. Released by the `learn_preference` autonomy kind: Auto / Tell me apply (Undo on the
+  card), Ask leaves a pending card, Never learns nothing. Restore refuses a learned record. Tombstones (quote and normalised-rule hashes) live in
+  `~/.manta/agents/.learned.json`.
+- **`learn_preference` is a SERVER kind** (`SERVER_KINDS` in `autonomyShared.mjs`): Settings lists it, but `renderPolicy`, a task's limits, `policyKey` and the
+  words of a task's report skip it — changing it must never read as "your settings changed" to a running task.
+- **Injection.** `buildDispatchPrompt({ learned })` puts the project's rules and the `_all` ones in a data-marked block (≤ 30 rules per file, ≤ 3000 characters)
+  after the seat brief of every dispatch, handoff and Architect round. The Architect's context lists a named agent's rules with their ids; a proposal folds one
+  into the instructions with `replaces: "lr_<id>"` and the same change retires it.
+- **Weekly check-up** (`fleet-checkup`, the second internal routine kind in `routines.mjs`; made by `reconcileRefresh` once the Architect exists, tombstoned in
+  `.fleet.json` `checkup`). `agents.checkup()` builds the fact sheet (`factSheet()` + `agentCheckup.mjs`: server counts, no model) and starts the Architect's round
+  stamped `mode: "routine"`; routine rounds (refresh too) release by the user's "Change an agent" level through `decideRelease` ONLY after an independent
+  tool-less change review (`reviewRoutineChange`: the instruction diff and every changed skill text vs. the round's stated purpose; flagged →
+  `change-flagged`, failed → `change-unchecked`, no verdict → held), with the same exceptions (lead, core, raised isolation, an unfinished round, a script
+  review that flagged or couldn't run). A routine create waits for a click (`routine-create`); an `lr_` fold retires the rule only when that review
+  confirms it (`contentReview.carried`). The fact sheet probes only paths under the agent's folder and the registered projects. Finished branches unmerged
+  for over a day are in the sheet and the report for Manta, not review items for the user.
+
+- **Nothing the Architect needs is gated by the background budget, and trials are not counted.** A trial case is never refused by the background level (even
+  "off") or its dollar cap — it is part of the task the user asked for; `agentTrials.mjs` only books the spend. There is **no cap on the number of trials**
+  (the 3-per-agent and 6-per-task caps were removed 2026-11-28; the bounds are 3 cases per trial, 2 cases running at once box-wide and the 15-minute case ceiling).
+  An Architect draft may take a skill already installed on the box by reference (`installed: {skill, taken, take?}`,
+  `readInstalledSkill` in `agents.mjs`, `adoptInstalled` in `agentSkills.mjs`): no fetched page, same path / link / size / licence protections and script
+  review, per-skill 20-file / 256 KiB caps lifted. **A fitting skill is adopted whole, scripts included**: the independent script review decides (clean follows the user's
+  setting, flagged waits for the click), the Architect's template no longer tells it to drop scripts, and `taken: "part"` is only for files irrelevant to the job. When the lead makes the change itself after an Architect proposal for the same agent in the same chat didn't
+  land, its record carries that proposal's research (`researchFrom`). Spec §3.3 / §4.1 / §7.
+
+- **Handoffs have no limits of the lead's own (2026-11-28).** No cap on handoffs per request, no "already changing code for this chat" refusal: every code task has its
+  own worktree and branch, so several run at once, also several of one agent. The only bound is the delegate's box-wide running-jobs cap (`MAX_RUNNING_JOBS`, protects the
+  box's memory). The lead's brief no longer says "give up after two failures": a handoff that failed for a since-fixed reason is sent again, and the lead stops and asks only when the
+  same failure repeats with no fix in sight. `agents.handoff` passes no `admit` hook and no `turnKey` (jobs no longer record one); `admit` stays in delegate as a generic hook.
+
+- **Slow git never runs through tmux's helper.** `tmux.run` kills anything after 10 s (and used to say "tmux timed out" for any command); a trial case's
+  `git clone --local --no-hardlinks` of a real project is slower than that and failed every case. `src/server/gitExec.mjs` (`gitRun`: execFile, no shell,
+  60 s default, `{ timeoutMs }` per call, errors "git <sub> timed out after Ns" / "git exited N: …") is what `index.mjs` wires for the trials (clone: 5 min, never
+  more than the case ceiling), delegate, routines, the worktree list and the learning module's commit reader. Full clone kept (not `--depth 1`: a local-path clone
+  ignores it and `file://` would drop the history a trial agent may read). An installed skill taken by reference is NOT refused for a description over 300
+  characters (the model wrote nothing; the file is copied untouched and the compiled index clips it) — the cap still holds for a SKILL.md the model sends.
+
+## Agent profile, Team section and the agent conversation (profile v5)
+
+Spec `docs/superpowers/specs/2026-11-28-agent-profile-redesign.md`; mockup `docs/screens/agents/profile-v5.html`.
+
+- **Settings save through the change flow.** `agents:settings-set {slug, field, value}` (`settingsSet` in `agents.mjs`) validates with `planChange`, writes an `update` record with `origin: {kind:"settings"}`, and applies it as the user's own click (so at Ask too); Undo is the ordinary `agents:change-undo`. The one exception is an isolation RAISE, which waits as a `pending` record (reason `isolation`) in Needs you like any raise. Manta and the Architect refuse every field but the Architect's model.
+- **The agent conversation.** `agents:open-chat` (one session per agent, `.chat.json`) is unchanged; `agents:clear-chat` makes a NEW session with the agent's own key and re-points the chat record and the open window (the generic `/clear` would drop the agent); `agents:chats` (slug → session id) is how the sidebar and `ChatPanel` know which window is whose — never by window name, which Settings can change. `ChatPanel` hides the branch chip, Explorer, fork, delete, plan chip, trust toggle and schedules / secrets / webhooks for such a window (`useAgentConversation`, `SessionHeader`'s `agentConversation`, `InputArea`'s `agentChat`) and KEEPS the model picker, which starts on the agent's own model.
+- **Team section** (`TeamBlock` in `Sidebar.tsx`): one session row per valid agent except the Architect; the dot is `dotFor` of the conversation's window, which already rolls up its running tasks.
+- Profile History lists applied changes only; pending ones are in Needs you.
 
 ## Open work (as of 2026-05-18)
 

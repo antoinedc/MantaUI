@@ -22,8 +22,8 @@ vi.mock("./RoutinesRoot", () => ({ RoutinesRoot: () => <div data-testid="routine
 vi.mock("./ArtifactsPanel", () => ({ ArtifactsPanel: () => <aside data-testid="artifacts" /> }));
 vi.mock("./TaskSidePanel", () => ({ TaskSidePanel: (p: { sessionId: string }) => <aside data-testid="task-panel" data-session={p.sessionId} /> }));
 vi.mock("./agents/AgentsRoot", () => ({
-  AgentsRoot: (p: { view: { page: string; slug?: string; focus?: string }; setView: (v: unknown) => void; needs: { data: { count: number } | null } }) => (
-    <div data-testid="agents-root" data-page={p.view.page} data-slug={p.view.slug ?? ""} data-focus={p.view.focus ?? ""} data-needs={String(p.needs.data?.count ?? "none")}>
+  AgentsRoot: (p: { view: { page: string; slug?: string }; setView: (v: unknown) => void; needs: { data: { count: number } | null }; tasks: { data: { running: unknown[] } | null } }) => (
+    <div data-testid="agents-root" data-page={p.view.page} data-slug={p.view.slug ?? ""} data-needs={String(p.needs.data?.count ?? "none")} data-tasks={String(p.tasks.data?.running.length ?? "none")}>
       <button type="button" data-testid="open-profile" onClick={() => p.setView({ page: "profile", slug: "seo" })} />
     </div>
   ),
@@ -61,7 +61,8 @@ function click(el: Element | null) {
 async function mountApp(overrides: Record<string, unknown> = {}) {
   installMockApi({
     agentsList: () => Promise.resolve([DEV]),
-    agentsNeedsYou: () => Promise.resolve({ questions: [], changes: [], reviews: [], count: 3 }),
+    agentsNeedsYou: () => Promise.resolve({ questions: [], changes: [{ id: "c1" }, { id: "c2" }], reviews: [{ jobId: "r1", endedBlocked: true }, { jobId: "old", endedBlocked: false }], count: 5 }),
+    agentsTasks: () => Promise.resolve({ asOf: 1, running: [{ jobId: "a", status: "in-progress" }, { jobId: "b", status: "in-progress" }, { jobId: "c", status: "paused-by-you" }], ended: [], cap: 10, full: false }),
     ...overrides,
   });
   resetPackageAgentsForTest();
@@ -100,25 +101,32 @@ afterEach(() => {
 });
 
 describe("agent pages in the main pane", () => {
-  it("nothing is open until a sidebar row is pressed; the Needs you badge shows the box-wide count", async () => {
+  it("nothing is open until a sidebar row is pressed; Needs you shows decisions only (a branch review from an older box is not one), Fleet the tasks in progress", async () => {
     await mountApp();
     expect(agentsRoot()).toBeNull();
-    expect(q('[data-testid="agents-nav-needs"] [data-testid="agents-needs-badge"]')?.textContent).toBe("3");
+    expect(q('[data-testid="agents-nav-needs"] [data-testid="agents-needs-badge"]')?.textContent).toBe("3"); // 2 changes + 1 decision review
+    expect(q('[data-testid="agents-nav-fleet"] [data-testid="agents-fleet-count"]')?.textContent).toBe("2"); // the paused one is not in progress
   });
 
-  it("Needs you opens the Fleet page at its first section, handing it the same read the badge shows", async () => {
+  it("only open questions: a blue dot, no number", async () => {
+    await mountApp({ agentsNeedsYou: () => Promise.resolve({ questions: [{ id: "q" }], changes: [], reviews: [], count: 1 }) });
+    expect(q('[data-testid="agents-needs-badge"]')).toBeNull();
+    expect(q('[data-testid="agents-needs-dot"]')).toBeTruthy();
+  });
+
+  it("Needs you opens its own page, handing it the same read the badge shows", async () => {
     await mountApp();
     click(q('[data-testid="agents-nav-needs"]'));
-    expect(agentsRoot()?.dataset.page).toBe("fleet");
-    expect(agentsRoot()?.dataset.focus).toBe("needs");
-    expect(agentsRoot()?.dataset.needs).toBe("3");
+    expect(agentsRoot()?.dataset.page).toBe("needs");
+    expect(agentsRoot()?.dataset.needs).toBe("5");
+    expect(q('[data-testid="agents-nav-needs"]')?.getAttribute("aria-current")).toBe("page");
   });
 
-  it("Fleet opens the plain Fleet page", async () => {
+  it("Fleet opens the Fleet page, handing it the tasks read the sidebar's count comes from", async () => {
     await mountApp();
     click(q('[data-testid="agents-nav-fleet"]'));
     expect(agentsRoot()?.dataset.page).toBe("fleet");
-    expect(agentsRoot()?.dataset.focus).toBe("");
+    expect(agentsRoot()?.dataset.tasks).toBe("3");
     expect(q('[data-testid="agents-nav-fleet"]')?.getAttribute("aria-current")).toBe("page");
   });
 
@@ -130,6 +138,15 @@ describe("agent pages in the main pane", () => {
     expect(q('[data-testid="agent-row"][data-slug="dev"]')?.getAttribute("aria-current")).toBe("page");
     click(q('[data-testid="open-profile"]'));
     expect(agentsRoot()?.dataset.slug).toBe("seo");
+  });
+
+  it("the agent conversation's Profile button (a window event) opens that agent's profile", async () => {
+    await mountApp();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("manta-open-agent-profile", { detail: { slug: "dev" } }));
+    });
+    expect(agentsRoot()?.dataset.page).toBe("profile");
+    expect(agentsRoot()?.dataset.slug).toBe("dev");
   });
 
   it("the chat pane steps aside while an agent page is open", async () => {
@@ -173,11 +190,13 @@ describe("agent pages in the main pane", () => {
     expect(q('[data-testid="routines"]')).toBeNull();
   });
 
-  it("an older box with no needs-you channel shows no badge and the rows still open the pages", async () => {
-    await mountApp({ agentsNeedsYou: () => Promise.reject(new Error("unknown rpc channel: agents:needs-you")) });
+  it("an older box with no needs-you or tasks channel shows no badge or count and the rows still open the pages", async () => {
+    await mountApp({ agentsNeedsYou: () => Promise.reject(new Error("unknown rpc channel: agents:needs-you")), agentsTasks: () => Promise.reject(new Error("unknown rpc channel: agents:tasks")) });
     expect(q('[data-testid="agents-needs-badge"]')).toBeNull();
+    expect(q('[data-testid="agents-fleet-count"]')).toBeNull();
     click(q('[data-testid="agents-nav-needs"]'));
     expect(agentsRoot()?.dataset.needs).toBe("none");
+    expect(agentsRoot()?.dataset.tasks).toBe("none");
   });
 });
 
