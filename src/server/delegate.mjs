@@ -3304,6 +3304,7 @@ function actionsOf(job, messages, deps, resultText) {
     home: deps.home ?? homedir(),
     projectPatterns: Array.isArray(job.projectPatterns) ? job.projectPatterns : [],
     sessionID: job.childSessionID,
+    agentDir: job.agentDir ?? null,
     resultText,
   });
 }
