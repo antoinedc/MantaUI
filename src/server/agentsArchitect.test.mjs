@@ -611,7 +611,7 @@ test("a refused handoff to the Architect says it didn't start and why, to fix th
     assert.equal(r.ok, false);
     assert.ok(r.error.startsWith("OpenCode is restarting"), "the reason comes first, unchanged");
     assert.match(r.error, /The Architect did not start/);
-    assert.match(r.error, /fix the cause and hand it off to @architect again/);
+    assert.match(r.error, /Find the cause, fix it and hand it off to @architect again/);
     assert.match(r.error, /tell the user plainly/i);
     assert.doesNotMatch(r.error, /and stop|do not retry/i);
     assert.match(r.error, /do not create or change the agent yourself with `agent_change`/i);
