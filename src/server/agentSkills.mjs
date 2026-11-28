@@ -104,8 +104,36 @@ function sharesLongRun(a, b) {
   return false;
 }
 
-/** The canonical SPDX spelling of an allowed licence, or null. */
-export const copyLicenceOf = (licence) => (typeof licence === "string" ? (COPY_LICENCES.find((l) => l.toLowerCase() === licence.trim().toLowerCase()) ?? null) : null);
+// Common ways people write the allowed licences, keyed by `spellingKey`. Each maps to ONE SPDX id; a spelling that could mean more
+// than one licence ("BSD", "Apache") is deliberately absent. This never widens what may be copied: the result still has to be in COPY_LICENCES.
+const LICENCE_SPELLINGS = new Map(
+  Object.entries({
+    "Apache-2.0": ["apache 2", "apache 2.0", "apache v2", "apache v2.0", "apache license 2", "apache license 2.0", "apache license v2", "apache license v2.0", "apache license version 2.0", "apache 2.0 license", "apache software license 2.0", "apache software license version 2.0"],
+    MIT: ["mit", "mit license", "the mit license"],
+    "BSD-2-Clause": ["bsd 2 clause", "bsd 2 clause license", "simplified bsd license"],
+    "BSD-3-Clause": ["bsd 3 clause", "bsd 3 clause license", "new bsd license", "modified bsd license", "revised bsd license"],
+    ISC: ["isc", "isc license"],
+    "0BSD": ["0bsd", "zero clause bsd", "bsd 0 clause", "bsd zero clause license"],
+    Unlicense: ["unlicense", "the unlicense"],
+    "CC0-1.0": ["cc0", "cc0 1.0", "cc0 1.0 universal", "creative commons zero v1.0 universal"],
+    "CC-BY-4.0": ["cc by 4.0", "cc by 4.0 international", "creative commons attribution 4.0", "creative commons attribution 4.0 international"],
+    "MPL-2.0": ["mpl 2", "mpl 2.0", "mozilla public license 2.0", "mozilla public license version 2.0", "mozilla public license v2.0"],
+  }).flatMap(([spdx, spellings]) => spellings.map((s) => [s, spdx])),
+);
+const spellingKey = (s) => s.toLowerCase().replaceAll("licence", "license").replace(/[,"']/g, " ").replace(/[\s_-]+/g, " ").trim();
+
+/** The SPDX id for a common spelling of an allowed licence ("Apache 2.0" → "Apache-2.0"), else the text as given (trimmed). */
+export const spdxLicenceOf = (licence) => {
+  if (typeof licence !== "string") return null;
+  const given = licence.trim();
+  return COPY_LICENCES.find((l) => l.toLowerCase() === given.toLowerCase()) ?? LICENCE_SPELLINGS.get(spellingKey(given)) ?? given;
+};
+
+/** The canonical SPDX spelling of an allowed licence (common spellings included), or null. */
+export const copyLicenceOf = (licence) => {
+  const spdx = spdxLicenceOf(licence);
+  return typeof spdx === "string" ? (COPY_LICENCES.find((l) => l.toLowerCase() === spdx.toLowerCase()) ?? null) : null;
+};
 
 /** Is this skill file a script (by name or shebang)? The card flags the ones that were copied. */
 export const isScriptFile = (path, content = "") => SCRIPT_RE.test(path) || String(content).startsWith("#!");
@@ -122,6 +150,7 @@ export function renderSourceMd(provenance, { copied = [], written = [], left = [
     `- Repository: ${p.repo}`,
     `- Ref: ${p.ref}`,
     `- Licence: ${p.licence}`,
+    ...(p.licenceStated && p.licenceStated !== p.licence ? [`- Licence as stated: ${p.licenceStated}`] : []),
     `- Taken: ${p.taken}`,
     ...(p.registry?.installs != null ? [`- Installs: ${p.registry.installs}`] : []),
     ...(p.registry?.stars != null ? [`- Stars: ${p.registry.stars}`] : []),
@@ -149,12 +178,14 @@ export function parseSourceMd(text) {
   const installs = num(field("Installs"));
   const stars = num(field("Stars"));
   const licenseSourceId = field("Licence source id");
+  const licenceStated = field("Licence as stated");
   return {
     url,
     sourceId: field("Source id") ?? "",
     repo,
     ref,
     licence,
+    ...(licenceStated ? { licenceStated } : {}),
     ...(licenseSourceId ? { licenseSourceId } : {}),
     taken,
     ...(installs !== null || stars !== null ? { registry: { installs, stars } } : {}),
@@ -377,7 +408,9 @@ function adoptInstalled(o, got, { header, frontmatter }) {
   const repo = carried?.repo && carried.repo !== "unknown" ? carried.repo : repoFromFrontmatter(fm) ?? "unknown";
   const ref = carried?.ref && carried.ref !== "unknown" ? carried.ref : versionFromFrontmatter(fm) ?? "unknown";
   const url = carried && /^https:\/\/[^\s]+$/.test(carried.url) ? carried.url : `installed on this box: ${o.name}`;
-  const provenance = { url, sourceId: `installed:${o.name}`, repo, ref, licence, taken: spec.taken, ...(carried?.registry ? { registry: carried.registry } : {}) };
+  // the spelling the skill itself used, when it isn't the SPDX id ("Apache 2.0"), is kept beside it
+  const stated = carried?.licenceStated ?? (declared && declared !== licence ? declared : null);
+  const provenance = { url, sourceId: `installed:${o.name}`, repo, ref, licence, ...(stated ? { licenceStated: stated } : {}), taken: spec.taken, ...(carried?.registry ? { registry: carried.registry } : {}) };
   return { files, provenance, licenceText: typeof got.licenceText === "string" && got.licenceText ? got.licenceText : null, left };
 }
 
@@ -439,6 +472,7 @@ export async function planSkills({ ops, existing, fetchSource, listSources = nul
       p.ref = gh.ref ?? p.ref;
       const lic = checkLicence(p, o.name);
       if (lic.error) return lic;
+      if (p.licence !== lic.licence) p.licenceStated = p.licence;
       p.licence = lic.licence;
       if (p.licenseSourceId) {
         const l = await source(p.licenseSourceId);
