@@ -174,7 +174,7 @@ export function AgentProfile({
         {!info.error && (
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
             {isArchitect ? (
-              <span className="max-w-[12.5rem] pt-1.5 text-right text-meta leading-snug text-text-faint">Works through Manta: ask in any chat.</span>
+              <span className="max-w-[12.5rem] pt-1 text-right text-meta leading-snug text-text-faint">Works through Manta: ask in any chat.</span>
             ) : (
               <Button tone="primary" loading={openingChat} onClick={() => void openChat()} title={`Opens your conversation with ${info.name || slug}`}>
                 <MessageSquare size={14} aria-hidden="true" />

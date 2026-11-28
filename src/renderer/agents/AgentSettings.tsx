@@ -29,7 +29,7 @@ type Status =
   | { k: "undoError"; message: string; id: string };
 
 const INPUT =
-  "w-full rounded-md border border-border bg-bg px-2 py-1.5 text-label text-text placeholder:text-text-quiet outline-none focus-visible:ring-2 focus-visible:ring-accent";
+  "w-full rounded-md border border-border bg-bg px-2 py-2 text-label text-text placeholder:text-text-quiet outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
 /** The state of one field: its draft, what the last save said, and the two ways out of a problem (commit again, undo again). */
 function useSettingsField(info: AgentInfo, field: EditableField, onChanged: () => void) {
@@ -148,7 +148,7 @@ function Row({ id, label, help, children, locked = false }: { id: EditableField 
           {label}
           {locked && <span className="font-normal text-text-faint"> · via Manta</span>}
         </div>
-        {help && !locked && <p className="m-0 mt-0.5 text-meta leading-snug text-text-faint">{help}</p>}
+        {help && !locked && <p className="m-0 mt-1 text-meta leading-snug text-text-faint">{help}</p>}
       </div>
       <div className="min-w-0 max-w-[32.5rem]">{children}</div>
     </div>
@@ -186,7 +186,7 @@ function TextRow({ info, field, label, help, max, multiline, onChanged }: { info
       </label>
       {multiline ? <textarea {...common} rows={2} className={`${INPUT} min-h-[3.25rem] resize-y`} /> : <input type="text" {...common} />}
       {multiline && (
-        <div className="mt-0.5 text-right text-meta tabular-nums text-text-faint" aria-hidden="true">
+        <div className="mt-1 text-right text-meta tabular-nums text-text-faint" aria-hidden="true">
           {api.draft.length} / {max}
         </div>
       )}
@@ -285,7 +285,7 @@ export function AgentSettings({ profile, onChanged }: { profile: AgentProfile; o
     <div className="[container-type:inline-size]" data-testid="profile-settings">
       {locked ? (
         <p className="m-0 flex items-start gap-2 rounded-md bg-bg-elev p-3 text-label leading-snug text-text-muted">
-          <Lock size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-text-faint" />
+          <Lock size={14} aria-hidden="true" className="mt-1 shrink-0 text-text-faint" />
           <span>{lockedNote(info.name)}</span>
         </p>
       ) : (
