@@ -61,6 +61,7 @@ function box(over = {}) {
       listActiveSessionIds: async () => (w.busy ? [CHAT] : []),
     },
     enabled: async () => w.enabled,
+    disable: async () => void (w.disabledCalls = (w.disabledCalls ?? 0) + 1),
     publish: (e) => w.pubs.push(e),
     now: () => w.clock,
     log: { warn: () => {} },
@@ -477,6 +478,16 @@ describe("answers (AC-4.3, AC-4.3b, AC-4.4)", () => {
     for (const t of ["Release notes for z1", "Changelog for z2", "Release notes for z3"]) await handoff(b, t);
     assert.equal((await offersOf(b)).filter((x) => x.state === "pending").length, 0);
     assert.equal(b.w.offerCalls.length, before);
+  });
+
+  test("at the suppression set's sanity ceiling a dismissal still succeeds by turning suggestions off, and says so", async () => {
+    const { b, o } = await offered();
+    b.w.docs.supp = { version: 1, entries: Array.from({ length: 10_000 }, (_, i) => ({ id: `s_${i}`, key: `kind ${i}`, label: `kind ${i}`, at: "2026-01-01T00:00:00.000Z" })) };
+    const r = await b.engine.act({ id: o.id, action: "never" });
+    assert.equal(r.ok, true);
+    assert.equal(r.disabled, true);
+    assert.equal(b.w.disabledCalls, 1);
+    assert.equal(b.w.docs.supp.entries.length, 10_000, "no older promise was forgotten");
   });
 
   test("the box's labelling prompt is offered the suppressed kinds too, so the model keeps reusing the exact label", async () => {
