@@ -95,7 +95,7 @@ function ItemShell({ item, agentBadge, agentName, aside, title, titleId, lead, c
 }
 
 const DoneRow = ({ text }: { text: string }) => (
-  <li data-testid="needs-you-done" role="status" className="flex flex-wrap items-center gap-x-[10px] gap-y-[6px] rounded-md border border-border-subtle bg-inset px-3 py-[10px] text-label leading-snug">
+  <li data-testid="needs-you-done" role="status" className="flex flex-wrap items-center gap-x-[10px] gap-y-[6px] rounded-md border border-border-subtle bg-fill px-3 py-[10px] text-label leading-snug">
     <span aria-hidden="true" className="text-ok">
       ✓
     </span>

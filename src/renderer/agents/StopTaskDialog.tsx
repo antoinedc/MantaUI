@@ -4,8 +4,7 @@
 // Which button closed it is read from `returnValue` in the `close` listener and reset ("" = dismissed without choosing = keep).
 
 import { useEffect, useId, useRef } from "react";
-
-const BTN = "inline-flex h-8 items-center rounded-md border px-[14px] text-[12.5px] font-medium leading-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
+import { Button } from "../Button";
 
 export function StopTaskDialog({ open, title, onClose }: { open: boolean; title: string; /** `true`: the user chose to stop it. */ onClose: (stop: boolean) => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -22,6 +21,12 @@ export function StopTaskDialog({ open, title, onClose }: { open: boolean; title:
     else if (!open && dlg.open) dlg.close();
   }, [open]);
 
+  // The primitive Button takes no `autofocus`, and React turns the `autoFocus` prop into a focus() call that does nothing in a closed
+  // dialog: the attribute itself is what showModal() reads, so it goes on the safe action (the first button) here.
+  useEffect(() => {
+    ref.current?.querySelector("button")?.setAttribute("autofocus", "");
+  }, []);
+
   useEffect(() => {
     const dlg = ref.current;
     if (!dlg) return;
@@ -37,20 +42,19 @@ export function StopTaskDialog({ open, title, onClose }: { open: boolean; title:
   }, []);
 
   return (
-    <dialog ref={ref} aria-labelledby={headingId} data-testid="stop-dialog" className="m-auto w-[min(420px,calc(100vw-32px))] rounded-lg border border-border bg-bg-soft p-5 text-text shadow-lg [overscroll-behavior:contain] backdrop:overflow-hidden backdrop:bg-black/45 backdrop:[overscroll-behavior:contain]">
+    <dialog ref={ref} aria-labelledby={headingId} data-testid="stop-dialog" className="m-auto w-[min(420px,calc(100vw-32px))] rounded-lg border border-border bg-bg-soft p-5 text-text [overscroll-behavior:contain] backdrop:overflow-hidden backdrop:bg-black/45 backdrop:[overscroll-behavior:contain]">
       <h1 id={headingId} className="m-0 mb-2 text-body font-semibold text-text">
         Stop this task?
       </h1>
       <p className="m-0 mb-2 break-words text-label font-semibold text-text">{title}</p>
       <p className="m-0 mb-2 text-label text-text-muted">The agent stops now. What it has done so far is kept, and the task moves to Ended today.</p>
       <div className="mt-4 flex flex-wrap justify-end gap-2">
-        {/* React turns `autoFocus` into a focus() call on mount, which does nothing in a closed dialog: the attribute itself is what showModal() reads */}
-        <button type="button" ref={(el) => el?.setAttribute("autofocus", "")} onClick={() => ref.current?.close("keep")} className={`${BTN} border-border bg-bg text-text hover:border-border-strong hover:bg-raised`}>
+        <Button tone="default" onClick={() => ref.current?.close("keep")}>
           Keep running
-        </button>
-        <button type="button" onClick={() => ref.current?.close("stop")} className={`${BTN} border-transparent bg-danger text-bg hover:brightness-110`}>
+        </Button>
+        <Button tone="danger" onClick={() => ref.current?.close("stop")}>
           Stop task
-        </button>
+        </Button>
       </div>
     </dialog>
   );

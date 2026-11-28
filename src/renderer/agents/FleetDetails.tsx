@@ -8,6 +8,7 @@
 import { X } from "lucide-react";
 import type { AgentInfo, DelegateJob, FleetEnded, FleetTask } from "../../shared/types";
 import { AgentBadge } from "../AgentBadge";
+import { Button } from "../Button";
 import { formatClockTime } from "../chatUtils";
 import { IconButton } from "../IconButton";
 import { boxNow, relativeAgo } from "../jobProgress";
@@ -15,7 +16,6 @@ import { askedByWho, endedBadge, statusView, UNREACHABLE_TITLE } from "./fleetVi
 
 const DL = "mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-label";
 const H3 = "m-0 mb-[6px] mt-5 text-meta font-semibold text-text-muted";
-const BTN = "inline-flex h-8 items-center rounded-md border px-[14px] text-[12.5px] font-medium leading-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
 
 function Row({ k, children, mono = false }: { k: string; children: React.ReactNode; mono?: boolean }) {
   return (
@@ -115,9 +115,9 @@ export function FleetDetails({
             </dl>
           )}
           <div className="mt-5 flex flex-wrap gap-2">
-            <button type="button" onClick={() => onOpen(e.jobId)} disabled={offline || openBusy} title={off} className={`${BTN} border-accent-solid bg-accent-solid text-on-accent`}>
+            <Button tone="primary" onClick={() => onOpen(e.jobId)} disabled={offline || openBusy} title={off}>
               {openBusy ? "Opening…" : "Open session"}
-            </button>
+            </Button>
           </div>
         </div>
       </aside>
@@ -177,17 +177,17 @@ export function FleetDetails({
           </p>
         )}
         <div className="mt-5 flex flex-wrap gap-2">
-          <button type="button" onClick={() => onOpen(t.jobId)} disabled={offline || openBusy} title={off} className={`${BTN} border-accent-solid bg-accent-solid text-on-accent`}>
+          <Button tone="primary" onClick={() => onOpen(t.jobId)} disabled={offline || openBusy} title={off}>
             {openBusy ? "Opening…" : "Open session"}
-          </button>
+          </Button>
           {paused ? (
-            <button type="button" onClick={() => onResume(t)} disabled={offline || actionBusy || resumeBlocked != null} title={off ?? resumeBlocked ?? undefined} className={`${BTN} border-border bg-bg text-text`}>
+            <Button tone="default" onClick={() => onResume(t)} disabled={offline || actionBusy || resumeBlocked != null} title={off ?? resumeBlocked ?? undefined}>
               {actionBusy ? "Resuming…" : "Resume"}
-            </button>
+            </Button>
           ) : (
-            <button type="button" onClick={() => onStop(t)} disabled={offline || actionBusy} title={off} className={`${BTN} border-transparent bg-transparent text-danger hover:bg-danger-bg`}>
+            <Button tone="danger" onClick={() => onStop(t)} disabled={offline || actionBusy} title={off}>
               {error?.kind === "stop" ? "Try stopping again" : "Stop task"}
-            </button>
+            </Button>
           )}
         </div>
       </div>

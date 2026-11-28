@@ -40,7 +40,7 @@ export function Skeleton({ testId = "fleet-skeleton", groups = 2 }: { testId?: s
           {[62, 50].map((w, i) => (
             <div key={i} className="grid gap-2 border-b border-border-subtle py-[14px]">
               <span className="block h-3 rounded-xs bg-fill-active motion-safe:animate-pulse" style={{ width: `${w}%` }} />
-              <span className="block h-3 w-1/3 rounded-xs bg-fill-active motion-safe:animate-pulse" />
+              <span className="block h-3 w-[33%] rounded-xs bg-fill-active motion-safe:animate-pulse" />
             </div>
           ))}
         </div>
