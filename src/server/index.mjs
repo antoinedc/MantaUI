@@ -1441,7 +1441,11 @@ const projectActions = createProjectActions({
 const delegateEngine = createDelegateEngine({
   autonomyPolicy,
   projectActions,
-  publish: (evt) => bus.publish(evt),
+  // a task started, paused, resumed or stopped is also a hint for the Fleet page (the client debounces its refetch)
+  publish: (evt) => {
+    bus.publish(evt);
+    if (evt?.kind === "delegate.updated") bus.publish({ kind: "agentFleet", payload: {} });
+  },
   deliver: (args) => promptDelivery.deliver(args),
   listProjects: () => tmux.listProjects(),
   newWindow: (input) => tmux.newWindow(input),

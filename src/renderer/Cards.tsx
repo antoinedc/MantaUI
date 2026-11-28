@@ -286,10 +286,16 @@ export function QuestionCard({
   request,
   onReply,
   onReject,
+  note,
+  failed = false,
 }: {
   request: QuestionRequest;
   onReply: (answers: string[][]) => void;
   onReject: () => void;
+  /** A line from the page, between the options and Submit (Needs you: what happens if no one answers). */
+  note?: ReactNode;
+  /** The last send failed: the choice is kept and Submit reads "Submit again". */
+  failed?: boolean;
 }) {
   // Defensive: a malformed payload (missing `questions`, or a question with no
   // `options`) must not throw and blank the app. Normalize to safe arrays.
@@ -481,6 +487,7 @@ export function QuestionCard({
             })}
           </div>
 
+          {note}
           <hr className="border-border-subtle my-3" />
         </>
       }
@@ -488,7 +495,7 @@ export function QuestionCard({
         <>
           {/* Submit FIRST — the filled accent primary with a trailing ⏎ hint. */}
           <Button tone="primary" onClick={handleSubmit} disabled={!canSubmit}>
-            Submit
+            {failed ? "Submit again" : "Submit"}
             <span className="text-on-accent opacity-70" aria-hidden="true">
               ⏎
             </span>

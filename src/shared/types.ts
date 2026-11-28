@@ -2008,6 +2008,7 @@ export const IPC = {
   delegateStart: "delegate:start", // ({prompt, sessionID, directory, model?}) → { ok, error? } — BET-795 inbox Delegate in background
   delegateOpenSession: "delegate:open-session", // ({ jobId }) → { ok: true, tmuxSession, windowIndex } | { ok: false, error } — focuses (or re-creates) the job's chat window
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
+  delegateResume: "delegate:resume", // (id) → { ok: true, job } | { ok: false, error, retriable? } — a paused task starts again in its worktree
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
   delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
   delegateApprove: "delegate:approve", // ({id, tools?}) → { ok: boolean, error?: string } — error = the box refused the rules (the approval stays pending)
@@ -4578,12 +4579,57 @@ export interface NeedsYouReview {
   filesChanged: number;
   branch: string | null;
   resultText: string;
-  reason: string; // "Needs a decision" | "Branch ready to merge · N files"
+  reason: string; // "Needs a decision" (a branch nobody merged is not an item any more; an older box may still send one, `endedBlocked: false`)
   endedBlocked?: boolean; // the decision case (absent on an older box)
+}
+// Fleet redesign (docs/superpowers/specs/2026-11-28-fleet-redesign.md §2.2): the Fleet page's read.
+export type FleetAskedBy = { by: "you" } | { by: "manta"; sessionId: string | null } | { by: "routine" };
+export type FleetOutcome = "done" | "didnt-finish" | "interrupted" | "stopped";
+export interface FleetTask {
+  jobId: string; // the task's newest round
+  rootJobId: string;
+  title: string;
+  agentSlug: string;
+  project: string | null; // registry slug
+  projectName: string | null;
+  startedAt: number;
+  branch: string | null;
+  askedBy: FleetAskedBy;
+  /** `paused-by-you`: the box only ever pauses a task at the user's request. */
+  status: "in-progress" | "paused-by-you";
+  pausedAt: number | null;
+}
+export interface FleetEnded {
+  jobId: string;
+  rootJobId: string;
+  title: string;
+  agentSlug: string;
+  project: string | null;
+  projectName: string | null;
+  startedAt: number;
+  branch: string | null;
+  askedBy: FleetAskedBy;
+  endedAt: number;
+  outcome: FleetOutcome;
+  /** One plain sentence from recorded facts. */
+  sentence: string;
+  /** The technical record, shown in Details. */
+  facts: string;
+}
+export interface FleetTasks {
+  asOf: number;
+  running: FleetTask[];
+  /** Tasks that ended since local midnight on the box, newest first. */
+  ended: FleetEnded[];
+  /** The box-wide running-jobs cap, and whether it is reached (a resume would be refused). */
+  cap: number;
+  full: boolean;
 }
 export interface NeedsYou {
   questions: TaskQuestion[];
-  changes: AgentChange[]; // pending, box-wide
+  /** Pending, box-wide. `changeProjects` (absent on an older box) names the registry project of the task that proposed each. */
+  changes: AgentChange[];
+  changeProjects?: Record<string, string | null>;
   reviews: NeedsYouReview[];
   count: number;
 }

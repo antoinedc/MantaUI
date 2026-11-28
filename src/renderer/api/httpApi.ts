@@ -1353,6 +1353,7 @@ export const httpApi: Api = {
   // job through the existing delegate engine (own worktree + window + rail).
   delegateStart: (input) => rpc(IPC.delegateStart, input),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
+  delegateResume: (id) => rpc(IPC.delegateResume, id),
   // P6: focus (or re-create) a background job's chat window and say where it is.
   delegateOpenSession: (input) => rpc(IPC.delegateOpenSession, input),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
@@ -1376,6 +1377,7 @@ export const httpApi: Api = {
   agentsQuestionAnswer: (input) => rpc("agents:question-answer", input),
   agentsQuestionDismiss: (input) => rpc("agents:question-dismiss", input),
   agentsNeedsYou: () => rpc("agents:needs-you"),
+  agentsTasks: () => rpc("agents:tasks"),
   agentsReviewDone: (input) => rpc("agents:review-done", input),
   agentsFleet: () => rpc("agents:fleet"),
   agentsFleetSeen: () => rpc("agents:fleet-seen"),

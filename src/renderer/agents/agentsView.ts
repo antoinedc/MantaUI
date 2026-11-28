@@ -3,7 +3,7 @@
 // Everything the Fleet page and the agent profile decide that has no DOM in it: which page is showing, how a fleet cell
 // reads, what a history row says, whether Restore is offered, how a tab key moves. The components stay thin.
 
-import type { AgentChange, AgentFleet, AgentProfile, AgentResearchEntry, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
+import type { AgentChange, AgentProfile, AgentResearchEntry, FleetCell, NeedsYouReview } from "../../shared/types";
 import type { BackgroundResultPart } from "../backgroundRun";
 import { PACKAGE_AGENT_PREFIX, resolvePickerProject } from "../agentDispatch";
 import { agentChangeTitle } from "../agentChange";
@@ -18,8 +18,8 @@ export const SEAT_BRIEF_MAX = 4000;
 
 // ---- which page is showing ----
 
-/** null = closed. "needs" is the Needs you row: the Fleet page, scrolled to its first section. */
-export type AgentsView = null | { page: "fleet"; focus?: "needs"; nonce?: number } | { page: "profile"; slug: string };
+/** null = closed. Needs you is its own page (Fleet redesign): the Fleet page, the Needs you page, or one agent's profile. */
+export type AgentsView = null | { page: "fleet" } | { page: "needs" } | { page: "profile"; slug: string };
 
 export type ProfileTab = "overview" | "research" | "seats" | "history" | "learned" | "tests";
 export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
@@ -76,24 +76,6 @@ export function dateLabel(ms: number): string {
 
 // ---- Fleet ----
 
-/** The highest percentage of the plan windows in force right now (what the composer's dial calls usage); null when unknown. */
-export function planUsagePercent(snapshots: ReadonlyArray<UsageSnapshot> | null | undefined): number | null {
-  let top: number | null = null;
-  for (const snap of snapshots ?? []) {
-    for (const w of snap.windows ?? []) {
-      if (w.active === false || !Number.isFinite(w.pct)) continue;
-      if (top === null || w.pct > top) top = w.pct;
-    }
-  }
-  return top === null ? null : Math.round(top);
-}
-
-/** "This week: 41 tasks · plan usage 38%" — the task count, and the plan usage when known. No dollars. */
-export function weekPill(tasks: number, planPct: number | null): string {
-  const base = `This week: ${tasks} ${tasks === 1 ? "task" : "tasks"}`;
-  return planPct == null ? base : `${base} · plan usage ${planPct}%`;
-}
-
 export type CellTone = "running" | "warn" | "ok" | "error" | "idle";
 export type CellView = { kind: "none" } | { kind: "cell"; title: string; line: string; tone: CellTone; openable: boolean };
 
@@ -115,20 +97,6 @@ export function cellView(cell: FleetCell | null | undefined): CellView {
       return { kind: "cell", title: cell.title || "Idle", line: detail || "Idle", tone: "idle", openable: false };
   }
 }
-
-/** "Since yesterday 18:40:" — the recap's lead-in; with no earlier visit on record it covers the last day. */
-export function recapLead(since: number | null, now: number): string {
-  if (since == null) return "In the last 24 hours:";
-  const at = new Date(since);
-  const clock = at.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const day = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const gap = Math.round((day(new Date(now)) - day(at)) / 86_400_000);
-  const when = gap <= 0 ? "today" : gap === 1 ? "yesterday" : dateLabel(since);
-  return `Since ${when} ${clock}:`;
-}
-
-/** Rows of the grid worth drawing at all: a fleet with no agents says so instead. */
-export const hasFleetRows = (fleet: AgentFleet | null | undefined): boolean => (fleet?.rows.length ?? 0) > 0;
 
 /** The part the finished-task card is fed with from a Needs-you review item (spec §2.1). No `sessionID`: no chat to open a panel in. */
 export function reviewPart(r: NeedsYouReview): BackgroundResultPart {

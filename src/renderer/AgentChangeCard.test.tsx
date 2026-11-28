@@ -191,8 +191,22 @@ describe("AgentChangeCard", () => {
     expect(alert?.textContent).toBe("Changing agents is turned off in your autonomy settings");
     expect(alert?.getAttribute("role")).toBe("alert");
     expect(chip(h!)).toBe("Waiting for you");
-    expect(byText(h!, "Create")!.disabled).toBe(false);
+    // the press can be repeated, and the button says it is a second try (Fleet redesign: "Apply again")
+    expect(byText(h!, "Create again")!.disabled).toBe(false);
     expect(byText(h!, "Discard")!.disabled).toBe(false);
+  });
+
+  it("a note from the page (Needs you: \"Manta recommends …\") shows inside the card, before the buttons", async () => {
+    current = change({ kind: "update", before: CREATE_MD, after: CREATE_MD.replace("review", "triage") });
+    open();
+    await h!.flush();
+    h!.unmount();
+    h = mount(<AgentChangeView change={current} onChange={() => {}} note={<p data-testid="note">Manta recommends approving it.</p>} />);
+    await h.flush();
+    const note = q(h, "note")!;
+    const apply = byText(h, "Apply")!;
+    expect(note.textContent).toBe("Manta recommends approving it.");
+    expect(note.compareDocumentPosition(apply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("a press that lands in conflict shows the box's sentence instead of a success line", async () => {

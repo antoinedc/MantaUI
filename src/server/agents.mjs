@@ -31,7 +31,8 @@ import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
 import { hasYamlAliases, parseSourceList, validateSourceList, credentialLiterals, CREDENTIAL_HINT } from "../shared/architectSources.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
-import { WORKTREE_AGENT_GRANTS, CAP_ERROR, rootJobOf } from "./delegate.mjs";
+import { WORKTREE_AGENT_GRANTS, CAP_ERROR, rootJobOf, countsTowardCap, MAX_RUNNING_JOBS } from "./delegate.mjs";
+import { shapeFleetTasks } from "./agentsFleetTasks.mjs";
 import { stepsOf } from "./jobProgressView.mjs";
 import { readsCommons, modeOrPrivate } from "./knowledge/sharing.mjs";
 import { withResearchGuidance, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
@@ -5327,12 +5328,10 @@ export function createAgentsEngine({
     };
   };
 
-  // What needs the user (rule set P1, spec §2.1) — one answer for the list and the grid:
-  //   • a finished task that ended "needs a decision" (changes or not), or
-  //   • a finished task the USER asked for (not one Manta handed off) whose branch has commits that have not landed.
-  // Either leaves when the user marks it done or opens the task's session (`reviewed`), or when the branch lands.
+  // What needs the user (rule set P1, spec §2.1; Fleet redesign 2026-11-28) — one answer for the list and the grid: a finished task that
+  // ended "needs a decision" (changes or not). It leaves when the user marks it done or opens the task's session (`reviewed`). A finished
+  // branch nobody merged is NOT an item: it is only a sentence in Fleet's Ended today and a line in the recap.
   const hasBranchWork = (job) => job.isolation === "worktree" && typeof job.branch === "string" && job.branch !== "" && Number(job.filesChanged) > 0 && slugOfJob(job) !== ARCHITECT_SLUG;
-  const isBranchCandidate = (job) => job.requestedBy !== "manta" && hasBranchWork(job);
   const isFinished = (job) => job.specialist === true && job.status === "done";
 
   const branchCache = new Map(); // "<dir>\0<branch>" → { at, verdict: Promise }
@@ -5358,12 +5357,10 @@ export function createAgentsEngine({
   }
 
   /** `null` (nothing is waiting on the user) or `{ reason, endedBlocked }` for a finished task. */
-  async function attentionOf(job, reviewed) {
+  async function attentionOf(job, reviewed) { // async: kept for its callers; it no longer asks git
     if (!isFinished(job) || reviewed.has(job.id)) return null;
     if (job.endedBlocked === true) return { reason: "Needs a decision", endedBlocked: true };
-    if (!isBranchCandidate(job)) return null;
-    if ((await branchVerdict(job)) === "landed") return null;
-    return { reason: `Branch ready to merge · ${plural(Number(job.filesChanged), "file")}`, endedBlocked: false };
+    return null;
   }
   const WEEK_MS = 7 * 86_400_000;
   const ago = (ms) => {
@@ -5490,6 +5487,49 @@ export function createAgentsEngine({
     return { ok: true };
   }
 
+  /**
+   * The Fleet page (Fleet redesign 2026-11-28, spec §2.2): what is in progress or paused by the user, and what ended today, each ended
+   * task with one sentence from recorded facts. Git is asked (cached, outside any lock) only for the ended tasks with branch work.
+   */
+  async function fleetTasks() {
+    const t = now();
+    const jobs = await readSpecialistJobs();
+    const rounds = newestRounds(jobs);
+    const names = await projectNames();
+    const projectOf = projectCache();
+    const reviewed = new Set((await readFleet()).reviewed);
+    const projectByJob = new Map();
+    const verdicts = new Map();
+    const since = new Date(t);
+    since.setHours(0, 0, 0, 0);
+    for (const job of rounds) {
+      const slug = await projectOf(job.parentDirectory);
+      projectByJob.set(job.id, slug ? { slug, name: names.get(slug) ?? slug } : null);
+      const endedToday = (job.status === "done" || job.status === "failed" || job.status === "stopped") && (job.finishedAt ?? 0) >= since.getTime();
+      if (endedToday && job.status === "done" && hasBranchWork(job)) verdicts.set(job.id, await branchVerdict(job));
+    }
+    const proposals = new Set();
+    for (const r of await readChanges()) if (r.state === "pending" && !isExpiredAt(r, t) && r.origin?.kind === "job" && r.origin.rootJobId) proposals.add(r.origin.rootJobId);
+    let boxRunning = 0;
+    try {
+      const all = (await (delegate.loadRecords ?? delegate.loadRecordsStrict)?.()) ?? [];
+      boxRunning = (Array.isArray(all) ? all : []).filter(countsTowardCap).length;
+    } catch (e) {
+      log.warn?.(`[agents] couldn't count the running tasks: ${e?.message ?? e}`);
+    }
+    return shapeFleetTasks({
+      rounds,
+      now: t,
+      slugOfJob,
+      projectOf: (job) => projectByJob.get(job.id) ?? null,
+      verdictOf: (job) => verdicts.get(job.id) ?? null,
+      proposalWaiting: (job) => proposals.has(rootJobOf(job)),
+      stillNeedsYou: (job) => job.endedBlocked === true && !reviewed.has(job.id),
+      boxRunning,
+      cap: MAX_RUNNING_JOBS,
+    });
+  }
+
   async function needsYou() {
     const t = now();
     let questions = [];
@@ -5522,7 +5562,15 @@ export function createAgentsEngine({
       });
     }
     reviews.sort((a, b) => b.finishedAt - a.finishedAt);
-    return { questions, changes, reviews, count: questions.length + changes.length + reviews.length };
+    // the project each pending change belongs to: the one of the task that proposed it (a change made in a chat has none)
+    const allJobs = await readSpecialistJobs();
+    const changeProjects = {};
+    for (const c of changes) {
+      const origin = c.origin?.kind === "job" ? c.origin : null;
+      const job = origin ? allJobs.find((j) => j.id === origin.jobId || rootJobOf(j) === origin.rootJobId) : null;
+      changeProjects[c.id] = job ? await projectOf(job.parentDirectory) : null;
+    }
+    return { questions, changes, reviews, changeProjects, count: questions.length + changes.length + reviews.length };
   }
 
   async function reviewDone(jobId) {
@@ -6391,6 +6439,7 @@ export function createAgentsEngine({
     fleet,
     fleetSeen,
     needsYou,
+    fleetTasks,
     reviewDone,
     openedTask,
     questions,

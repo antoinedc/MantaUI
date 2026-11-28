@@ -47,6 +47,7 @@ import type {
   AgentChange,
   AgentChangeEvent,
   AgentFleet,
+  FleetTasks,
   AgentProfile,
   AgentTrial,
   AgentSeat,
@@ -1982,6 +1983,8 @@ export interface Api {
     { ok: true; tmuxSession: string; windowIndex: number } | { ok: false; error: string }
   >;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
+  /** A task the user paused starts again; a full box answers `{ ok: false, error, retriable: true }` and the task stays paused. */
+  delegateResume(id: string): Promise<{ ok: boolean; error?: string; retriable?: boolean }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   // BET-418 §A pre-flight approval: the renderer polls pending approvals for
   // the viewed parent session and shows ONE approval card before the job is
@@ -2015,6 +2018,8 @@ export interface Api {
   agentsQuestionAnswer(input: { id: string; answers: string[][] }): Promise<TaskQuestion>;
   agentsQuestionDismiss(input: { id: string }): Promise<TaskQuestion>;
   agentsNeedsYou(): Promise<NeedsYou>;
+  /** The Fleet page: what is in progress or paused by the user, and what ended today (Fleet redesign 2026-11-28). */
+  agentsTasks(): Promise<FleetTasks>;
   agentsReviewDone(input: { jobId: string }): Promise<{ ok: true }>;
   agentsFleet(): Promise<AgentFleet>;
   agentsFleetSeen(): Promise<{ ok: true }>;

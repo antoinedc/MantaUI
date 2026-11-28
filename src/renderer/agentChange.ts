@@ -108,12 +108,17 @@ export function agentChangeButtonLabel(
   action: AgentChangeAction,
   change: Pick<AgentChange, "kind" | "state">,
   busy: boolean,
+  /** The last press of this button failed: it reads "<label> again". */
+  again = false,
 ): string {
-  if (action === "discard") return busy ? "Discarding…" : "Discard";
-  if (action === "undo") return busy ? "Undoing…" : "Undo";
-  if (change.state === "failed") return busy ? "Retrying…" : "Retry";
-  if (change.kind === "create") return busy ? "Creating…" : "Create";
-  return busy ? "Applying…" : "Apply";
+  const label = (() => {
+    if (action === "discard") return busy ? "Discarding…" : "Discard";
+    if (action === "undo") return busy ? "Undoing…" : "Undo";
+    if (change.state === "failed") return busy ? "Retrying…" : "Retry";
+    if (change.kind === "create") return busy ? "Creating…" : "Create";
+    return busy ? "Applying…" : "Apply";
+  })();
+  return again && !busy ? `${label} again` : label;
 }
 
 /** The state a successful press ends in, and the short line that says so. */

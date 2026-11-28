@@ -40,8 +40,8 @@ are EXISTING components drawn as they ship; render the component, never copy the
 
 | Component (file, owner) | What it is |
 |---|---|
-| `FleetPage` (`agents/FleetPage.tsx`, R1) | page shell: header pills, Needs you, recap, grid |
-| `NeedsYou` (`agents/NeedsYou.tsx`, R1) | list of `{context line + existing card}`; the context line is the only new markup |
+| `FleetPage` (`agents/FleetPage.tsx`) | **Superseded by the Fleet redesign** (`docs/screens/fleet/`, `docs/superpowers/specs/2026-11-28-fleet-redesign.md`): tasks by project or agent, the decisions card, Ended today, Details. The agents × projects grid and the recap are gone from the page. |
+| `NeedsYouPage` (`agents/NeedsYou.tsx`) | **Superseded by the Fleet redesign:** its own page, items under project headings; each item is the existing card under a title and who-line. |
 | `AgentProfile` (`agents/AgentProfile.tsx`, R1) | header, pending card, tablist + panels; every tab is a `TwoColumn` (content + tinted pane, `agents/ProfileLayout.tsx`) |
 | `AgentResearch` (`agents/AgentResearch.tsx`) | the Research tab: expandable entry rows + the library / health / refresh pane |
 | `AgentHistory` (`agents/AgentHistory.tsx`, R1) | native-disclosure rows (when, who, summary, status + reason); open → `AgentChangeView` (Undo only on the newest live one) + the quiet restore link; `HistoryPane` |
@@ -114,18 +114,16 @@ The mockup inlines `src/renderer/tokens.css` verbatim (it predates `--usage-dot*
 | Name | Value | Where |
 |---|---|---|
 | `TASK_PANEL_WIDTH_PX` | 440 | `TaskSidePanel.tsx` (Artifacts uses 340; the panel carries step text) |
-| `FLEET_CELL_PX` | 208 (`w-52`) | `FleetPage.tsx` |
 | `HISTORY_LIMIT` | 50 | server + `AgentHistory.tsx` |
 | `OVERVIEW_PREVIEW` | research 4 | `AgentProfile.tsx` |
-| `FLEET_REFETCH_DEBOUNCE_MS` | 1000 | `FleetPage.tsx` |
+| `FLEET_REFETCH_DEBOUNCE_MS` | 1000 | `agentsView.ts` |
 | `SEAT_BRIEF_MAX` | 4000 chars | server + `AgentSeats.tsx` |
 | `QUESTIONS_OPEN_MAX` | 3 per task | server |
 
 ## States
 
-- **Needs you item:** question / change / review (a decision, or "Branch ready to merge · N files"); an item leaves on its own when its branch lands, the task's session is opened, or Done.
-- **Fleet:** loading (skeleton rows after 150 ms), error (sentence + Try again), empty Needs you ("Nothing needs you."),
-  no agents ("No agents yet" + New agent), older box (channel unknown → "Update the box to see the fleet").
+- **Needs you item** (Fleet redesign): a decision (change waiting for a click, task that ended needing a decision) or an open question; an unmerged branch is never an item. An item leaves when the task's session is opened, or Done.
+- **Fleet and Needs you states:** see `docs/screens/fleet/` (ideal, empty, loading, load error, box unreachable, failed action, many items, long-running) and the spec §1.
 - **Profile:** loading, error, invalid agent (its `error`, no tabs), lead/Architect (no seats actions, no refresh control, "Works in every project"), pending cards 0..n (collapsed); an agent with no use when / not for ("Nothing written yet…"); refresh Monthly (default) / Off / saving / refused (sentence); narrow page (the pane stacks under the main column). No Tests tab or box.
 - **History row:** live (applied automatically / you approved it) / undone (by you) / waiting (its card is above) / other states, each a coloured dot + label + reason; collapsed / expanded; Restore busy ("Restoring…"), refused (sentence under the row), done (the new
   record's row appears at the top, expanded).

@@ -472,3 +472,17 @@ Left out of the Fleet redesign (v8) until the box can track them deterministical
 ## Fleet: iterate on "Ended today"
 
 - The user isn't sure yet how the Ended today section should work (what it lists, for how long, what each row offers). The v9 mockup keeps a simple version (outcome badge, title, agent · project · when, one outcome sentence, Open session); revisit it in a dedicated design round before or after it ships (user, 2026-11-28).
+
+## From the Fleet and Needs you redesign (2026-11-28)
+
+Spec `docs/superpowers/specs/2026-11-28-fleet-redesign.md`; differences from the mockup in `docs/screens/fleet/conformance.md`.
+- **Decisions that ended a task have no option list.** A finished task that needs a decision shows its result card and Done. The mockup's
+  options-and-Submit form needs a way to send the answer back to the finished task without going through the lead's chat.
+- **"Should have asked me" and "Earlier days"** are not built: the first needs a learning signal (`agents:review-dismiss` was never built),
+  the second a read of earlier days' ended tasks (the jobs store keeps 7 days / 50 records).
+- **Old reads still on the box:** `agents:fleet-seen`, the recap lines and the grid fields of `agents:fleet` are no longer used by the Fleet
+  page (the profile still reads `agents:fleet` for each seat's current task). Remove them once the profile has its own per-seat read.
+- **A merge is still not an event** for the "Its changes are in the project" sentence: it follows the 30 s branch-check cache.
+- **Checklist step times** in Details need durations in the progress view.
+- **Container-query layout was verified in a browser only through the demo state** (Chromium via a dev server, three widths, light and dark); the
+  pixel baselines still need regenerating (`npm run visual:update`).

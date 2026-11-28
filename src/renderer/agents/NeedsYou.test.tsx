@@ -1,22 +1,25 @@
 // @vitest-environment jsdom
 //
-// Needs you (agent screens spec §2.1): each item is the existing card under one context line; every press ends visibly.
+// The Needs you page (docs/superpowers/specs/2026-11-28-fleet-redesign.md, mockup v10): items under project headings, decisions
+// ("Waiting on you", red) before open questions (blue, "keeps working"); a change shows "Manta recommends …" with Apply / Discard;
+// a question has the recommended option selected and the line about what happens if no one answers; every press ends visibly.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
-import type { AgentChange, AgentInfo, DelegateJob, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
+import type { AgentChange, AgentInfo, FleetTasks, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
 import { resetPackageAgentsForTest } from "../packageAgents";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
-import { NeedsYouList } from "./NeedsYou";
+import type { AgentsRead } from "./useAgentsRead";
+import { NeedsYouPage } from "./NeedsYou";
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
 
 const info = (over: Partial<AgentInfo> = {}): AgentInfo => ({
-  slug: "sales",
-  name: "Sales",
-  description: "Sells",
-  isolation: "none",
+  slug: "dev",
+  name: "Dev",
+  description: "Dev",
+  isolation: "worktree",
   model: null,
   color: "#aa5500",
   builtIn: false,
@@ -26,11 +29,11 @@ const info = (over: Partial<AgentInfo> = {}): AgentInfo => ({
   notice: null,
   ...over,
 });
-const AGENTS = [
-  info(),
-  info({ slug: "dev", name: "Dev", isolation: "worktree" }),
-  info({ slug: "architect", name: "Architect", role: "architect", color: null }),
-  info({ slug: "manta", name: "Manta", role: "lead" }),
+const AGENTS = [info(), info({ slug: "architect", name: "Architect", role: "architect", color: null }), info({ slug: "manta", name: "Manta", role: "lead" })];
+const PROJECTS = [
+  { slug: "ethernal", name: "Ethernal" },
+  { slug: "mantaui", name: "MantaUI" },
+  { slug: "capo", name: "Capo" },
 ];
 
 const tq = (over: Partial<TaskQuestion> = {}): TaskQuestion => ({
@@ -38,13 +41,13 @@ const tq = (over: Partial<TaskQuestion> = {}): TaskQuestion => ({
   rootJobId: "job1",
   jobId: "job1",
   parentSessionID: "ses_p",
-  agentSlug: "sales",
-  agentName: "Sales",
-  project: "tenanture",
-  taskName: "Lead research",
-  questions: [{ question: "Which segment first?", options: [{ label: "Small landlords (Recommended)", description: "" }, { label: "Property managers", description: "" }], multiple: false }],
+  agentSlug: "dev",
+  agentName: "Dev",
+  project: "ethernal",
+  taskName: "Upgrade the file tree",
+  questions: [{ question: "Should Dev rebuild search-as-you-type?", options: [{ label: "Rebuild it (Recommended)", description: "" }, { label: "Skip it", description: "" }], multiple: false }],
   state: "open",
-  askedAt: NOW - 3 * 60 * MIN,
+  askedAt: NOW - 6 * MIN,
   answeredAt: null,
   answer: null,
   delivery: null,
@@ -55,25 +58,25 @@ const tq = (over: Partial<TaskQuestion> = {}): TaskQuestion => ({
 
 const change = (over: Partial<AgentChange> = {}): AgentChange => ({
   id: "chg1",
-  kind: "create",
-  slug: "pricing-cta",
-  agentName: "Pricing CTA Copy",
+  kind: "update",
+  slug: "pd",
+  agentName: "Product Designer",
   sessionID: "ses_p",
   messageID: "m",
   callID: "c",
   state: "pending",
   needsClick: true,
-  reason: "plan",
-  before: null,
-  after: "---\nname: Pricing CTA Copy\ndescription: Writes CTA text\nisolation: none\n---\nDo it.",
-  createdAt: NOW - 20 * MIN,
+  reason: "ask",
+  before: "---\nname: Product Designer\ndescription: Designs\nisolation: none\n---\nDesign.",
+  after: "---\nname: Product Designer\ndescription: Designs\nisolation: none\n---\nDesign. Use the impeccable skill.",
+  createdAt: NOW - 10 * 3_600_000,
   decidedAt: null,
   error: null,
-  origin: { kind: "job", jobId: "job2", rootJobId: "job2", attempt: 1 },
+  origin: { kind: "job", jobId: "jobA", rootJobId: "jobA", attempt: 1 },
   mode: "build",
-  releasedAt: NOW - 20 * MIN,
+  releasedAt: NOW - 10 * 3_600_000,
   decidedBy: null,
-  summary: "A dedicated agent for the pricing CTA.",
+  summary: "Product Designer would use the impeccable skill when reviewing designs.",
   evidence: [],
   admission: [],
   ...over,
@@ -82,47 +85,49 @@ const change = (over: Partial<AgentChange> = {}): AgentChange => ({
 const review = (over: Partial<NeedsYouReview> = {}): NeedsYouReview => ({
   jobId: "job9",
   agentSlug: "dev",
-  project: "manta",
-  name: "Fix the 0-byte crash",
-  finishedAt: NOW - 10 * MIN,
-  filesChanged: 3,
-  branch: "agent/dev/x",
-  resultText: "Fixed the crash.",
-  reason: "Branch ready to merge · 3 files",
-  endedBlocked: false,
+  project: "capo",
+  name: "Test transcript exports with real audio",
+  finishedAt: NOW - 2 * 3_600_000,
+  filesChanged: 1,
+  branch: null,
+  resultText: "I ran out of time while transcribing the sample audio.",
+  reason: "Needs a decision",
+  endedBlocked: true,
   ...over,
 });
 
 const data = (over: Partial<NeedsYou> = {}): NeedsYou => ({ questions: [], changes: [], reviews: [], count: 0, ...over });
-const PROJECTS = [
-  { slug: "tenanture", name: "Tenanture" },
-  { slug: "manta", name: "Manta" },
-];
+const read = <T,>(d: T | null, over: Partial<AgentsRead<T>> = {}): AgentsRead<T> => ({ data: d, error: null, refreshError: null, updatedAt: NOW, unsupported: false, loading: false, reload: () => Promise.resolve(), ...over });
+const tasks = (ended = 0): FleetTasks => ({ asOf: NOW, running: [], ended: Array.from({ length: ended }, (_, i) => ({ jobId: `e${i}` }) as never), cap: 10, full: false });
 
-describe("NeedsYouList", () => {
+describe("NeedsYouPage", () => {
   let h: Harness | null = null;
   let api: MockApi;
-  const onChanged = vi.fn();
+  const onOpenFleet = vi.fn();
+  const reload = vi.fn(() => Promise.resolve());
 
   beforeEach(() => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(NOW);
-    resetStore();
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    resetStore({ jobs: {}, jobSkew: {}, connectionState: { state: "connected" } } as never);
     resetPackageAgentsForTest();
-    onChanged.mockClear();
+    onOpenFleet.mockClear();
+    reload.mockClear();
   });
   afterEach(() => {
     h?.unmount();
     h = null;
-    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
-  async function open(d: NeedsYou, overrides: Record<string, unknown> = {}) {
-    ({ api } = installMockApi({ agentsList: () => Promise.resolve(AGENTS), ...overrides }));
-    h = mount(<NeedsYouList data={d} agents={AGENTS} projects={PROJECTS} onChanged={onChanged} />);
+  async function open(d: NeedsYou | null, props: { needs?: Partial<AgentsRead<NeedsYou>>; tasks?: FleetTasks | null } = {}, overrides: Record<string, unknown> = {}) {
+    ({ api } = installMockApi({ agentsList: () => Promise.resolve(AGENTS), agentsProjects: () => Promise.resolve(PROJECTS), ...overrides }));
+    h = mount(<NeedsYouPage needs={read(d, { reload, ...props.needs })} tasks={read(props.tasks === undefined ? tasks() : props.tasks)} onOpenFleet={onOpenFleet} />);
+    await h.flush();
     await h.flush();
   }
-  const items = () => [...h!.container.querySelectorAll<HTMLElement>('[data-testid="needs-you-item"]')];
+  const q = (sel: string) => h!.container.querySelector<HTMLElement>(sel);
+  const qa = (sel: string) => [...h!.container.querySelectorAll<HTMLElement>(sel)];
+  const items = () => qa('[data-testid="needs-you-item"]');
   const btn = (scope: ParentNode, text: string) => [...scope.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim().startsWith(text)) as HTMLButtonElement | undefined;
   async function click(el: Element | undefined | null) {
     expect(el).toBeTruthy();
@@ -132,113 +137,177 @@ describe("NeedsYouList", () => {
     await h!.flush();
   }
 
-  it("is empty when nothing waits", async () => {
-    await open(data());
-    expect(h!.container.querySelector('[data-testid="needs-you-empty"]')?.textContent).toBe("Nothing needs you.");
+  it("empty: says nothing needs you and offers Fleet; no items", async () => {
+    await open(data(), { tasks: tasks(3) });
+    expect(q('[data-testid="needs-you-empty"]')?.textContent).toContain("Nothing needs you");
     expect(items()).toHaveLength(0);
+    await click(btn(q('[data-testid="needs-you-empty"]')!, "Open Fleet"));
+    expect(onOpenFleet).toHaveBeenCalledTimes(1);
+    expect(q('[data-testid="needs-you-ended-note"]')?.textContent).toContain("3 tasks ended today");
   });
 
-  it("lists questions, then changes, then reviews, each under its context line", async () => {
-    await open(data({ questions: [tq()], changes: [change()], reviews: [review()], count: 3 }));
-    expect(items().map((i) => i.dataset.kind)).toEqual(["question", "change", "review"]);
-    const [q, c, r] = items();
-    const ctx = (el: HTMLElement) => el.querySelector(".manta-agents-ny-ctx")!.textContent;
-    expect(ctx(q)).toContain("Sales");
-    expect(ctx(q)).toContain("Tenanture");
-    expect(ctx(q)).toContain("Lead research");
-    expect(ctx(q)).toContain("asked 3h ago");
-    expect(ctx(c)).toContain("Architect");
-    expect(ctx(c)).toContain("New agent: Pricing CTA Copy");
-    expect(ctx(c)).toContain("20m ago");
-    expect(ctx(r)).toContain("Dev");
-    expect(ctx(r)).toContain("Manta");
-    expect(ctx(r)).toContain("Fix the 0-byte crash");
-    expect(ctx(r)).toContain("Branch ready to merge · 3 files"); // why it is here
-    // the cards themselves are the existing ones
-    expect(q.textContent).toContain("Sales asks you");
-    expect(c.querySelector('[data-testid="agent-change-card"]')).toBeTruthy();
-    expect(r.querySelector('[data-testid="background-result-card"]')).toBeTruthy();
-    expect(r.textContent).toContain("Fixed the crash.");
+  it("items sit under their project headings; decisions come before open questions", async () => {
+    await open(data({ questions: [tq()], changes: [change()], changeProjects: { chg1: "mantaui" }, reviews: [review()] }));
+    expect(qa('[data-testid="needs-you-project"] h2').map((h2) => h2.textContent)).toEqual(["MantaUI", "Capo", "Ethernal"]);
+    expect(items().map((i) => [i.dataset.kind, i.dataset.urgency])).toEqual([["change", "decision"], ["review", "decision"], ["question", "question"]]);
   });
 
-  it("a question's context says the task is still working on the rest while it runs", async () => {
-    resetStore({ jobs: { ses_c1: { id: "job1", rootJobId: "job1", agent: "agent-sales", status: "running", createdAt: 1 } as unknown as DelegateJob } });
-    await open(data({ questions: [tq()], count: 1 }));
-    expect(items()[0].textContent).toContain("still working on the rest");
+  it("a decision is labelled 'Waiting on you' on its own line above the title; a question 'Open question · keeps working'", async () => {
+    await open(data({ questions: [tq()], changes: [change()], changeProjects: { chg1: "mantaui" } }));
+    const [c, qn] = items();
+    const lab = (el: HTMLElement) => el.querySelector('[data-testid="needs-you-label"]')!;
+    expect(lab(c).textContent).toContain("Waiting on you");
+    expect(lab(qn).textContent).toContain("Open question · keeps working");
+    expect(c.className).toContain("border-l-danger");
+    expect(qn.className).toContain("border-l-accent");
+    // the label comes before the title in document order
+    const title = c.querySelector("h3")!;
+    expect(lab(c).compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(title.textContent).toBe("Approve the change to Product Designer?");
+    expect(c.textContent).toContain("10h ago");
   });
 
-  it("Submit answers through the agents channel, awaited, then asks for a fresh read", async () => {
-    await open(data({ questions: [tq()], count: 1 }), { agentsQuestionAnswer: () => Promise.resolve({}) });
+  it("a change: 'Manta recommends …', Apply and Discard only — no 'Let Manta decide', no 'Review branch'", async () => {
+    await open(data({ changes: [change()], changeProjects: { chg1: "mantaui" } }));
+    const it0 = items()[0];
+    expect(it0.textContent).toContain("Manta recommends approving it.");
+    const labels = [...it0.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
+    expect(labels.filter((l) => /^(Apply|Discard)$/.test(l))).toEqual(["Apply", "Discard"]);
+    expect(h!.container.textContent).not.toMatch(/Let Manta decide|Let it guess|Didn.t need me|Review branch|Branch ready/i);
+  });
+
+  it("a question: the recommended option is selected, Submit, and the line about what happens if no one answers", async () => {
+    await open(data({ questions: [tq()] }));
+    const it0 = items()[0];
+    const radios = [...it0.querySelectorAll<HTMLInputElement>("input[type='radio']")];
+    expect(radios.map((r) => r.checked)).toEqual([true, false]);
+    expect(it0.textContent).toContain("If no one answers, Dev goes with the recommended option, so it’s fine to ignore this.");
+    expect(btn(it0, "Submit")).toBeTruthy();
+  });
+
+  it("a question with no recommended option does not claim one", async () => {
+    await open(data({ questions: [tq({ questions: [{ question: "Which?", options: [{ label: "A", description: "" }, { label: "B", description: "" }], multiple: false }] })] }));
+    expect(items()[0].textContent).not.toContain("If no one answers");
+  });
+
+  it("Submit answers through the agents channel, awaited, says the answer was sent and asks for a fresh read", async () => {
+    await open(data({ questions: [tq()] }), {}, { agentsQuestionAnswer: () => Promise.resolve({}) });
     await click(btn(items()[0], "Submit"));
-    expect(api.calls.agentsQuestionAnswer).toEqual([[{ id: "tq_1", answers: [["Small landlords (Recommended)"]] }]]);
-    expect(onChanged).toHaveBeenCalled();
-    expect(items()[0].querySelector('[role="alert"]')).toBeNull();
+    expect(api.calls.agentsQuestionAnswer).toEqual([[{ id: "tq_1", answers: [["Rebuild it (Recommended)"]] }]]);
+    expect(reload).toHaveBeenCalled();
+    const done = q('[data-testid="needs-you-done"]')!;
+    expect(done.getAttribute("role")).toBe("status");
+    expect(done.textContent).toContain("Answer sent to Dev");
+    expect(done.textContent).toContain("Rebuild it");
   });
 
-  it("a refused answer shows its sentence in the item's context row, and the card stays", async () => {
-    await open(data({ questions: [tq()], count: 1 }), { agentsQuestionAnswer: () => Promise.reject(new Error("This task is paused; resume it first, then answer.")) });
+  it("a failed send keeps the choice and says Submit again, with the box's sentence", async () => {
+    await open(data({ questions: [tq()] }), {}, { agentsQuestionAnswer: () => Promise.reject(new Error("This task is paused; resume it first, then answer.")) });
+    const radios = () => [...items()[0].querySelectorAll<HTMLInputElement>("input[type='radio']")];
+    await click(radios()[1]);
     await click(btn(items()[0], "Submit"));
-    const alert = items()[0].querySelector('[role="alert"]');
-    expect(alert?.textContent).toBe("This task is paused; resume it first, then answer.");
-    expect(btn(items()[0], "Submit")).toBeTruthy();
+    expect(items()[0].querySelector('[role="alert"]')?.textContent).toContain("This task is paused; resume it first, then answer.");
+    expect(btn(items()[0], "Submit again")).toBeTruthy();
+    expect(radios().map((r) => r.checked)).toEqual([false, true]);
+    expect(q('[data-testid="needs-you-done"]')).toBeNull();
   });
 
   it("Dismiss goes to the dismiss channel; a refusal is shown", async () => {
-    await open(data({ questions: [tq()], count: 1 }), { agentsQuestionDismiss: () => Promise.reject(new Error("That question no longer exists.")) });
+    await open(data({ questions: [tq()] }), {}, { agentsQuestionDismiss: () => Promise.reject(new Error("That question no longer exists.")) });
     await click(btn(items()[0], "Dismiss"));
     expect(api.calls.agentsQuestionDismiss).toEqual([[{ id: "tq_1" }]]);
-    expect(items()[0].querySelector('[role="alert"]')?.textContent).toBe("That question no longer exists.");
+    expect(items()[0].querySelector('[role="alert"]')?.textContent).toContain("That question no longer exists.");
   });
 
   it("a question's own last refusal (the box's record) is shown too", async () => {
-    await open(data({ questions: [tq({ error: "The task couldn't take your answer." })], count: 1 }));
-    expect(items()[0].querySelector('[role="alert"]')?.textContent).toBe("The task couldn't take your answer.");
+    await open(data({ questions: [tq({ error: "The task couldn't take your answer." })] }));
+    expect(items()[0].querySelector('[role="alert"]')?.textContent).toContain("The task couldn't take your answer.");
   });
 
-  it("a change card's own button is the only Apply; pressing it keeps the card, in its new state, and asks for a fresh read", async () => {
+  it("Apply keeps the change's card, in its new state (Undo is the card's own), and asks for a fresh read", async () => {
     const applied = change({ state: "applied", decidedAt: NOW, decidedBy: "click" });
-    await open(data({ changes: [change()], count: 1 }), { agentsChangeApply: () => Promise.resolve(applied) });
-    const labels = [...items()[0].querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
-    expect(labels.filter((l) => /^(Create|Apply)/.test(l))).toHaveLength(1); // one confirm button, no duplicate beside the card
-    await click(btn(items()[0], "Create"));
+    await open(data({ changes: [change()], changeProjects: { chg1: "mantaui" } }), {}, { agentsChangeApply: () => Promise.resolve(applied) });
+    await click(btn(items()[0], "Apply"));
     expect(api.calls.agentsChangeApply).toEqual([["chg1"]]);
-    expect(onChanged).toHaveBeenCalled();
+    expect(reload).toHaveBeenCalled();
     expect(items()[0].querySelector('[data-testid="agent-change-card"]')?.getAttribute("data-state")).toBe("applied");
-  });
-
-  it("a settled change stays on the page after the next read no longer lists it", async () => {
-    const applied = change({ state: "applied", decidedAt: NOW, decidedBy: "click" });
-    await open(data({ changes: [change()], count: 1 }), { agentsChangeApply: () => Promise.resolve(applied) });
-    await click(btn(items()[0], "Create"));
-    h!.rerender(<NeedsYouList data={data()} agents={AGENTS} projects={PROJECTS} onChanged={onChanged} />);
+    // it stays after the next read no longer lists it
+    h!.rerender(<NeedsYouPage needs={read(data({ changeProjects: {} }))} tasks={read(tasks())} onOpenFleet={onOpenFleet} />);
     expect(items()).toHaveLength(1);
-    expect(items()[0].querySelector('[data-testid="agent-change-card"]')?.getAttribute("data-state")).toBe("applied");
   });
 
-  it("Done on a review dismisses it through the box, then asks for a fresh read; a refusal is shown", async () => {
-    await open(data({ reviews: [review()], count: 1 }), { agentsReviewDone: () => Promise.resolve({ ok: true }) });
-    await click(btn(items()[0], "Done"));
+  it("a failed Apply keeps the card pending and the button says Apply again", async () => {
+    await open(data({ changes: [change()], changeProjects: { chg1: "mantaui" } }), {}, { agentsChangeApply: () => Promise.reject(new Error("Product Designer was edited since this was suggested.")) });
+    await click(btn(items()[0], "Apply"));
+    expect(items()[0].textContent).toContain("Product Designer was edited since this was suggested.");
+    expect(btn(items()[0], "Apply again")).toBeTruthy();
+  });
+
+  it("a task that ended on a decision shows its result card and Done; Done says so and asks for a fresh read", async () => {
+    await open(data({ reviews: [review()] }), {}, { agentsReviewDone: () => Promise.resolve({ ok: true }) });
+    const it0 = items()[0];
+    expect(it0.querySelector("h3")?.textContent).toBe("Test transcript exports with real audio needs your decision");
+    expect(it0.querySelector('[data-testid="background-result-card"]')).toBeTruthy();
+    await click(btn(it0, "Done"));
     expect(api.calls.agentsReviewDone).toEqual([[{ jobId: "job9" }]]);
-    expect(onChanged).toHaveBeenCalled();
-    h!.unmount();
-    onChanged.mockClear();
-    await open(data({ reviews: [review()], count: 1 }), { agentsReviewDone: () => Promise.reject(new Error("Couldn't save")) });
+    expect(reload).toHaveBeenCalled();
+    expect(q('[data-testid="needs-you-done"]')?.textContent).toContain("Marked as done");
+  });
+
+  it("a refused Done is shown and nothing is reloaded", async () => {
+    await open(data({ reviews: [review()] }), {}, { agentsReviewDone: () => Promise.reject(new Error("Couldn't save")) });
     await click(btn(items()[0], "Done"));
-    expect(items()[0].querySelector('[role="alert"]')?.textContent).toBe("Couldn't save");
-    expect(onChanged).not.toHaveBeenCalled();
+    expect(items()[0].querySelector('[role="alert"]')?.textContent).toContain("Couldn't save");
+    expect(reload).not.toHaveBeenCalled();
   });
 
-  it("a task that ended needing a decision says so, as its reason and on its card", async () => {
-    await open(data({ reviews: [review({ reason: "Needs a decision", endedBlocked: true, filesChanged: 0, branch: null })], count: 1 }));
-    const ctx = items()[0].querySelector(".manta-agents-ny-ctx")!.textContent;
-    expect(ctx).toContain("Needs a decision");
-    expect(ctx).not.toContain("finished"); // the reason replaces the generic "finished 10m ago"
-    expect(items()[0].textContent).toContain("Needs a decision");
+  it("an unmerged branch is never an item: an older box's 'Branch ready to merge' review is dropped", async () => {
+    await open(data({ reviews: [review({ jobId: "old", endedBlocked: false, reason: "Branch ready to merge · 3 files", name: "Old branch" })] }));
+    expect(items()).toHaveLength(0);
+    expect(q('[data-testid="needs-you-empty"]')).toBeTruthy();
   });
 
-  it("a review card offers no Details (there is no chat here to open a panel in) but Open session →", async () => {
-    await open(data({ reviews: [review()], count: 1 }));
-    expect(items()[0].querySelector('[data-testid="background-result-details"]')).toBeNull();
-    expect(items()[0].querySelector('[data-testid="background-open-session"]')?.textContent).toContain("Open session");
+  it("Open session on a question or a change opens the task's session; a refusal is said", async () => {
+    await open(data({ questions: [tq()] }), {}, { delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task has no window any more" }) });
+    await click(h!.container.querySelector('[aria-label="Open session: Upgrade the file tree"]'));
+    expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "job1" }]]);
+    expect(q('[data-testid="needs-you-open-error"]')?.textContent).toContain("That task has no window any more");
+  });
+
+  it("box unreachable: a banner with the last update, and every control in the cards is disabled with the reason", async () => {
+    resetStore({ connectionState: { state: "stalled", since: new Date(NOW) } } as never);
+    const at = new Date(2026, 10, 28, 14, 2).getTime();
+    await open(data({ questions: [tq()], changes: [change()], changeProjects: { chg1: "mantaui" } }), { needs: { updatedAt: at } });
+    expect(q('[data-testid="needs-banner"]')?.textContent).toContain("14:02");
+    const sets = qa("fieldset[disabled]");
+    expect(sets.length).toBeGreaterThanOrEqual(2);
+    expect(sets[0].title).toBe("Unavailable until the box is reachable");
+    expect(btn(items()[0], "Apply")!.matches(":disabled")).toBe(true);
+  });
+
+  it("states: loading skeleton after 150 ms, a failed first read with Try again, a failed refresh keeping the items, an older box", async () => {
+    await open(null, { needs: { loading: true } });
+    expect(q('[data-testid="needs-skeleton"]')).toBeNull();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 220));
+    });
+    expect(q('[data-testid="needs-skeleton"]')).toBeTruthy();
+    h!.unmount();
+    await open(null, { needs: { error: "No answer", updatedAt: null } });
+    expect(q('[data-testid="needs-banner"]')?.textContent).toContain("Couldn’t load Needs you.");
+    await click(btn(q('[data-testid="needs-banner"]')!, "Try again"));
+    expect(reload).toHaveBeenCalled();
+    h!.unmount();
+    await open(data({ questions: [tq()] }), { needs: { refreshError: "busy" } });
+    expect(q('[data-testid="needs-banner"]')?.textContent).toContain("Couldn’t refresh Needs you.");
+    expect(items()).toHaveLength(1);
+    h!.unmount();
+    await open(null, { needs: { unsupported: true } });
+    expect(q('[data-testid="needs-unsupported"]')?.textContent).toContain("Update the box");
+  });
+
+  it("the header counts decisions and optional questions", async () => {
+    await open(data({ questions: [tq()], changes: [change()], reviews: [review()], changeProjects: {} }));
+    expect(q('[data-testid="needs-header-counts"]')?.textContent).toBe("2 decisions · 1 optional question");
   });
 });

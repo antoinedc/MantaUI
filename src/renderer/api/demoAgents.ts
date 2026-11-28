@@ -1,10 +1,10 @@
-// The "agents" demo fixture state (docs/screens/agents): the agent pages' own data — the agents on the box, what needs the
-// user, the fleet grid, one agent's profile and history — served only in that state so no other baseline moves. Timestamps
+// The "agents" demo fixture state (docs/screens/agents, docs/screens/fleet): the agent pages' own data — the agents on the box, what needs the
+// user, the Fleet page's tasks (and the older fleet grid the profile still reads), one agent's profile and history — served only in that state so no other baseline moves. Timestamps
 // that a page prints as ages are relative to "now"; the ones it prints as dates are fixed, and the recap has no earlier visit,
 // so a capture reads the same whenever it is taken.
 
 import { nowMs } from "../clock.js";
-import type { AgentChange, AgentFleet, AgentInfo, AgentProfile, NeedsYou, TaskQuestion } from "../../shared/types.js";
+import type { AgentChange, AgentFleet, AgentInfo, AgentProfile, FleetEnded, FleetTask, FleetTasks, NeedsYou, TaskQuestion } from "../../shared/types.js";
 
 const HOUR = 3_600_000;
 const MIN = 60_000;
@@ -130,21 +130,63 @@ export function demoNeedsYou(now: number): NeedsYou {
   return {
     questions: [question(now)],
     changes: [pending],
+    changeProjects: { chg_pricing: "manta-0a1b2c3d4e" },
     reviews: [
       {
         jobId: "job-dev",
         agentSlug: "dev",
-        project: "manta-0a1b2c3d4e",
-        name: "Explorer: 0-byte file crash",
-        finishedAt: now - 40 * MIN,
-        filesChanged: 3,
-        branch: "agent/dev/0-byte",
-        resultText: "Fixed the crash when opening a 0-byte file and added a regression test.",
-        reason: "Branch ready to merge · 3 files",
-        endedBlocked: false,
+        project: "capo-3d4e5f6a7b",
+        name: "Test transcript exports with real audio",
+        finishedAt: now - 2 * HOUR,
+        filesChanged: 1,
+        branch: null,
+        resultText: "It ran out of time while transcribing the sample audio.",
+        reason: "Needs a decision",
+        endedBlocked: true,
       },
     ],
     count: 3,
+  };
+}
+
+/** The Fleet page's read: tasks in progress (one paused by the user) and what ended today, across three projects. */
+export function demoFleetTasks(now: number): FleetTasks {
+  const run = (over: Partial<FleetTask> & Pick<FleetTask, "jobId" | "title" | "agentSlug" | "project" | "projectName">): FleetTask => ({
+    rootJobId: over.jobId,
+    startedAt: now - 20 * MIN,
+    branch: null,
+    askedBy: { by: "you" },
+    status: "in-progress",
+    pausedAt: null,
+    ...over,
+  });
+  const end = (over: Partial<FleetEnded> & Pick<FleetEnded, "jobId" | "title" | "agentSlug" | "outcome" | "sentence">): FleetEnded => ({
+    rootJobId: over.jobId,
+    project: "manta-0a1b2c3d4e",
+    projectName: "Manta",
+    startedAt: now - 3 * HOUR,
+    branch: null,
+    askedBy: { by: "you" },
+    endedAt: now - HOUR,
+    facts: "No files changed",
+    ...over,
+  });
+  return {
+    asOf: now,
+    running: [
+      run({ jobId: "job-dev1", title: "Let Manta hand work to agents more than once per request", agentSlug: "dev", project: "manta-0a1b2c3d4e", projectName: "Manta", askedBy: { by: "manta", sessionId: null }, branch: "agent/dev/handoff-limit" }),
+      run({ jobId: "job-seo1", title: "Pricing + vs-* audit", agentSlug: "seo", project: "manta-0a1b2c3d4e", projectName: "Manta" }),
+      run({ jobId: "job-sal1", title: "Lead research", agentSlug: "sales", project: "tenanture-2c3d4e5f6a", projectName: "Tenanture" }),
+      run({ jobId: "job-dev3", title: "Add speaker names to transcript exports", agentSlug: "dev", project: "capo-3d4e5f6a7b", projectName: "Capo", status: "paused-by-you", pausedAt: now - 3 * HOUR }),
+    ],
+    ended: [
+      end({ jobId: "job-end1", title: "Give skill trials more disk space", agentSlug: "dev", outcome: "done", sentence: "Its changes are in the project.", endedAt: now - 40 * MIN, branch: "agent/dev/trial-volume", facts: "6 files changed · branch agent/dev/trial-volume (in the project)" }),
+      end({ jobId: "job-end2", title: "Write the release notes for the next update", agentSlug: "dev", outcome: "didnt-finish", sentence: "It ran out of time.", endedAt: now - HOUR, facts: "Hit its time limit · No files changed" }),
+      end({ jobId: "job-end3", title: "Refresh the notes on supervising several agents", agentSlug: "architect", outcome: "interrupted", sentence: "It was cut off when the box restarted.", endedAt: now - 2 * HOUR, facts: "Failed: interrupted" }),
+      end({ jobId: "job-end4", title: "Review the pricing page wording", agentSlug: "design", outcome: "stopped", sentence: "You stopped it. What it had done so far is kept.", endedAt: now - 3 * HOUR, facts: "Stopped by you" }),
+    ],
+    cap: 10,
+    full: false,
   };
 }
 
@@ -284,6 +326,9 @@ const ok = <T>(v: T) => () => Promise.resolve(v);
 export const demoAgentsApi = {
   agentsList: ok(demoAgentList),
   agentsNeedsYou: () => Promise.resolve(demoNeedsYou(nowMs())),
+  agentsTasks: () => Promise.resolve(demoFleetTasks(nowMs())),
+  delegateStop: () => Promise.reject(new Error("Not available in the demo.")),
+  delegateResume: () => Promise.reject(new Error("Not available in the demo.")),
   agentsFleet: () => Promise.resolve(demoFleet(nowMs())),
   agentsFleetSeen: ok({ ok: true as const }),
   agentsProfile: (input: { slug: string }) => Promise.resolve(demoProfile(input?.slug ?? "seo")),

@@ -71,7 +71,8 @@ describe("Sidebar — session tree rows", () => {
         onOpenRoutines={() => {}}
         routinesBadge={{ needsYou: 0, unread: 0 }}
         agentsView={null}
-        needsYouCount={0}
+        needsBadge={{ decisions: 0, questionDot: false }}
+        fleetCount={0}
         onOpenAgents={() => {}}
       />,
     );

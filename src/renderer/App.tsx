@@ -36,6 +36,7 @@ import { Settings } from "./Settings";
 import { RoutinesRoot, type RoutinesView } from "./RoutinesRoot";
 import { AgentsRoot } from "./agents/AgentsRoot";
 import type { AgentsView } from "./agents/agentsView";
+import { inProgressCount, sidebarNeeds } from "./agents/fleetView";
 import { useAgentsRead } from "./agents/useAgentsRead";
 import { TaskSidePanel } from "./TaskSidePanel";
 import { useRoutinesSummary } from "./routinesData";
@@ -315,7 +316,10 @@ function Shell() {
   // What waits for the user, box-wide: one read for the sidebar badge and the Fleet page's Needs you (kept fresh by the box's
   // hints). A pre-pairing transport has no such method, an older box no such channel: both read as nothing waiting.
   const needs = useAgentsRead(window.api?.agentsNeedsYou ? () => window.api.agentsNeedsYou() : null, apiGeneration);
-  const needsYouCount = needs.data?.count ?? 0;
+  // The Fleet page's read (in progress / paused / ended today): one subscription for the sidebar's Fleet count and the page.
+  const fleetTasks = useAgentsRead(window.api?.agentsTasks ? () => window.api.agentsTasks() : null, apiGeneration);
+  const needsBadge = useMemo(() => sidebarNeeds(needs.data), [needs.data]);
+  const fleetCount = useMemo(() => inProgressCount(fleetTasks.data?.running), [fleetTasks.data]);
   // One summary subscription for the sidebar badge and the pane (it also polls every 60 s).
   const { summary: routinesSummary, error: routinesError, reload: reloadRoutines } = useRoutinesSummary(60_000, apiGeneration);
   const routinesBadge = useMemo(
@@ -2141,7 +2145,8 @@ function Shell() {
         routinesBadge={routinesBadge}
         routinesOpen={routinesView != null}
         agentsView={agentsView}
-        needsYouCount={needsYouCount}
+        needsBadge={needsBadge}
+        fleetCount={fleetCount}
         onOpenAgents={setAgentsView}
       />
       <main className="flex-1 flex flex-col min-w-0">
@@ -2465,7 +2470,7 @@ function Shell() {
               {/* Agent pages (agent screens spec §2.1, §2.2): the Fleet page or one agent's profile, in the same slot as the
                   Routines pane. */}
               <PanelShell key="agents" active={agentsView != null}>
-                {agentsView && <AgentsRoot view={agentsView} setView={setAgentsView} needs={needs} />}
+                {agentsView && <AgentsRoot view={agentsView} setView={setAgentsView} needs={needs} tasks={fleetTasks} />}
               </PanelShell>
               {activeDraft && !ctoOpen && !routinesView && !agentsView && (
                 <div className="absolute inset-0 z-30 bg-bg">

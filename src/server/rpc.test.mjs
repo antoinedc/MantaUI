@@ -161,6 +161,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     questionAnswer: rec("questionAnswer", { id: "tq_1" }),
     questionDismiss: rec("questionDismiss", { id: "tq_1" }),
     needsYou: rec("needsYou", { count: 0 }),
+    fleetTasks: rec("fleetTasks", { running: [], ended: [] }),
     reviewDone: rec("reviewDone"),
     fleet: rec("fleet", { rows: [] }),
     fleetSeen: rec("fleetSeen"),
@@ -183,6 +184,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
   assert.deepEqual(await handlers["agents:question-answer"]({ id: "tq_1", answers: [["a"]] }), { id: "tq_1" });
   await handlers["agents:question-dismiss"]({ id: "tq_1" });
   assert.deepEqual(await handlers["agents:needs-you"](), { count: 0 });
+  assert.deepEqual(await handlers["agents:tasks"](), { running: [], ended: [] });
   await handlers["agents:review-done"]({ jobId: "job_1" });
   await handlers["agents:fleet"]();
   await handlers["agents:fleet-seen"]();
@@ -204,6 +206,7 @@ test("agent screens: every agents:* channel of the spec calls the engine with it
     ["questionAnswer", { id: "tq_1", answers: [["a"]] }],
     ["questionDismiss", { id: "tq_1" }],
     ["needsYou"],
+    ["fleetTasks"],
     ["reviewDone", "job_1"],
     ["fleet"],
     ["fleetSeen"],
@@ -2474,6 +2477,18 @@ test("delegate:open-session hands the job id to the engine and returns its answe
   const { deps } = bgDeps();
   deps.delegate = undefined;
   assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "x" }), { ok: false, error: "no engine" });
+});
+
+test("delegate:resume goes to the engine and returns its answer untouched (a full box: the cap sentence, retriable); with no engine it is a refusal", async () => {
+  const { deps } = bgDeps();
+  const seen = [];
+  deps.delegate.resumeJob = async (id) => (seen.push(id), id === "full" ? { ok: false, error: "too many jobs", retriable: true } : { ok: true, job: { id } });
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["delegate:resume"]("job00001"), { ok: true, job: { id: "job00001" } });
+  assert.deepEqual(await handlers["delegate:resume"]("full"), { ok: false, error: "too many jobs", retriable: true });
+  assert.deepEqual(seen, ["job00001", "full"]);
+  deps.delegate = undefined;
+  assert.deepEqual(await buildHandlers(deps)["delegate:resume"]("x"), { ok: false, error: "no engine" });
 });
 
 test("delegate:open-session also tells the agents engine the task was opened (it leaves Needs you); a refusal, or an engine that fails, changes nothing", async () => {
