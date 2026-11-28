@@ -9,6 +9,7 @@
 import { Plugin } from "@opencode/plugin";
 import { installBriefing } from "./lib/briefing.ts";
 import { createDefaultLead } from "./lib/lead.ts";
+import { createDefaultWebGuard } from "./lib/webGuard.ts";
 import { resolveToolContext, type ExecuteContextLike } from "./lib/context.ts";
 import { allTools } from "./tools/index.ts";
 
@@ -39,6 +40,19 @@ export default Plugin.define({
         });
       }
     });
+
+    // The built-in `websearch` / `webfetch` are checked for private material BEFORE they run (research layer spec §6.3a):
+    // a throw in this blocking hook fails the call and nothing is sent. Registered on its own and NOT inside the
+    // fail-open block below: if the hook can't be registered the tools stay as OpenCode ships them, but once it is
+    // registered it fails closed.
+    try {
+      if (typeof ctx?.tool?.hook === "function") {
+        const guard = createDefaultWebGuard();
+        await ctx.tool.hook("execute.before", (event: any) => guard.beforeExecute(event));
+      }
+    } catch {
+      /* no hook on this instance */
+    }
 
     // System-prompt additions, ONE `context` hook composing both appenders in a fixed order: the lead brief (Agents
     // Phase 2: Manta leads a chat the box says is led) first, then the shared-knowledge briefing (spec
