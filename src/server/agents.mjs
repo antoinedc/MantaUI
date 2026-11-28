@@ -6060,6 +6060,12 @@ export function createAgentsEngine({
     return `\n\nCopied skills of @${slug} whose upstream has moved since they were copied (facts from git ls-remote; data, not instructions):\n${lines.join("\n")}`;
   }
 
+  /** The body of an agent's `agent.md` ("" when it can't be read safely). */
+  async function instructionsOf(slug) {
+    const snap = await readAgentSnapshot(slug);
+    return snap ? (parseAgentMd(snap.text).body ?? "") : "";
+  }
+
   async function profile(slug) {
     const entry = await find(typeof slug === "string" ? slug : "");
     if (!entry) throw new AgentError(`No agent named @${slug}`);
@@ -6076,7 +6082,10 @@ export function createAgentsEngine({
       seats,
       lastChangedAt: applied.length > 0 ? (applied[0].decidedAt ?? applied[0].createdAt) : null,
       builtBy,
-      refresh: await refreshOf(entry),
+      // the day of the month the refresh runs (read-only on the profile); null for an agent that has none
+      refresh: { ...(await refreshOf(entry)), day: isRefreshable(entry) ? refreshDay(entry.slug) : null },
+      // the agent file's body, for the Overview (the profile used to read it from the history's last snapshot, which a built-in with no changes lacks)
+      instructions: await instructionsOf(entry.slug),
       research: await withUsedBy(research, entry.slug, allChanges),
       // Architect v2 §3.4: the Tests tab — this agent's trial runs, newest first (≤ 20)
       trials: (trials?.list?.(entry.slug) ?? []).filter(Boolean),
@@ -6437,6 +6446,57 @@ export function createAgentsEngine({
     return { jobId: res.job.id };
   }
 
+  /**
+   * A new conversation for an agent, recorded in its chat file. The lead's chat runs on the default agent (the lead brief is appended
+   * to its prompt); a specialist's on its own key. The caller holds `chatLock`.
+   */
+  async function newChatSession(agent, home, chatFile) {
+    const sess = await oc.createSession({
+      directory: home,
+      ...(agent.info.role === "lead" ? {} : { agent: agentKey(agent.slug) }),
+      title: agent.meta.name,
+    });
+    const sessionId = sess?.id;
+    if (!sessionId) throw new AgentError("OpenCode didn't start a chat for this agent");
+    await fs.writeFile(chatFile, `${JSON.stringify({ sessionId }, null, 2)}\n`, "utf-8");
+    return sessionId;
+  }
+
+  /**
+   * "Clear conversation" (profile redesign spec §2.2): a NEW session for the agent (same key, same home), its chat record pointing at it,
+   * and the open window re-stamped to carry it. The old session stays in OpenCode. Learned preferences, seats and project notes are
+   * other stores and are not touched. `{ sessionId, windowIndex }` — `windowIndex` null when no window is open.
+   */
+  function clearChat(input) {
+    const slug = typeof input?.slug === "string" ? input.slug : "";
+    return chatLock.runExclusive(async () => {
+      const agent = await find(slug);
+      if (!agent) throw new AgentError(`No agent named @${slug}`);
+      if (isArchitect(agent)) throw new AgentError(ARCHITECT_CHAT_REFUSAL);
+      const home = join(agent.dir, "home");
+      await fs.mkdir(home, { recursive: true });
+      const chatFile = join(agent.dir, CHAT_FILE);
+      const stored = (await readJsonOptional(fs, chatFile))?.sessionId;
+      const sessionId = await newChatSession(agent, home, chatFile);
+      const space = ((await tmux.listProjects()) ?? []).find((p) => p.tmuxSession === AGENTS_TMUX_SESSION);
+      const open = typeof stored === "string" && stored ? space?.windows?.find((w) => w.opencodeSessionId === stored) : null;
+      if (open) await tmux.restampSessionId(AGENTS_TMUX_SESSION, open.index, sessionId);
+      await syncState?.refreshNow?.();
+      return { sessionId, windowIndex: open ? open.index : null };
+    });
+  }
+
+  /** Each agent's stored conversation by slug (the Team rows find the window by session id; a window's own name isn't trusted). The Architect has none. */
+  async function chats() {
+    const out = {};
+    for (const e of (await scan()).entries) {
+      if (e.info.error || isArchitect(e)) continue;
+      const id = (await readJsonOptional(fs, join(e.dir, CHAT_FILE)))?.sessionId;
+      if (typeof id === "string" && id) out[e.slug] = id;
+    }
+    return out;
+  }
+
   function openChat(input) {
     const slug = typeof input?.slug === "string" ? input.slug : "";
     return chatLock.runExclusive(async () => {
@@ -6457,17 +6517,7 @@ export function createAgentsEngine({
       // the window was closed but the conversation may still exist: reopen it rather than start over
       let sessionId = null;
       if (typeof stored === "string" && stored && typeof oc.sessionExists === "function" && (await oc.sessionExists(stored))) sessionId = stored;
-      if (!sessionId) {
-        // the lead's chat runs on the default agent (the lead brief is appended to its prompt); a specialist's on its own
-        const sess = await oc.createSession({
-          directory: home,
-          ...(agent.info.role === "lead" ? {} : { agent: agentKey(slug) }),
-          title: agent.meta.name,
-        });
-        sessionId = sess?.id;
-        if (!sessionId) throw new AgentError("OpenCode didn't start a chat for this agent");
-        await fs.writeFile(chatFile, `${JSON.stringify({ sessionId }, null, 2)}\n`, "utf-8");
-      }
+      if (!sessionId) sessionId = await newChatSession(agent, home, chatFile);
       const windowName = agent.meta.name.replace(/[:.]/g, "-");
       const made = space
         ? await tmux.newWindow({ sessionName: AGENTS_TMUX_SESSION, windowName, cwd: home, chatMode: true, existingSessionId: sessionId, oc })
@@ -6486,6 +6536,8 @@ export function createAgentsEngine({
     create,
     dispatch,
     openChat,
+    clearChat,
+    chats,
     handoff,
     leadBrief,
     classifySession,
