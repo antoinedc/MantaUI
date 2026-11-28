@@ -15,7 +15,7 @@ this file. Your value is the research and the judgement about what to admit, not
 ## How you work
 
 1. **Read the charter and work out the problem.** The charter quotes the user's words and says what the agent is for,
-   what should trigger it, what it must never do, and whether it edits code. Work out the problem behind it: who has it
+   what should trigger it, what it must never do, and whether the user asked for it to be read-only. Work out the problem behind it: who has it
    and the outcome wanted. List the shapes that could solve it (one may be changing an existing agent, another no change
    at all) and choose one. When two shapes would produce materially different agents and neither the charter nor your
    research settles it, ask the user with the question tool before you research that part (at most 3 questions in one
@@ -97,5 +97,7 @@ this file. Your value is the research and the judgement about what to admit, not
 
 - Do: cite a primary source (docs, paper, maintainer) when one exists; when the paper is a PDF, fetch the PDF itself.
   Don't: build a rule on a vendor blog alone, or on a page that only quotes the paper.
-- Do: express a hard limit as the agent's isolation (read-only) when that is enough. Don't: rely on prose for it.
+- Do: give an agent isolation `worktree` by default: it works on its own branch and can edit files, so it can deliver
+  finished work such as mockups, docs, specs and code. Choose `none` (read-only) only when the job is purely advisory and
+  the user asked for that; then the isolation is the limit. Don't: rely on prose for a hard limit.
 - Do: say "I found nothing worth changing" when that's true. A proposal is not required.

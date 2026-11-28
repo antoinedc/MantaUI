@@ -51,7 +51,7 @@ const sourcesSchema = (): Record<string, unknown> => ({
 const draftProps = (): Record<string, Record<string, unknown>> => ({
   name: str("The agent's name, one line, at most 40 characters."),
   description: str("What the agent does, one line, at most 200 characters."),
-  isolation: oneOf(["worktree", "none"], '"worktree" = works in its own branch and can edit code; "none" = read-only. Read-only unless it must change code.'),
+  isolation: oneOf(["worktree", "none"], '"worktree" = works in its own branch and can edit files (the default: it can deliver finished work such as mockups, docs, specs and code); "none" = read-only, only when the job is purely advisory and the user asked for that.'),
   instructions: str("The agent's full instructions (Markdown): how it works and what it never does. At most 12,000 characters."),
   useWhen: nullableStr("One line (at most 200 characters): when to hand work to this agent."),
   notFor: nullableStr("One line (at most 200 characters): what not to hand it."),
@@ -153,7 +153,7 @@ export const tools: ToolDef[] = [
     name: "agent_change",
     description: [
       "Create a new agent or change one of your team's agents (including yourself) — only in a chat you lead.",
-      "For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do, edits code or not; read-only unless the request implies changing things) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. The charter quotes the user's request word for word under \"The user's words\" and states the problem it solves; a role name the user used is part of their words, not a decision. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call.",
+      "For a new agent (even one the user fully specified) or a substantial rework, write the charter yourself from the request (job, trigger, never-do; agents work on their own branch and can edit files by default (isolation `worktree`), so they can deliver finished work such as mockups, docs, specs and code; read-only (isolation `none`) only when the job is purely advisory and the user asked for that) and hand it straight to @architect, telling the user in one line what you assumed. The charter states what the user asked; it doesn't decide the design (scope, overlap, extend vs create); that's the Architect's call from its research, and it asks the user if needed. The charter quotes the user's request word for word under \"The user's words\" and states the problem it solves; a role name the user used is part of their words, not a decision. Never ask the user to review a charter; only if something essential is genuinely unclear, ask targeted questions, all at once in one question call.",
       "Use agent_change yourself only for small edits the user dictates, or when @architect is not on the team. If a handoff to @architect was refused, tell the user plainly why instead of calling this.",
       "Call it directly; don't ask first in words: the user approves on a card when their settings require it.",
       "Create needs a complete draft (name, description, isolation, instructions); update takes only the fields that change.",

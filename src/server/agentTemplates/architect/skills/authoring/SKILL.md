@@ -17,12 +17,14 @@ one-line why, so the user sees what you left out.
 
 What the file is made of; how to write it well is for your research to decide.
 - **Frontmatter:** `name` (≤ 40), `description` (one line, what it does, ≤ 200), `use_when` and `not_for` (≤ 200
-  each), `isolation` (`none` = read-only; `worktree` = edits code on its own branch). Leave `model` empty unless the
+  each), `isolation` (`worktree` = works on its own branch and can edit files, the default; `none` = read-only). Leave `model` empty unless the
   charter names one.
 - **Body:** the agent's instructions, without frontmatter.
 - **No research section.** Manta adds the generic research-library guidance to every
   agent's task prompt; don't write a research section into the file.
-- **Hard limits** are better as isolation than as prose: an agent that must not edit code is `isolation: none`.
+- **Isolation:** agents work on their own branch and can edit files by default (`worktree`), so they can deliver
+  finished work such as mockups, docs, specs and code. Use `none` (read-only) only when the job is purely advisory and
+  the user asked for that; a hard limit is better as isolation than as prose.
 
 ## Skills
 
