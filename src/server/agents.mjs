@@ -31,7 +31,7 @@ import { LEVEL_TITLES } from "../shared/autonomyShared.mjs";
 import { suggestModels } from "../shared/modelGuide.mjs";
 import { hasYamlAliases } from "../shared/architectSources.mjs";
 import { SOURCES_IN_SETTINGS } from "../shared/researchSources.mjs";
-import { buildResearchBlock } from "./researchBlock.mjs";
+import { buildResearchBlock, appendResearchBlock } from "./researchBlock.mjs";
 import { createMutex, writeJsonAtomic } from "./jsonStore.mjs";
 import { isMarkedInternal } from "./internalSessionMarker.mjs";
 import { WORKTREE_AGENT_GRANTS, CAP_ERROR, rootJobOf, countsTowardCap, MAX_RUNNING_JOBS } from "./delegate.mjs";
@@ -1352,6 +1352,17 @@ export function createAgentsEngine({
     return { entries, stamp, claims };
   }
 
+  /** The research base block (research layer spec §6.3) every compiled prompt ends with; "" when no sources store is wired. */
+  async function researchBaseBlock() {
+    if (!researchSources) return "";
+    try {
+      return buildResearchBlock({ rows: await researchSources.enabledRows() });
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the research sources for the base block: ${e?.message ?? e}`);
+      return buildResearchBlock({ rows: [] });
+    }
+  }
+
   /** Compile every valid agent into `.compiled.md` and the OpenCode config. Throws a sentence on failure. */
   async function sync() {
     const out = await syncLock.runExclusive(() => syncLocked());
@@ -1372,8 +1383,9 @@ export function createAgentsEngine({
     // is removed below, like any block of a package that is gone)
     const valid = entries.filter((e) => isTeamAgent(e.info));
     let compiledChanged = false;
+    const base = await researchBaseBlock();
     for (const e of valid) {
-      const compiled = compileAgentPrompt({ body: e.body, skills: e.skills });
+      const compiled = compileAgentPrompt({ body: e.body, skills: e.skills, base });
       const file = join(e.dir, COMPILED_FILE);
       const previous = await readOptional(fs, file);
       if (previous !== compiled) {
@@ -2336,7 +2348,8 @@ export function createAgentsEngine({
       log.warn?.(`[agents] couldn't read the autonomy settings for the lead brief: ${e?.message ?? e}`);
       return { status: "unknown", reason: "autonomy" };
     }
-    return { status: "ok", text: buildLeadBrief({ body: lead.body, roster, policy, routingNotes: renderRoutingNotes(findDanglingReferences(entries)) }) };
+    // the research base block (sources, search-first rule, library rules) follows the brief: Manta's own agent.md stays as shipped
+    return { status: "ok", text: appendResearchBlock(buildLeadBrief({ body: lead.body, roster, policy, routingNotes: renderRoutingNotes(findDanglingReferences(entries)) }), await researchBaseBlock()) };
   }
 
   /**
@@ -3797,7 +3810,7 @@ export function createAgentsEngine({
     research_library_find: ["query"],
     research_library_save: ["topic", "summary", "findings", "shelfLifeDays", "shelfLifeWhy", "shelfLifeVerified", "scope", "keep"],
   };
-  const NOT_RESEARCHER = "Only an agent working on a task from Manta can use this tool";
+  const NOT_RESEARCHER = "Only Manta and its agents can use this tool";
 
   /** The project a task belongs to, as a library scope key: the registry project owning its folder, else the folder. */
   async function projectKeyOf(directory) {
@@ -3823,16 +3836,46 @@ export function createAgentsEngine({
     const verified = await verifyInvocation(b, spec);
     if (verified.refused) return { refused: verified.refused };
     const caller = verified.callerAgent;
-    if (!caller.startsWith(AGENT_PACKAGE_PREFIX) || !SLUG_RE.test(caller.slice(AGENT_PACKAGE_PREFIX.length))) return { refused: NOT_RESEARCHER };
-    const jobs = await readJobsStrict();
-    if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
-    const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.specialist === true && j.agent === caller);
-    if (!job) return { refused: NOT_RESEARCHER };
-    const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
-    const architect = slug === ARCHITECT_SLUG;
-    if (architect && !(job.architect && typeof job.architect === "object")) return { refused: NOT_RESEARCHER };
-    // `rootJobId`: the task (every round shares it), so what the task relied on can be recorded per task
-    return { childSessionID: b.sessionID, agent: slug, architect, rootJobId: rootJobOf(job), project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
+    // (1) a task: the calling session is the child of that agent's RUNNING specialist job (the Architect also needs its capability stamp)
+    if (caller.startsWith(AGENT_PACKAGE_PREFIX) && SLUG_RE.test(caller.slice(AGENT_PACKAGE_PREFIX.length))) {
+      const jobs = await readJobsStrict();
+      if (!jobs) return { refused: ARCHITECT_COULDNT_CHECK };
+      const job = jobs.find((j) => j.childSessionID === b.sessionID && j.status === "running" && j.specialist === true && j.agent === caller);
+      if (job) {
+        const slug = caller.slice(AGENT_PACKAGE_PREFIX.length);
+        const architect = slug === ARCHITECT_SLUG;
+        if (architect && !(job.architect && typeof job.architect === "object")) return { refused: NOT_RESEARCHER };
+        // `rootJobId`: the task (every round shares it), so what the task relied on can be recorded per task
+        return { childSessionID: b.sessionID, agent: slug, architect, rootJobId: rootJobOf(job), project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
+      }
+    }
+    // (3) an agent's own conversation (Team section): the call is that agent's own (the Architect has none)
+    const own = await ownChat(b.sessionID);
+    if (own.slug) {
+      if (caller !== agentKey(own.slug)) return { refused: NOT_RESEARCHER };
+      return { childSessionID: b.sessionID, agent: own.slug, architect: false, rootJobId: null, project: await projectKeyOf(await sessionDirectory(b.sessionID)) };
+    }
+    if (own.error === CHAT_COULDNT_CHECK) return { refused: ARCHITECT_COULDNT_CHECK };
+    // (2) Manta leading a chat (the same `classify` an `agent_handoff` uses): any agent of that chat — the default one, the plan one
+    const lead = await leadEntry();
+    if (lead) {
+      const classified = await classify(b.sessionID, lead);
+      if (classified.kind === "unknown") return { refused: ARCHITECT_COULDNT_CHECK };
+      if (classified.kind === "led") {
+        return { childSessionID: b.sessionID, agent: lead.slug, architect: false, rootJobId: null, project: await projectKeyOf(typeof classified.session?.directory === "string" ? classified.session.directory : "") };
+      }
+    }
+    return { refused: NOT_RESEARCHER };
+  }
+
+  /** The folder of a session as opencode reports it ("" when it can't be read). */
+  async function sessionDirectory(sessionID) {
+    try {
+      const rs = await oc.readSession(sessionID);
+      return rs?.state === "found" && typeof rs.session?.directory === "string" ? rs.session.directory : "";
+    } catch {
+      return "";
+    }
   }
 
   const wsNorm = (t) => String(t ?? "").replace(/\s+/g, " ").trim();
@@ -4224,7 +4267,7 @@ export function createAgentsEngine({
         needsTrial: trialRequired(plan, !!drafted.skills),
         // the projects the agent is seated in: a case with no project of its own works in a copy of the first
         seats: plan.kind === "update" ? await seatSlugsOf(folderOf(slug)) : [],
-        compiled: compileAgentPrompt({ body: parsed.body, skills }),
+        compiled: compileAgentPrompt({ body: parsed.body, skills, base: await researchBaseBlock() }),
         block: buildAgentBlock({ dir: where, meta: parsed.meta, home }),
       };
     });
@@ -5796,6 +5839,96 @@ export function createAgentsEngine({
     throw new AgentError(rec.error || "Couldn't save the change; try again");
   }
 
+  // ---- the migration of the Architect's `sources:` out of its agent.md (research layer spec §6.2) ----
+
+  /**
+   * The RAW `sources:` value of the Architect's agent.md — not the parsed one: the parser no longer reads the key, and the old parse would
+   * drop a legacy source whose id a new built-in has taken. `{ found: false }` (no file, no key), `{ found: true, raw }`, or
+   * `{ found: true, unreadable: true }` (YAML anchors/aliases or invalid YAML: nothing is guessed; the caller retries at the next boot).
+   */
+  async function readArchitectSources() {
+    const snap = await readAgentSnapshot(ARCHITECT_SLUG);
+    if (!snap) return { found: false };
+    const parts = splitFrontmatter(snap.text);
+    if (!parts) return { found: false };
+    if (hasYamlAliases(parts.yaml)) return { found: true, unreadable: true };
+    let data;
+    try {
+      data = YAML.parse(parts.yaml);
+    } catch {
+      return { found: true, unreadable: true };
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Object.hasOwn(data, "sources")) return { found: false };
+    return { found: true, raw: data.sources };
+  }
+
+  /** `before` without the frontmatter key `key` (every other byte as it was), `before` itself when there is none, null when it can't be edited safely. */
+  function withoutFrontmatterKey(before, key) {
+    const m = /^(\uFEFF?---[ \t]*\r?\n)([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))([\s\S]*)$/.exec(before);
+    if (!m) return null;
+    const doc = YAML.parseDocument(m[2]);
+    if (doc.errors.length > 0 || !YAML.isMap(doc.contents)) return null;
+    if (!doc.has(key)) return before;
+    doc.delete(key);
+    const front = doc.toString({ lineWidth: 0 }).replace(/\n+$/, "");
+    return `${m[1]}${front}${m[3]}${m[4]}`;
+  }
+
+  /**
+   * Remove the `sources:` key from the Architect's agent.md as a recorded change (`origin: { kind: "migration" }`, applied like a settings
+   * change, with a version snapshot so Restore works). A no-op when the key is already gone; throws a sentence when the file can't be edited safely
+   * or the write fails (the caller keeps `pending-strip` and retries at the next boot). Not gated by "Change an agent": it is the box's own migration.
+   */
+  async function stripArchitectSources() {
+    let rec = null;
+    await syncLock.runExclusive(async () => {
+      const target = await resolveTarget(ARCHITECT_SLUG);
+      if (!target) return;
+      const snap = await readAgentSnapshot(ARCHITECT_SLUG);
+      if (!snap) throw new AgentError("The Architect's file can't be edited safely");
+      const after = withoutFrontmatterKey(snap.text, "sources");
+      if (after === null) throw new AgentError("The Architect's file can't be edited safely");
+      if (after === snap.text) return;
+      const was = parseAgentMd(snap.text);
+      const is = parseAgentMd(after);
+      if (!was.ok || !is.ok || was.body !== is.body || !sameMeta(was.meta, is.meta)) throw new AgentError("The Architect's file couldn't be rewritten safely");
+      rec = normalizeRecord({
+        id: `ach_${randomBytes(8).toString("hex")}`,
+        kind: "update",
+        slug: ARCHITECT_SLUG,
+        agentName: target.entry.info.name,
+        sessionID: "",
+        messageID: "",
+        callID: "",
+        state: "pending",
+        needsClick: false,
+        reason: null,
+        before: snap.text,
+        after,
+        createdAt: now(),
+        decidedAt: null,
+        error: null,
+        origin: { kind: "migration" },
+        summary: "Research sources moved to Settings → Research sources",
+      });
+      await attachBundles(rec);
+      try {
+        await applyLocked(rec, "click");
+      } catch (e) {
+        rec.state = "discarded";
+        rec.error = e instanceof AgentError ? e.message : "Couldn't write the agent file; try again";
+        rec.decidedAt = now();
+        await saveRecord(rec).catch(() => {});
+        throw e;
+      }
+      await saveRecord(rec);
+    });
+    if (rec) {
+      publishChange(rec);
+      fleetChanged();
+    }
+  }
+
   /** The models the profile's Model select offers: the ones the user approved for subagents. Unreadable → none (the select then offers only Auto and the current one). */
   async function approvedModels() {
     try {
@@ -7108,6 +7241,8 @@ export function createAgentsEngine({
     learningLevel: learnLevel,
     bindArchitect,
     bindResearcher,
+    readArchitectSources,
+    stripArchitectSources,
     reconcile,
     recover,
     apply: applyChange,
