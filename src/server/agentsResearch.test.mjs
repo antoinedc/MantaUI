@@ -39,12 +39,12 @@ async function world({ jobs, registry } = {}) {
 }
 
 // a running tool call of `agent` in `ses_c`, posting `args`; returns the body the tool would post
-function call(w, tool, args, { agent = "agent-seo", status = "running", input } = {}) {
+function call(w, tool, args, { agent = "agent-seo", status = "running", input, parent = "msg_user" } = {}) {
   const k = ++n;
   const b = { sessionID: "ses_c", messageID: `msg_${k}`, callID: `call_${k}`, raw: { ...args } }; // the shape the engines bind
   w.messages = [
-    { info: { id: "msg_user", role: "user" }, parts: [] },
-    { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent }, parts: [{ type: "tool", tool, callID: b.callID, state: { status, input: input ?? args } }] },
+    { info: { id: parent, role: "user" }, parts: [] },
+    { info: { id: b.messageID, role: "assistant", parentID: parent, agent }, parts: [{ type: "tool", tool, callID: b.callID, state: { status, input: input ?? args } }] },
   ];
   return b;
 }
@@ -278,12 +278,12 @@ async function chatWorld({ rows = [MINE, ...ROWS], sessions = {} } = {}) {
   return { w, root, templatesDir, engine, cleanup: () => rm(base, { recursive: true, force: true }) };
 }
 
-const asCall = (w, sessionID, tool, args, agent) => {
+const asCall = (w, sessionID, tool, args, agent, parent = "msg_user") => {
   const k = ++n;
   const b = { sessionID, messageID: `msg_${k}`, callID: `call_${k}`, raw: { ...args } };
   w.messages = [
-    { info: { id: "msg_user", role: "user" }, parts: [] },
-    { info: { id: b.messageID, role: "assistant", parentID: "msg_user", agent }, parts: [{ type: "tool", tool, callID: b.callID, state: { status: "running", input: args } }] },
+    { info: { id: parent, role: "user" }, parts: [] },
+    { info: { id: b.messageID, role: "assistant", parentID: parent, agent }, parts: [{ type: "tool", tool, callID: b.callID, state: { status: "running", input: args } }] },
   ];
   return b;
 };
@@ -564,5 +564,40 @@ test("review: when the sources store can't be read, every compiled prompt says s
     assert.ok((await readFile(join(f.root, "dev", ".compiled.md"), "utf-8")).includes("- bookface "));
   } finally {
     await f.cleanup();
+  }
+});
+
+// ---- review round 1, finding 4: the binding names the task round / chat turn the per-turn caps count in ----
+
+test("the binding names the turn it belongs to: a task's round (its job and the user message that started it), a chat's turn — the same turn gives the same key, the next one a new key", async () => {
+  const f = await world();
+  try {
+    const key = async (parent) => f.engine.bindResearcher(call(f.w, "research_search", sample.research_search, { parent }), "research_search");
+    const a1 = await key("msg_u1");
+    const a2 = await key("msg_u1");
+    const b1 = await key("msg_u2");
+    assert.equal(a1.scope, "round");
+    assert.match(a1.turnKey, /ses_c/);
+    assert.match(a1.turnKey, /job1/);
+    assert.equal(a1.turnKey, a2.turnKey);
+    assert.notEqual(a1.turnKey, b1.turnKey);
+    // a later round of the same task is another job record: another key even under the same user message
+    f.w.jobs[0] = { ...f.w.jobs[0], id: "job2" };
+    assert.notEqual((await key("msg_u1")).turnKey, a1.turnKey);
+  } finally {
+    await f.cleanup();
+  }
+  const c = await chatWorld();
+  try {
+    const lead = (parent) => c.engine.bindResearcher(asCall(c.w, "ses_lead", "research_search", sample.research_search, "build", parent), "research_search");
+    const own = (parent) => c.engine.bindResearcher(asCall(c.w, "ses_devchat", "research_search", sample.research_search, "agent-dev", parent), "research_search");
+    const l1 = await lead("msg_u1");
+    assert.equal(l1.scope, "turn");
+    assert.equal(l1.turnKey, (await lead("msg_u1")).turnKey);
+    assert.notEqual(l1.turnKey, (await lead("msg_u2")).turnKey);
+    assert.notEqual(l1.turnKey, (await own("msg_u1")).turnKey, "another session is another turn");
+    assert.equal((await own("msg_u1")).scope, "turn");
+  } finally {
+    await c.cleanup();
   }
 });

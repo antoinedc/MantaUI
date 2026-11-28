@@ -2384,7 +2384,9 @@ export function createAgentsEngine({
     if (!spec.matches(given, b)) return { refused: NOT_LEAD };
     if (!consume(`${b.messageID}:${b.callID}`)) return { refused: NOT_LEAD };
     const model = typeof msg.info.providerID === "string" && msg.info.providerID && typeof msg.info.modelID === "string" && msg.info.modelID ? { providerID: msg.info.providerID, modelID: msg.info.modelID } : null;
-    return { callerAgent: typeof msg.info.agent === "string" ? msg.info.agent : "", model };
+    // `turnId`: the user message this assistant message answers — every call of one turn / round shares it (the research caps count by it)
+    const turnId = typeof msg.info.parentID === "string" && msg.info.parentID ? msg.info.parentID : b.messageID;
+    return { callerAgent: typeof msg.info.agent === "string" ? msg.info.agent : "", model, turnId };
   }
 
   /**
@@ -3846,14 +3848,14 @@ export function createAgentsEngine({
         const architect = slug === ARCHITECT_SLUG;
         if (architect && !(job.architect && typeof job.architect === "object")) return { refused: NOT_RESEARCHER };
         // `rootJobId`: the task (every round shares it), so what the task relied on can be recorded per task
-        return { childSessionID: b.sessionID, agent: slug, architect, rootJobId: rootJobOf(job), project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
+        return { childSessionID: b.sessionID, agent: slug, architect, rootJobId: rootJobOf(job), scope: "round", turnKey: `${b.sessionID}:${job.id}:${verified.turnId}`, project: await projectKeyOf(typeof job.parentDirectory === "string" ? job.parentDirectory : "") };
       }
     }
     // (3) an agent's own conversation (Team section): the call is that agent's own (the Architect has none)
     const own = await ownChat(b.sessionID);
     if (own.slug) {
       if (caller !== agentKey(own.slug)) return { refused: NOT_RESEARCHER };
-      return { childSessionID: b.sessionID, agent: own.slug, architect: false, rootJobId: null, project: await projectKeyOf(await sessionDirectory(b.sessionID)) };
+      return { childSessionID: b.sessionID, agent: own.slug, architect: false, rootJobId: null, scope: "turn", turnKey: `${b.sessionID}:${verified.turnId}`, project: await projectKeyOf(await sessionDirectory(b.sessionID)) };
     }
     if (own.error === CHAT_COULDNT_CHECK) return { refused: ARCHITECT_COULDNT_CHECK };
     // (2) Manta leading a chat (the same `classify` an `agent_handoff` uses): any agent of that chat — the default one, the plan one
@@ -3862,7 +3864,7 @@ export function createAgentsEngine({
       const classified = await classify(b.sessionID, lead);
       if (classified.kind === "unknown") return { refused: ARCHITECT_COULDNT_CHECK };
       if (classified.kind === "led") {
-        return { childSessionID: b.sessionID, agent: lead.slug, architect: false, rootJobId: null, project: await projectKeyOf(typeof classified.session?.directory === "string" ? classified.session.directory : "") };
+        return { childSessionID: b.sessionID, agent: lead.slug, architect: false, rootJobId: null, scope: "turn", turnKey: `${b.sessionID}:${verified.turnId}`, project: await projectKeyOf(typeof classified.session?.directory === "string" ? classified.session.directory : "") };
       }
     }
     return { refused: NOT_RESEARCHER };

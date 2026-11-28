@@ -38,6 +38,9 @@ export const STORE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 export const STORE_MAX_BYTES = 200 * 1024 * 1024;
 export const BASE_SEARCH_SOURCES = Object.freeze(["hn", "arxiv", "reddit", "x", "github", "packages", "stackoverflow"]);
 export const ANSWER_CACHE_MS = 10 * 60 * 1000;
+/** Per task round / chat turn (spec §10): research_search and research_fetch calls, counted apart. */
+export const TURN_CAPS = Object.freeze({ search: 30, fetch: 40 });
+const TURNS_KEPT = 1000;
 const ANSWER_CACHE_MAX = 200;
 const THROTTLE_QUEUE_MAX = 3; // a queue longer than this is a refusal, not a wait
 const DEPS_API = "https://api.deps.dev/v3/systems";
@@ -257,7 +260,24 @@ export function createResearchEngine({
     const b = { sessionID: str("sessionID"), messageID: str("messageID"), callID: str("callID"), raw };
     const r = await bind(b, tool);
     if (r.refused) return { refused: r.refused };
-    return { child: r.childSessionID ?? b.sessionID, architect: r.architect === true, raw };
+    return { child: r.childSessionID ?? b.sessionID, architect: r.architect === true, turnKey: typeof r.turnKey === "string" && r.turnKey ? r.turnKey : null, scope: r.scope === "round" ? "round" : "turn", raw };
+  }
+
+  // what each task round / chat turn has used (the binding names it: `turnKey`); memory only — a restart gives a fresh allowance
+  const turns = new Map();
+  /** Uses one call of `kind` ("search" | "fetch") from this turn's allowance; throws the refusal when it is spent. A binding with no turn isn't capped. */
+  function useAllowance(b, kind) {
+    if (!b.turnKey) return;
+    let t = turns.get(b.turnKey);
+    if (!t) {
+      t = { search: 0, fetch: 0 };
+      turns.set(b.turnKey, t);
+      while (turns.size > TURNS_KEPT) turns.delete(turns.keys().next().value);
+    }
+    if (t[kind] >= TURN_CAPS[kind]) {
+      throw new ResearchError(`You've used the ${TURN_CAPS[kind]} ${kind === "search" ? "searches" : "fetches"} allowed in this ${b.scope}; work with what you have, or tell the user what is still missing`);
+    }
+    t[kind] += 1;
   }
 
   const guard = async (fn) => {
@@ -343,6 +363,7 @@ export function createResearchEngine({
     const b = await bound(input, "research_fetch", ["url"]);
     if (b.refused) return { ok: false, error: b.refused };
     return guard(async () => {
+      useAllowance(b, "fetch");
       const url = typeof b.raw.url === "string" ? b.raw.url.trim() : "";
       if (!url || url.length > 2000) throw new ResearchError("Give one web address");
       const refused = addressRefusal(url);
@@ -641,6 +662,7 @@ export function createResearchEngine({
     const b = await bound(input, "research_search", ["source", "query"]);
     if (b.refused) return { ok: false, error: b.refused };
     return guard(async () => {
+      useAllowance(b, "search");
       const source = typeof b.raw.source === "string" ? b.raw.source : "";
       const query = b.raw.query;
       if (typeof query !== "string" || query.trim() === "" || query.length > QUERY_MAX) throw new ResearchError(`The query must be 1 to ${QUERY_MAX} characters`);

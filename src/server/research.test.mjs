@@ -25,7 +25,7 @@ const reply = (status, headers, body) => {
   return { status, headers: Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v])), body: buf, bytes: buf.length };
 };
 
-async function fixture({ routes = {}, bound = true, architect = true, extras = [], disabled = [], secrets = [], exec, now, engineExtra = {} } = {}) {
+async function fixture({ turn = null, routes = {}, bound = true, architect = true, extras = [], disabled = [], secrets = [], exec, now, engineExtra = {} } = {}) {
   const base = await mkdtemp(join(tmpdir(), "research-test-"));
   const calls = [];
   const hop = async (req) => {
@@ -38,7 +38,7 @@ async function fixture({ routes = {}, bound = true, architect = true, extras = [
   const engine = createResearchEngine({
     bind: async (b, tool) => {
       binds.push({ b, tool });
-      return bound === true ? { childSessionID: b.sessionID, architect } : { refused: bound };
+      return bound === true ? { childSessionID: b.sessionID, architect, ...(turn ? { turnKey: turn.key, scope: turn.scope ?? "turn" } : {}) } : { refused: bound };
     },
     root: join(base, "research"),
     agentHome: join(base, "home"),
@@ -56,7 +56,7 @@ async function fixture({ routes = {}, bound = true, architect = true, extras = [
     ...(now ? { now } : {}),
     ...engineExtra,
   });
-  return { base, calls, binds, engine, root: join(base, "research"), cleanup: () => rm(base, { recursive: true, force: true }) };
+  return { turn, base, calls, binds, engine, root: join(base, "research"), cleanup: () => rm(base, { recursive: true, force: true }) };
 }
 const call = (over = {}) => ({ sessionID: "ses_child", messageID: "msg1", callID: "call1", ...over });
 
@@ -1371,6 +1371,79 @@ test("a damaged research sources file: research_search is refused with its sente
     // fixed: the next save (the user's own) keeps the bad file aside and the same engine works again
     assert.deepEqual(await store.save({ sources: DEFAULT_ORDER.map((id) => ({ id, enabled: true })) }), { ok: true });
     assert.equal((await engine.search(call({ source: "hn", query: "agents" }))).ok, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---- review round 1, finding 4 (spec §10): at most 30 research_search and 40 research_fetch calls per task round / chat turn ----
+
+const PAGE = reply(200, { "content-type": "text/plain" }, "ok");
+
+test("caps: the 30th research_search of a turn is allowed, the 31st is refused with a sentence before anything runs; fetch has its own 40", async () => {
+  const turn = { key: "ses_child:msg_user1" };
+  const f = await fixture({ turn, routes: { "*": json({ hits: [] }) } });
+  try {
+    for (let i = 1; i <= 30; i++) assert.equal((await f.engine.search(call({ source: "hn", query: `q${i}` }))).ok, true, `search ${i}`);
+    const before = f.calls.length;
+    const over = await f.engine.search(call({ source: "hn", query: "q31" }));
+    assert.equal(over.ok, false);
+    assert.match(over.error, /30 searches/);
+    assert.match(over.error, /work with what you have/i);
+    assert.equal(f.calls.length, before, "the refused search sent nothing");
+    // fetches are counted apart from searches: 40 are still available
+    for (let i = 1; i <= 40; i++) assert.equal((await f.engine.fetch(call({ url: `https://example.com/p${i}` }))).ok, true, `fetch ${i}`);
+    const overFetch = await f.engine.fetch(call({ url: "https://example.com/p41" }));
+    assert.equal(overFetch.ok, false);
+    assert.match(overFetch.error, /40 fetches/);
+    // and research_read, the library and the other tools are not counted
+    const page = await f.engine.fetch(call({ url: "https://example.com/p1" }));
+    assert.equal(page.ok, false);
+    assert.equal((await f.engine.read(call({ sourceId: "src_0123456789abcdef" }))).error.includes("30 searches"), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("caps: the counters are per turn / round — a new turn key starts fresh, another session's turn is independent, and the old turn stays used", async () => {
+  const turn = { key: "ses_child:msg_user1", scope: "round" };
+  const f = await fixture({ turn, routes: { "*": json({ hits: [] }) } });
+  try {
+    for (let i = 1; i <= 30; i++) await f.engine.search(call({ source: "hn", query: `q${i}` }));
+    const full = await f.engine.search(call({ source: "hn", query: "again" }));
+    assert.match(full.error, /30 searches.*round/);
+    turn.key = "ses_child:msg_user2"; // the next round / turn
+    assert.equal((await f.engine.search(call({ source: "hn", query: "fresh" }))).ok, true);
+    turn.key = "ses_child:msg_user1";
+    assert.equal((await f.engine.search(call({ source: "hn", query: "back" }))).ok, false, "a finished turn does not get a second allowance");
+    turn.key = "ses_other:msg_user1";
+    assert.equal((await f.engine.search(call({ source: "hn", query: "other" }))).ok, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("caps: a call the binding refuses never uses the allowance; a search that ran and failed does", async () => {
+  const turn = { key: "t" };
+  const f = await fixture({ turn, routes: { "*": reply(500, {}, "no") } });
+  try {
+    for (let i = 1; i <= 30; i++) assert.equal((await f.engine.search(call({ source: "hn", query: `q${i}` }))).ok, false); // 500s: they ran
+    assert.match((await f.engine.search(call({ source: "hn", query: "q31" }))).error, /30 searches/);
+  } finally {
+    await f.cleanup();
+  }
+  const g = await fixture({ turn: { key: "t2" }, bound: "Only Manta and its agents can use this tool" });
+  try {
+    for (let i = 0; i < 35; i++) assert.match((await g.engine.search(call({ source: "hn", query: "q" }))).error, /Only Manta/);
+  } finally {
+    await g.cleanup();
+  }
+});
+
+test("caps: a binding that names no turn is not capped (older callers keep working)", async () => {
+  const f = await fixture({ routes: { "*": json({ hits: [] }) } });
+  try {
+    for (let i = 1; i <= 35; i++) assert.equal((await f.engine.search(call({ source: "hn", query: `q${i}` }))).ok, true);
   } finally {
     await f.cleanup();
   }
