@@ -1192,6 +1192,7 @@ export function createAgentsEngine({
   sharingOf = null, // (projectSlug) → "share-and-read" | "read-only" | "private": what a seat's memory scope reads
   routines = null, // the routines engine: createInternal / update / remove / get — the monthly refresh routines
   onFleetChanged = () => {}, // a hint that the fleet read model changed (the Fleet page refetches)
+  suggestions = null, // the agent-suggestion counter (agentSuggestions.mjs): `noteHandoff` is told of every accepted new task for Dev; its work is in the background
   fleetSessions = null, // () → { projects, statusOf(sessionId) } | null: the box's session tree (each project's `tree`) and per-session status — Fleet rows are working sessions
   sessionLines = null, // { read(targets) → Promise<{ [sessionId]: line }> }: the one line each Fleet row shows about what its session is doing
   createScanner = createSecretScanner,
@@ -2575,6 +2576,15 @@ export function createAgentsEngine({
       return refuse(handoffError(res?.error, "The task couldn't be started"));
     }
     await countLaunch(slug, directory);
+    if (slug === "dev") {
+      let project = "";
+      try {
+        project = (await registry?.identify(directory))?.slug ?? "";
+      } catch {
+        project = "";
+      }
+      noteDevTask({ slug, jobId: res.job.id, title, brief: b.brief, project, chat: b.sessionID, anchorMessageId: b.messageID, lead: true });
+    }
     return { ok: true, jobId: res.job.id, agentName: agent.meta.name };
   }
 
@@ -2934,6 +2944,7 @@ export function createAgentsEngine({
     let seatAdded = false;
     if (res.job?.seatOwed && res.job.launchState === "running" && !res.uncertain) seatAdded = (await settleSeatOf(res.job)).created === true;
     await countLaunchForProject(slug, project.id);
+    noteDevTask({ slug, jobId: res.job.id, title, brief: b.brief, project: project.id, chat: b.sessionID, anchorMessageId: b.messageID, lead: false });
     return { ok: true, jobId: res.job.id, project: { id: project.id, name: project.name }, seatAdded, branch: res.job.branch ?? null, isolation };
   }
 
@@ -5102,6 +5113,21 @@ export function createAgentsEngine({
   }
 
   /** A task was launched for `slug` in the project owning `directory`: this week's count (best effort). */
+  /**
+   * An accepted NEW task for the built-in Dev (never a follow-up round, never another agent's task) is told to the suggestion counter, which
+   * labels its kind of work in the background. Fire and forget: the handoff has already succeeded and is never delayed or failed by this.
+   * `lead`: the handoff came from a led chat (only such a chat can be offered an agent); a task Dev started from its own conversation counts too.
+   */
+  function noteDevTask({ slug, jobId, title, brief, project, chat, anchorMessageId, lead }) {
+    if (slug !== "dev" || !suggestions || typeof jobId !== "string" || !jobId) return;
+    try {
+      const r = suggestions.noteHandoff({ jobId, title, brief, project: project ?? "", chat, anchorMessageId, lead });
+      void Promise.resolve(r?.pending).catch(() => {});
+    } catch (e) {
+      log.warn?.(`[agents] couldn't tell the suggestion counter about a task: ${e?.message ?? e}`);
+    }
+  }
+
   async function countLaunch(slug, directory) {
     try {
       await countLaunchForProject(slug, (await registry?.identify(directory))?.slug);

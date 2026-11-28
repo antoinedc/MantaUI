@@ -461,5 +461,8 @@ export function createAgentSuggestions(deps) {
     await recover();
   }
 
-  return { noteHandoff, list, seen, act, recover, sweep };
+  /** Resolves when every handoff noted so far has been counted (tests, and a clean shutdown). */
+  const idle = () => queue.runExclusive(async () => {});
+
+  return { noteHandoff, list, seen, act, recover, sweep, idle };
 }
