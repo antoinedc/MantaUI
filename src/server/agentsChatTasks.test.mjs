@@ -1123,3 +1123,30 @@ test("SEAT added_by 'chat' reads back as 'chat' (the Seats tab shows it like 'me
     await f.cleanup();
   }
 });
+
+test("AC-E6 two calls in the same turn for two projects start two tasks, each with its own project, seat check and record", async () => {
+  const f = await fixture();
+  try {
+    const [a, b] = [startCall(f, { project: RONDA, title: "Fix Ronda", brief: "a" }), startCall(f, { project: MANTAUI, title: "Fix MantaUI", brief: "b" })];
+    const out = await Promise.all([f.engine.chatStart(a), f.engine.chatStart(b)]);
+    assert.deepEqual(out.map((r) => r.ok), [true, true]);
+    assert.deepEqual(f.world.records.map((r) => r.project.slug).sort(), [MANTAUI, RONDA].sort());
+    assert.ok(await readOr(seatFile(f, RONDA)) && (await readOr(seatFile(f, MANTAUI))), "each project's seat");
+    const fleet = JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8"));
+    assert.deepEqual(Object.values(fleet.counts)[0].dev, { [RONDA]: 1, [MANTAUI]: 1 });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("AC-10.2 Needs you's review of a chat task carries the task's own project (not the folder lookup)", async () => {
+  const f = await fixture();
+  try {
+    f.world.records.push({ id: "jr", status: "done", specialist: true, agent: "agent-dev", launchState: "running", endedBlocked: true, finishedAt: 5, createdAt: 1, parentDirectory: "/not/identifiable", parentSessionID: SES, startedFrom: "agent-chat", project: { slug: RONDA, name: "Ronda" }, title: "Fix it", result: "Which one?" });
+    const n = await f.engine.needsYou();
+    assert.equal(n.reviews.length, 1);
+    assert.equal(n.reviews[0].project, RONDA);
+  } finally {
+    await f.cleanup();
+  }
+});

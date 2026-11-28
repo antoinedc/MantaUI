@@ -6206,7 +6206,8 @@ export function createAgentsEngine({
       reviews.push({
         jobId: job.id,
         agentSlug: slugOfJob(job),
-        project: await projectOf(job.parentDirectory),
+        // a task started from an agent's conversation names its project itself; any other is the one owning its folder
+        project: job.project?.slug && PROJECT_RE.test(job.project.slug) ? job.project.slug : await projectOf(job.parentDirectory),
         name: displayTitle(job),
         finishedAt: job.finishedAt ?? job.createdAt ?? 0,
         filesChanged: Number(job.filesChanged) || 0,
@@ -6223,7 +6224,7 @@ export function createAgentsEngine({
     for (const c of changes) {
       const origin = c.origin?.kind === "job" ? c.origin : null;
       const job = origin ? allJobs.find((j) => j.id === origin.jobId || rootJobOf(j) === origin.rootJobId) : null;
-      changeProjects[c.id] = job ? await projectOf(job.parentDirectory) : null;
+      changeProjects[c.id] = job ? (job.project?.slug && PROJECT_RE.test(job.project.slug) ? job.project.slug : await projectOf(job.parentDirectory)) : null;
     }
     const chatQuestions = await openChatQuestions();
     return { questions, changes, reviews, changeProjects, chatQuestions, count: questions.length + changes.length + reviews.length + chatQuestions.length };
