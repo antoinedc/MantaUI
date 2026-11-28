@@ -99,6 +99,13 @@ export function askedByText(by: FleetAskedBy, chatName: string | null): string {
   return chatName ? `asked by Manta in ${chatName}` : "asked by Manta";
 }
 
+/** The Details row's value: "You" / "Manta in <chat>" / "A routine". */
+export function askedByWho(by: FleetAskedBy, chatName: string | null): string {
+  if (by.by === "you") return "You";
+  if (by.by === "routine") return "A routine";
+  return chatName ? `Manta in ${chatName}` : "Manta";
+}
+
 // ---- Needs you ----
 
 /** The finished tasks that ended on a decision. An older box still sends "branch ready to merge" reviews: they are not items. */

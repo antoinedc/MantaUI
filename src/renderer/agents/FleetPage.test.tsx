@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 //
-// The Fleet page (agent screens spec §2.1, contract §States): Needs you, the recap, the agents × projects grid, the header
-// pills — and its loading / error / empty / older-box states.
+// The Fleet page (docs/superpowers/specs/2026-11-28-fleet-redesign.md, mockup v10): Projects / Agents rows with the statuses the
+// box records, the top card for decisions, Ended today, Details with Stop (behind a native dialog) and Resume, and every state —
+// loading, load error, box unreachable, failed action, many items, an older box.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
-import type { AgentFleet, AgentInfo, NeedsYou, UsageSnapshot } from "../../shared/types";
+import type { AgentInfo, DelegateJob, FleetEnded, FleetTask, FleetTasks, NeedsYou } from "../../shared/types";
 import { resetPackageAgentsForTest } from "../packageAgents";
 import { useStore } from "../store";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
@@ -13,6 +14,21 @@ import type { AgentsRead } from "./useAgentsRead";
 import { FleetPage } from "./FleetPage";
 
 const NOW = 1_800_000_000_000;
+const MIN = 60_000;
+
+beforeAll(() => {
+  const proto = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+  proto.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  proto.close = function (this: HTMLDialogElement, value?: string) {
+    if (!this.hasAttribute("open")) return;
+    this.removeAttribute("open");
+    if (value !== undefined) this.returnValue = value;
+    this.dispatchEvent(new Event("close"));
+  };
+  Element.prototype.scrollIntoView = () => {};
+});
 
 const agent = (slug: string, name: string, over: Partial<AgentInfo> = {}): AgentInfo => ({
   slug,
@@ -28,88 +44,144 @@ const agent = (slug: string, name: string, over: Partial<AgentInfo> = {}): Agent
   notice: null,
   ...over,
 });
-const AGENTS = [agent("dev", "Dev"), agent("seo", "SEO")];
+const AGENTS = [agent("dev", "Dev"), agent("pd", "Product Designer")];
 
-const fleet = (over: Partial<AgentFleet> = {}): AgentFleet => ({
-  asOf: NOW,
-  projects: [
-    { slug: "manta", name: "Manta" },
-    { slug: "ronda", name: "Ronda" },
-  ],
-  rows: [
-    {
-      slug: "dev",
-      name: "Dev",
-      color: "#336699",
-      seats: ["manta"],
-      cells: { manta: { jobId: "job1", title: "Explorer: 0-byte file crash", at: NOW, state: "working", detail: "4/7 · 1 question" }, ronda: null },
-      tasksThisWeek: 14,
-    },
-    {
-      slug: "seo",
-      name: "SEO",
-      color: null,
-      seats: ["manta", "ronda"],
-      cells: {
-        manta: { jobId: "", title: "Idle", at: 0, state: "idle", detail: "last task 3d ago" },
-        ronda: { jobId: "job2", title: "Weekly audit", at: NOW, state: "failed", detail: "Gmail token" },
-      },
-      tasksThisWeek: 7,
-    },
-  ],
-  week: { tasks: 41 },
-  recap: { since: NOW - 18 * 3_600_000, lines: ["Manta handed 9 requests to agents", "SEO finished 1 task in Ronda"] },
+const task = (over: Partial<FleetTask> = {}): FleetTask => ({
+  jobId: "j1",
+  rootJobId: "j1",
+  title: "Let Manta hand work to agents more than once per request",
+  agentSlug: "dev",
+  project: "mantaui",
+  projectName: "mantaui",
+  startedAt: NOW - 18 * MIN,
+  branch: "agent/dev/handoff-limit",
+  askedBy: { by: "manta", sessionId: "ses_chat" },
+  status: "in-progress",
+  pausedAt: null,
+  ...over,
+});
+const ended = (over: Partial<FleetEnded> = {}): FleetEnded => ({
+  jobId: "e1",
+  rootJobId: "e1",
+  title: "Give skill trials more disk space",
+  agentSlug: "dev",
+  project: "mantaui",
+  projectName: "mantaui",
+  startedAt: NOW - 2 * 3_600_000,
+  branch: "agent/dev/trial-volume",
+  askedBy: { by: "you" },
+  endedAt: NOW - 40 * MIN,
+  outcome: "done",
+  sentence: "Its changes are in the project.",
+  facts: "6 files changed · branch agent/dev/trial-volume (in the project)",
   ...over,
 });
 
-const needsData = (over: Partial<NeedsYou> = {}): NeedsYou => ({ questions: [], changes: [], reviews: [], count: 0, ...over });
-const needsRead = (over: Partial<AgentsRead<NeedsYou>> = {}): AgentsRead<NeedsYou> => ({
-  data: needsData(),
+const tasksData = (over: Partial<FleetTasks> = {}): FleetTasks => ({
+  asOf: NOW,
+  running: [
+    task(),
+    task({ jobId: "j2", title: "Mock up a simpler agent profile page", agentSlug: "pd", askedBy: { by: "you" } }),
+    task({ jobId: "j3", title: "Upgrade the file tree", project: "ethernal", projectName: "ethernal" }),
+    task({ jobId: "j4", title: "Add speaker names to transcript exports", project: "capo", projectName: "capo", status: "paused-by-you", pausedAt: NOW - 3 * 3_600_000 }),
+  ],
+  ended: [ended(), ended({ jobId: "e2", title: "Write the release notes", outcome: "didnt-finish", sentence: "It ran out of time.", endedAt: NOW - 60 * MIN }), ended({ jobId: "e3", title: "Refresh the notes", outcome: "interrupted", sentence: "It was cut off when the box restarted.", agentSlug: "pd" }), ended({ jobId: "e4", title: "Stopped thing", outcome: "stopped", sentence: "You stopped it. What it had done so far is kept." })],
+  cap: 10,
+  full: false,
+  ...over,
+});
+
+const read = <T,>(data: T | null, over: Partial<AgentsRead<T>> = {}): AgentsRead<T> => ({
+  data,
   error: null,
+  refreshError: null,
+  updatedAt: NOW,
   unsupported: false,
   loading: false,
   reload: () => Promise.resolve(),
   ...over,
 });
+const needs = (over: Partial<NeedsYou> = {}): NeedsYou => ({ questions: [], changes: [], reviews: [], count: 0, ...over });
+
+const storeJob = (over: Partial<DelegateJob> = {}): DelegateJob =>
+  ({
+    id: "j1",
+    agent: "agent-dev",
+    name: "x",
+    status: "running",
+    childSessionID: "ses_child1",
+    parentSessionID: "ses_chat",
+    view: {
+      rev: { epoch: 1, n: 1 },
+      asOf: NOW,
+      state: "working",
+      headline: "running the delegate tests",
+      headlineSource: "checklist",
+      steps: {
+        done: 1,
+        total: 3,
+        current: "Remove the cap",
+        items: [
+          { text: "Find where the limit is enforced", status: "done" },
+          { text: "Remove the cap", status: "current" },
+          { text: "Run the tests", status: "pending" },
+        ],
+        source: "checklist",
+        planRevision: 1,
+        grewAt: null,
+      },
+      bar: 0.4,
+      live: null,
+      startedAt: NOW - 18 * MIN,
+      endedAt: null,
+      lastProgressAt: NOW,
+      ceilingAt: null,
+      milestones: [],
+      files: null,
+      usage: null,
+      model: null,
+    },
+    ...over,
+  }) as unknown as DelegateJob;
 
 describe("FleetPage", () => {
   let h: Harness | null = null;
   let api: MockApi;
-  let hint: (() => void) | null = null;
-  const onOpenProfile = vi.fn();
+  const onOpenNeeds = vi.fn();
+  const reload = vi.fn(() => Promise.resolve());
 
   beforeEach(() => {
-    resetStore({ usage: [], jobs: {}, drafts: [] });
+    localStorage.clear();
+    resetStore({ usage: [], jobs: {}, jobSkew: {}, drafts: [], connectionState: { state: "connected" } } as never);
     resetPackageAgentsForTest();
-    onOpenProfile.mockClear();
-    hint = null;
+    onOpenNeeds.mockClear();
+    reload.mockClear();
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
   });
   afterEach(() => {
     h?.unmount();
     h = null;
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
-  async function open(props: { needs?: AgentsRead<NeedsYou>; focus?: "needs" } = {}, overrides: Record<string, unknown> = {}, strict = false) {
+  async function open(props: { tasks?: AgentsRead<FleetTasks>; needs?: AgentsRead<NeedsYou> } = {}, overrides: Record<string, unknown> = {}) {
     ({ api } = installMockApi({
       agentsList: () => Promise.resolve(AGENTS),
-      agentsFleet: () => Promise.resolve(fleet()),
-      agentsFleetSeen: () => Promise.resolve({ ok: true }),
-      agentsProjects: () => Promise.resolve([{ slug: "manta", name: "Manta" }]),
-      onAgentFleet: (cb: () => void) => {
-        hint = cb;
-        return () => {
-          hint = null;
-        };
-      },
+      delegateOpenSession: () => Promise.resolve({ ok: true, tmuxSession: "manta", windowIndex: 2 }),
+      delegateStop: () => Promise.resolve({ ok: true }),
+      delegateResume: () => Promise.resolve({ ok: true }),
       ...overrides,
     }));
-    h = mount(<FleetPage needs={props.needs ?? needsRead()} focus={props.focus} onOpenProfile={onOpenProfile} />, { strictMode: strict });
+    h = mount(<FleetPage tasks={props.tasks ?? read(tasksData(), { reload })} needs={props.needs ?? read(needs())} onOpenNeeds={onOpenNeeds} />);
     await h.flush();
     await h.flush();
   }
   const q = (sel: string) => h!.container.querySelector<HTMLElement>(sel);
+  const qa = (sel: string) => [...h!.container.querySelectorAll<HTMLElement>(sel)];
   const text = () => h!.container.textContent ?? "";
+  const byLabel = (label: string) => h!.container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`);
+  const byText = (t: string) => [...h!.container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === t);
   async function click(el: Element | null | undefined) {
     expect(el).toBeTruthy();
     await act(async () => {
@@ -118,192 +190,251 @@ describe("FleetPage", () => {
     await h!.flush();
   }
 
-  it("shows a skeleton only after 150 ms of waiting, then the page", async () => {
-    let resolve!: (f: AgentFleet) => void;
-    await open({}, { agentsFleet: () => new Promise<AgentFleet>((r) => (resolve = r)) });
+  it("Projects is the default: a group per project, rows with title, agent and status in columns, and no 'asked by' on a row", async () => {
+    await open();
+    expect(qa('[data-testid="fleet-group"]').map((g) => g.dataset.group)).toEqual(["mantaui", "ethernal", "capo"]);
+    const row = q('[data-job="j1"]')!;
+    expect(row.textContent).toContain("Let Manta hand work to agents more than once per request");
+    expect(q('[data-job="j1"] [data-testid="fleet-task-who"]')?.textContent).toContain("Dev");
+    expect(q('[data-job="j1"] [data-testid="fleet-task-who"] .truncate')?.textContent).toBe("Dev");
+    expect(q('[data-job="j1"] [data-testid="fleet-task-status"]')?.textContent).toBe("In progress");
+    expect(text()).not.toMatch(/asked by/i);
+    // the group summary says what is in it
+    expect(q('[data-group="capo"]')?.textContent).toContain("1 paused");
+    expect(q('[data-group="mantaui"]')?.textContent).toContain("2 in progress");
+  });
+
+  it("the Agents view groups by agent and shows the project in the second column; the choice is remembered", async () => {
+    await open();
+    await click(byText("Agents"));
+    expect(qa('[data-testid="fleet-group"]').map((g) => g.dataset.group)).toEqual(["dev", "pd"]);
+    expect(q('[data-job="j1"] [data-testid="fleet-task-who"]')?.textContent).toBe("mantaui");
+    expect(localStorage.getItem("manta:fleet:view")).toBe("agents");
+    h!.unmount();
+    await open();
+    expect(qa('[data-testid="fleet-group"]').map((g) => g.dataset.group)).toEqual(["dev", "pd"]);
+  });
+
+  it("the header counts the work: n in progress · n paused", async () => {
+    await open();
+    expect(q('[data-testid="fleet-header-counts"]')?.textContent).toBe("3 in progress · 1 paused");
+  });
+
+  it("a paused task says Paused by you, how long ago, and offers Resume", async () => {
+    await open();
+    const st = q('[data-job="j4"] [data-testid="fleet-task-status"]')!;
+    expect(st.textContent).toContain("Paused by you");
+    expect(st.textContent).toContain("3h ago");
+    expect(byLabel("Resume: Add speaker names to transcript exports")).toBeTruthy();
+    expect(byLabel("Resume: Upgrade the file tree")).toBeNull();
+  });
+
+  it("Resume calls the box with the task, announces it and reads again", async () => {
+    await open();
+    await click(byLabel("Resume: Add speaker names to transcript exports"));
+    expect(api.calls.delegateResume).toEqual([["j4"]]);
+    expect(reload).toHaveBeenCalled();
+    expect(q('[role="status"].sr-only')?.textContent).toContain("Resumed: Add speaker names to transcript exports");
+  });
+
+  it("a refused Resume says why under the row; nothing is silent", async () => {
+    await open({}, { delegateResume: () => Promise.resolve({ ok: false, error: "too many jobs are running" }) });
+    await click(byLabel("Resume: Add speaker names to transcript exports"));
+    expect(q('[data-job="j4"] [data-testid="fleet-task-error"]')?.textContent).toContain("Couldn’t resume it. too many jobs are running");
+    await open({}, { delegateResume: () => Promise.reject(new Error("The box didn't answer")) });
+    await click(byLabel("Resume: Add speaker names to transcript exports"));
+    expect(q('[data-job="j4"] [data-testid="fleet-task-error"]')?.textContent).toContain("The box didn't answer");
+  });
+
+  it("with the box full, Resume is disabled and its title says why", async () => {
+    await open({ tasks: read(tasksData({ full: true, cap: 10 })) });
+    const b = byLabel("Resume: Add speaker names to transcript exports")!;
+    expect(b.disabled).toBe(true);
+    expect(b.title).toBe("Can’t resume yet: 10 tasks are already running. It can start when one finishes.");
+  });
+
+  it("top of Fleet: a card for decisions that block, with Review → to Needs you; optional questions are not mentioned", async () => {
+    await open({ needs: read(needs({ changes: [{ id: "c1", slug: "pd", agentName: "Product Designer", kind: "update", state: "pending" } as never], questions: [{ id: "q", questions: [] } as never] })) });
+    const card = q('[data-testid="fleet-needs-card"]')!;
+    expect(card.textContent).toContain("1 decision is waiting for you");
+    expect(card.textContent).toContain("Approve the change to Product Designer");
+    expect(card.textContent).toContain("Review");
+    expect(q('[data-testid="fleet-calm"]')).toBeNull();
+    await click(card);
+    expect(onOpenNeeds).toHaveBeenCalledTimes(1);
+  });
+
+  it("with nothing to decide, a calm line — also when only optional questions are open", async () => {
+    await open();
+    expect(q('[data-testid="fleet-calm"]')?.textContent).toBe("Nothing needs you right now.");
+    h!.unmount();
+    await open({ needs: read(needs({ questions: [{ id: "q", questions: [] } as never] })) });
+    expect(q('[data-testid="fleet-calm"]')?.textContent).toBe("Nothing needs you right now.");
+    expect(text()).not.toMatch(/question/i);
+  });
+
+  it("Ended today: title, agent · project · when, the sentence, the badge in the status column, Open session — and no New badge, no Undo", async () => {
+    await open();
+    const rows = qa('[data-testid="fleet-ended-row"]');
+    expect(rows).toHaveLength(4);
+    expect(rows[0].textContent).toContain("Give skill trials more disk space");
+    expect(rows[0].textContent).toContain("Dev");
+    expect(rows[0].textContent).toContain("mantaui · 40m ago");
+    expect(rows[0].textContent).toContain("Its changes are in the project.");
+    expect(rows.map((r) => q(`[data-job="${r.dataset.job}"] [data-testid="fleet-ended-badge"]`)?.textContent)).toEqual(["Done", "Didn’t finish", "Interrupted", "Stopped by you"]);
+    expect(byLabel("Open session: Give skill trials more disk space")).toBeTruthy();
+    expect(text()).not.toMatch(/\bNew\b/);
+    expect(text()).not.toMatch(/Undo|Earlier days|Should have asked/);
+    expect(q('[data-testid="fleet-ended"]')?.textContent).toContain("4 tasks");
+  });
+
+  it("Ended today shows the first four and the rest behind a native <details> 'Show N more'", async () => {
+    const many = Array.from({ length: 7 }, (_, i) => ended({ jobId: `m${i}`, title: `Task ${i}` }));
+    await open({ tasks: read(tasksData({ ended: many })) });
+    const more = q('[data-testid="fleet-ended-more"]') as HTMLDetailsElement;
+    expect(more.tagName).toBe("DETAILS");
+    expect(more.open).toBe(false);
+    expect(more.querySelector("summary")?.textContent).toContain("Show 3 more");
+    expect(qa('[data-testid="fleet-ended-row"]')).toHaveLength(7);
+  });
+
+  it("Open session opens the task's session; a refusal is said on the page", async () => {
+    await open();
+    await click(byLabel("Open session: Upgrade the file tree"));
+    expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "j3" }]]);
+    h!.unmount();
+    await open({}, { delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task has no window any more" }) });
+    await click(byLabel("Open session: Upgrade the file tree"));
+    expect(q('[data-testid="fleet-open-error"]')?.textContent).toContain("That task has no window any more");
+    expect(q('[data-testid="fleet-open-error"]')?.getAttribute("role")).toBe("alert");
+  });
+
+  it("Details: the technical record — who asked, now, started, branch, a live checklist — and Esc closes it", async () => {
+    resetStore({ jobs: { ses_child1: storeJob() }, jobSkew: {}, connectionState: { state: "connected" }, projects: [{ tmuxSession: "m", defaultCwd: "/m", windows: [{ index: 0, name: "Limits cleanup", opencodeSessionId: "ses_chat" }] }] } as never);
+    await open();
+    await click(byLabel("Details: Let Manta hand work to agents more than once per request"));
+    const d = q('[data-testid="fleet-details"]')!;
+    expect(d.textContent).toContain("Manta in Limits cleanup");
+    expect(d.textContent).toContain("running the delegate tests");
+    expect(d.textContent).toContain("agent/dev/handoff-limit");
+    expect(d.textContent).toContain("Checklist · 1 of 3 done");
+    expect([...d.querySelectorAll("li")].map((li) => li.textContent?.replace(/ \((done|current step|to do)\)/, "").replace(/^✓/, ""))).toEqual(["Find where the limit is enforced", "Remove the cap", "Run the tests"]);
+    expect(d.getAttribute("aria-labelledby")).toBe("fleet-details-title");
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(q('[data-testid="fleet-details"]')).toBeNull();
+  });
+
+  it("Details without a checklist says the agent hasn't written one", async () => {
+    await open();
+    await click(byLabel("Details: Upgrade the file tree"));
+    expect(q('[data-testid="fleet-details"]')?.textContent).toContain("hasn’t written its checklist yet");
+  });
+
+  it("an ended task's Details: its outcome, the sentence and the technical record", async () => {
+    await open();
+    await click(byLabel("Details: Write the release notes"));
+    const d = q('[data-testid="fleet-details"]')!;
+    expect(d.dataset.kind).toBe("ended");
+    expect(d.textContent).toContain("Didn’t finish.");
+    expect(d.textContent).toContain("It ran out of time.");
+    expect(d.textContent).toContain("Technical record");
+    expect(d.textContent).toContain("6 files changed");
+  });
+
+  it("Stop asks first, in a native dialog with 'Keep running' focused; keeping leaves the task alone", async () => {
+    await open();
+    await click(byLabel("Details: Upgrade the file tree"));
+    await click(byText("Stop task"));
+    const dlg = q("dialog")!;
+    expect(dlg.hasAttribute("open")).toBe(true);
+    expect(dlg.textContent).toContain("Upgrade the file tree");
+    await click([...dlg.querySelectorAll("button")].find((b) => b.textContent === "Keep running"));
+    expect(api.calls.delegateStop ?? []).toHaveLength(0);
+    expect(dlg.hasAttribute("open")).toBe(false);
+  });
+
+  it("Stop task stops it, says so, reads again and closes Details; a failure keeps the task running and offers Try again", async () => {
+    await open();
+    await click(byLabel("Details: Upgrade the file tree"));
+    await click(byText("Stop task"));
+    await click([...q("dialog")!.querySelectorAll("button")].find((b) => b.textContent === "Stop task"));
+    expect(api.calls.delegateStop).toEqual([["j3"]]);
+    expect(reload).toHaveBeenCalled();
+    expect(q('[role="status"].sr-only')?.textContent).toContain("Stopped: Upgrade the file tree");
+    h!.unmount();
+
+    await open({}, { delegateStop: () => Promise.resolve({ ok: false, error: "The box didn't answer" }) });
+    await click(byLabel("Details: Upgrade the file tree"));
+    await click(byText("Stop task"));
+    await click([...q("dialog")!.querySelectorAll("button")].find((b) => b.textContent === "Stop task"));
+    expect(q('[data-job="j3"] [data-testid="fleet-task-error"]')?.textContent).toContain("Couldn’t stop it. The box didn't answer");
+    expect(q('[data-testid="fleet-details-error"]')?.textContent).toContain("The box didn't answer");
+    expect(q('[data-job="j3"]')).toBeTruthy(); // still listed
+    await click(byLabel("Try stopping again: Upgrade the file tree"));
+    expect(q("dialog")!.hasAttribute("open")).toBe(true);
+  });
+
+  it("loading: nothing for 150 ms, then a skeleton", async () => {
+    await open({ tasks: read<FleetTasks>(null, { loading: true }) });
     expect(q('[data-testid="fleet-skeleton"]')).toBeNull();
     await act(async () => {
       await new Promise((r) => setTimeout(r, 220));
     });
     expect(q('[data-testid="fleet-skeleton"]')).toBeTruthy();
-    await act(async () => {
-      resolve(fleet());
-    });
-    await h!.flush();
-    expect(q('[data-testid="fleet-skeleton"]')).toBeNull();
-    expect(q('[data-testid="fleet-grid"]')).toBeTruthy();
   });
 
-  it("a first read that fails is a sentence with Try again, which reads again", async () => {
-    let calls = 0;
-    await open({}, { agentsFleet: () => (++calls === 1 ? Promise.reject(new Error("The box is busy")) : Promise.resolve(fleet())) });
-    expect(q('[data-testid="fleet-error"]')?.textContent).toContain("The box is busy");
-    const retry = [...h!.container.querySelectorAll("button")].find((b) => b.textContent === "Try again");
-    await click(retry);
-    expect(q('[data-testid="fleet-error"]')).toBeNull();
-    expect(q('[data-testid="fleet-grid"]')).toBeTruthy();
-  });
-
-  it("an older box (unknown channel) is told to update, not shown an error", async () => {
-    await open({}, { agentsFleet: () => Promise.reject(new Error("unknown rpc channel: agents:fleet")) });
-    expect(q('[data-testid="fleet-unsupported"]')?.textContent).toContain("Update the box to see the fleet");
-    expect(q('[data-testid="fleet-error"]')).toBeNull();
-  });
-
-  it("no agents: says so and offers New agent, which opens a chat draft with Manta", async () => {
-    await open({}, { agentsFleet: () => Promise.resolve(fleet({ rows: [], projects: [] })) });
-    expect(q('[data-testid="fleet-no-agents"]')?.textContent).toContain("No agents yet");
-    resetStore({ projects: [{ tmuxSession: "manta", defaultCwd: "/work/manta", windows: [] } as never], activeProjectName: "manta" });
-    await click([...h!.container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "New agent"));
-    const s = useStore.getState();
-    expect(s.drafts.at(-1)?.input).toBe("Create an agent that ");
-  });
-
-  it("shows the header pills (tasks this week, plan usage from the plan windows) and never a dollar amount", async () => {
-    const usage: UsageSnapshot = { provider: "claude", providerIDs: ["anthropic"], fetchedAt: 1, windows: [{ kind: "session", label: "5h", pct: 12 }, { kind: "weekly", label: "7d", pct: 38 }] } as UsageSnapshot;
-    resetStore({ usage: [usage] });
-    await open();
-    expect(text()).toContain("All projects");
-    expect(text()).toContain("This week: 41 tasks · plan usage 38%");
-    expect(text()).not.toMatch(/\$/);
-  });
-
-  it("leaves out the plan usage when it is unknown", async () => {
-    await open();
-    expect(text()).toContain("This week: 41 tasks");
-    expect(text()).not.toContain("plan usage");
-  });
-
-  it("Needs you comes first with its count, then the recap, then the grid", async () => {
-    await open({ needs: needsRead({ data: needsData({ count: 3 }) }) });
-    const order = [...h!.container.querySelectorAll('[data-testid="fleet-needs"], [data-testid="fleet-recap"], [data-testid="fleet-grid"]')].map((e) => e.getAttribute("data-testid"));
-    expect(order).toEqual(["fleet-needs", "fleet-recap", "fleet-grid"]);
-    expect(q('[data-testid="fleet-needs"] [data-testid="needs-count"]')?.textContent).toBe("3");
-  });
-
-  it("an empty Needs you says Nothing needs you.", async () => {
-    await open();
-    expect(q('[data-testid="fleet-needs"]')?.textContent).toContain("Nothing needs you.");
-    expect(q('[data-testid="needs-count"]')).toBeNull();
-  });
-
-  it("Needs you has its own states: loading, error with Try again, older box", async () => {
-    await open({ needs: needsRead({ data: null, loading: true }) });
-    expect(q('[data-testid="fleet-needs"]')?.textContent).toContain("Loading");
-    h!.unmount();
-    const reload = vi.fn(() => Promise.resolve());
-    await open({ needs: needsRead({ data: null, error: "No answer", reload }) });
-    expect(q('[data-testid="fleet-needs"]')?.textContent).toContain("No answer");
-    await click([...q('[data-testid="fleet-needs"]')!.querySelectorAll("button")].find((b) => b.textContent === "Try again"));
+  it("a first read that failed: a banner with the sentence and Try again, which reads again", async () => {
+    await open({ tasks: read<FleetTasks>(null, { error: "The box is busy", updatedAt: null, reload }) });
+    const b = q('[data-testid="fleet-banner"]')!;
+    expect(b.textContent).toContain("Couldn’t load Fleet.");
+    expect(b.textContent).toContain("The box is busy");
+    await click(byText("Try again"));
     expect(reload).toHaveBeenCalled();
-    h!.unmount();
-    await open({ needs: needsRead({ data: null, unsupported: true }) });
-    expect(q('[data-testid="fleet-needs"]')?.textContent).toContain("Update the box");
   });
 
-  it("the recap: 'Since …' and the server's own lines; nothing when there are none", async () => {
+  it("a refresh that failed keeps the earlier data under a banner that names the last update", async () => {
+    const at = new Date(2026, 10, 28, 14, 2).getTime();
+    await open({ tasks: read(tasksData(), { refreshError: "busy", updatedAt: at, reload }) });
+    expect(q('[data-testid="fleet-banner"]')?.textContent).toContain("Couldn’t refresh Fleet.");
+    expect(q('[data-testid="fleet-banner"]')?.textContent).toContain("14:02");
+    expect(q('[data-testid="fleet-banner"]')?.getAttribute("role")).toBe("alert");
+    expect(qa('[data-testid="fleet-task-row"]')).toHaveLength(4);
+  });
+
+  it("box unreachable: a banner with the last report time; every action is disabled with the reason; the data stays", async () => {
+    resetStore({ connectionState: { state: "reconnecting", attempt: 2, backoffMs: 1000 } } as never);
+    const at = new Date(2026, 10, 28, 14, 2).getTime();
+    await open({ tasks: read(tasksData(), { updatedAt: at }) });
+    const b = q('[data-testid="fleet-banner"]')!;
+    expect(b.textContent).toContain("Can’t reach your box right now.");
+    expect(b.textContent).toContain("14:02");
+    expect(b.getAttribute("role")).toBe("status");
+    for (const label of ["Open session: Upgrade the file tree", "Resume: Add speaker names to transcript exports"]) {
+      expect(byLabel(label)!.disabled).toBe(true);
+      expect(byLabel(label)!.title).toBe("Unavailable until the box is reachable");
+    }
+    expect(qa('[data-testid="fleet-task-row"]')).toHaveLength(4);
+  });
+
+  it("nothing in progress: an empty state that says what to do; Ended today still shows", async () => {
+    await open({ tasks: read(tasksData({ running: [] })) });
+    expect(q('[data-testid="fleet-empty"]')?.textContent).toContain("Nothing is being worked on");
+    expect(q('[data-testid="fleet-calm"]')).toBeNull();
+    expect(qa('[data-testid="fleet-ended-row"]')).toHaveLength(4);
+  });
+
+  it("an older box (no such channel) is told to update, not shown an error", async () => {
+    await open({ tasks: read<FleetTasks>(null, { unsupported: true }) });
+    expect(q('[data-testid="fleet-unsupported"]')?.textContent).toContain("Update the box to see the fleet");
+  });
+
+  it("the page's rows sit in a container the columns respond to, not the window", async () => {
     await open();
-    expect(q('[data-testid="fleet-recap"]')?.textContent).toContain("Since");
-    expect(q('[data-testid="fleet-recap"]')?.textContent).toContain("Manta handed 9 requests to agents");
-    expect(q('[data-testid="fleet-recap"]')?.textContent).toContain("SEO finished 1 task in Ronda");
-    h!.unmount();
-    await open({}, { agentsFleet: () => Promise.resolve(fleet({ recap: { since: null, lines: [] } })) });
-    expect(q('[data-testid="fleet-recap"]')).toBeNull();
-  });
-
-  it("a recap line about one task (a failure the user asked for) has a way to open it; a refusal is said on the page", async () => {
-    const recap = { since: null, lines: ["Dev finished 2 tasks Manta handed off", "Dev failed “ship it”"], links: [{ line: 1, jobId: "job7" }] };
-    await open({}, { agentsFleet: () => Promise.resolve(fleet({ recap })), delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task has no window any more" }) });
-    const buttons = [...q('[data-testid="fleet-recap"]')!.querySelectorAll("button")];
-    expect(buttons.map((b) => b.textContent)).toEqual(["Open"]); // only the linked line
-    expect(buttons[0].getAttribute("aria-label")).toBe("Open: Dev failed “ship it”");
-    expect(q('[data-testid="fleet-recap"]')?.textContent).toContain("Dev finished 2 tasks Manta handed off");
-    await click(buttons[0]);
-    expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "job7" }]]);
-    expect(q('[data-testid="fleet-recap"] [role="alert"]')?.textContent).toContain("That task has no window any more");
-  });
-
-  it("the grid is a table: a column per project, a row per agent, '—' for no seat, tasks this week last", async () => {
-    await open();
-    const table = q('[data-testid="fleet-grid"] table')!;
-    expect([...table.querySelectorAll("thead th")].map((t) => t.textContent)).toEqual(["Agent", "Manta", "Ronda", "Tasks this week"]);
-    const rows = [...table.querySelectorAll("tbody tr")];
-    expect(rows).toHaveLength(2);
-    expect(rows[0].querySelector('th[scope="row"]')?.textContent).toContain("Dev");
-    const cells = [...rows[0].querySelectorAll("td")];
-    expect(cells[0].textContent).toContain("Explorer: 0-byte file crash");
-    expect(cells[0].textContent).toContain("Working · 4/7 · 1 question");
-    expect(cells[1].textContent).toBe("—");
-    expect(cells[2].textContent).toBe("14");
-    const seo = [...rows[1].querySelectorAll("td")];
-    expect(seo[0].textContent).toContain("last task 3d ago");
-    expect(seo[1].textContent).toContain("Failed · Gmail token");
-    // the region is named and keyboard-scrollable (responsive-table guide)
-    const region = q('[data-testid="fleet-grid"] [role="region"]')!;
-    expect(region.getAttribute("tabindex")).toBe("0");
-    expect(region.getAttribute("aria-labelledby")).toBeTruthy();
-  });
-
-  it("a cell with a task opens its session; an idle cell and a dash are not buttons", async () => {
-    await open({}, { delegateOpenSession: () => Promise.resolve({ ok: true, tmuxSession: "manta", windowIndex: 2 }) });
-    const buttons = [...h!.container.querySelectorAll<HTMLButtonElement>('[data-testid="fleet-grid"] td button')];
-    expect(buttons.map((b) => b.textContent)).toEqual([expect.stringContaining("Explorer: 0-byte"), expect.stringContaining("Weekly audit")]);
-    await click(buttons[0]);
-    expect(api.calls.delegateOpenSession).toEqual([[{ jobId: "job1" }]]);
-  });
-
-  it("a refused open says why on the page", async () => {
-    await open({}, { delegateOpenSession: () => Promise.resolve({ ok: false, error: "That task has no window any more" }) });
-    await click(q('[data-testid="fleet-grid"] td button'));
-    expect(q('[data-testid="fleet-open-error"]')?.textContent).toContain("That task has no window any more");
-    expect(q('[data-testid="fleet-open-error"]')?.getAttribute("role")).toBe("alert");
-  });
-
-  it("an agent's name opens its profile", async () => {
-    await open();
-    await click([...h!.container.querySelectorAll('[data-testid="fleet-grid"] th[scope="row"] button')][1]);
-    expect(onOpenProfile).toHaveBeenCalledWith("seo");
-  });
-
-  it("refetches once, a second after a burst of hints (subscribed before the first read)", async () => {
-    let reads = 0;
-    await open({}, { agentsFleet: () => (reads++, Promise.resolve(fleet())) });
-    expect(reads).toBe(1);
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    act(() => {
-      hint?.();
-      hint?.();
-      hint?.();
-    });
-    await act(async () => {
-      vi.advanceTimersByTime(999);
-    });
-    expect(reads).toBe(1);
-    await act(async () => {
-      vi.advanceTimersByTime(2);
-    });
-    expect(reads).toBe(2);
-  });
-
-  it("records the visit when the page is left, once it has shown the fleet", async () => {
-    await open();
-    expect(api.calls.agentsFleetSeen ?? []).toHaveLength(0);
-    h!.unmount();
-    h = null;
-    expect(api.calls.agentsFleetSeen).toHaveLength(1);
-  });
-
-  it("does not record a visit that never showed anything (StrictMode's simulated unmount, an early leave)", async () => {
-    await open({}, { agentsFleet: () => new Promise(() => {}) }, true);
-    h!.unmount();
-    h = null;
-    expect(api.calls.agentsFleetSeen ?? []).toHaveLength(0);
-  });
-
-  it("Needs you row: scrolls the first section into view", async () => {
-    const scroll = vi.fn();
-    Element.prototype.scrollIntoView = scroll;
-    await open({ focus: "needs" });
-    expect(scroll).toHaveBeenCalled();
+    const col = q('[data-testid="fleet-column"]')!;
+    expect(col.className).toContain("[container-type:inline-size]");
+    expect(q('[data-job="j1"]')!.className).toContain("@container(min-width:560px)");
+    expect(q('[data-job="j1"]')!.className).toContain("@container(min-width:850px)");
   });
 });

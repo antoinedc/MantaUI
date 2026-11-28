@@ -12,7 +12,7 @@
 // tuple when the tool part settles, on every hint for it and after a reconnect. A read that lands after a newer one
 // (or after the user's own press) never rolls the card back.
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Bot, ChevronRight } from "lucide-react";
 import type { AgentChange, OpencodePart } from "../shared/types";
 import { Button } from "./Button";
@@ -268,15 +268,20 @@ export function AgentChangeView({
   onChange,
   collapsed = false,
   actions: offered,
+  note,
 }: {
   change: AgentChange;
   onChange: (next: AgentChange) => void;
+  /** A line from the page inside the card, before the buttons (Needs you: "Manta recommends …"). */
+  note?: ReactNode;
   collapsed?: boolean;
   /** Which of the buttons the state allows to show (default: all). The history shows a card per row and offers each button once on the page. */
   actions?: ReadonlyArray<AgentChangeAction>;
 }) {
   const [busy, setBusy] = useState<AgentChangeAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // the press that last failed: its button reads "<label> again" until a press of it succeeds
+  const [failedAction, setFailedAction] = useState<AgentChangeAction | null>(null);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -298,12 +303,16 @@ export function AgentChangeView({
             : await window.api.agentsChangeUndo(change.id);
       if (!alive.current) return;
       if (!next) throw new Error("The box didn't answer. Check the card again in a moment.");
+      setFailedAction(null);
       onChange(next);
       const outcome = agentChangeOutcome(action, next);
       // The new chip says it; add the short line only when it ended where the press aimed (a refusal says why instead).
       setNotice(next.state === outcome.state ? { tone: "ok", text: outcome.text, state: next.state } : null);
     } catch (e) {
-      if (alive.current) setNotice({ tone: "error", text: errText(e), state: change.state });
+      if (alive.current) {
+        setNotice({ tone: "error", text: errText(e), state: change.state });
+        setFailedAction(action);
+      }
     } finally {
       if (alive.current) setBusy(null);
     }
@@ -328,7 +337,7 @@ export function AgentChangeView({
             disabled={anyBusy}
             onClick={() => void press(action)}
           >
-            {agentChangeButtonLabel(action, change, busy === action)}
+            {agentChangeButtonLabel(action, change, busy === action, failedAction === action)}
           </Button>
         ));
 
@@ -420,6 +429,7 @@ export function AgentChangeView({
           <div className="flex flex-col gap-2">
             {lead}
             {outcome}
+            {note}
             {/* a taken-back learned rule has nothing to unfold: its summary line says it all */}
             {!(change.origin?.kind === "learned" && !change.learned?.added) && (
             <details data-testid="agent-change-fold" className="group">
@@ -466,6 +476,7 @@ export function AgentChangeView({
           )}
           {lead}
           {detail}
+          {note}
           {outcome}
         </div>
       </Card>

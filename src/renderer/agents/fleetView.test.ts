@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AgentChange, FleetTask, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
 import {
   askedByText,
+  askedByWho,
   changeRecommendation,
   decisionReviews,
   endedBadge,
@@ -152,6 +153,10 @@ describe("statusView: only what the box records", () => {
     expect(askedByText({ by: "manta", sessionId: "s" }, "Limits cleanup")).toBe("asked by Manta in Limits cleanup");
     expect(askedByText({ by: "manta", sessionId: null }, null)).toBe("asked by Manta");
     expect(askedByText({ by: "routine" }, null)).toBe("a routine");
+    expect(askedByWho({ by: "you" }, null)).toBe("You");
+    expect(askedByWho({ by: "manta", sessionId: "s" }, "Limits cleanup")).toBe("Manta in Limits cleanup");
+    expect(askedByWho({ by: "manta", sessionId: null }, null)).toBe("Manta");
+    expect(askedByWho({ by: "routine" }, null)).toBe("A routine");
   });
 });
 
