@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAgentsEngine, checkDraft } from "./agents.mjs";
 import { draftHash } from "./agentTrials.mjs";
+import { parseSourceMd, renderSourceMd } from "./agentSkills.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
 import { MODES } from "../shared/autonomyShared.mjs";
 
@@ -1433,6 +1434,244 @@ test("L3: skills_installed skips a skill folder that links outside its root and 
     const names = r.skills.filter((s) => s.owner === null).map((s) => s.folder.split("/").at(-1)).sort();
     assert.deepEqual(names, ["dev-helper", "linked-in"]);
     assert.ok(!r.skills.some((s) => s.name === "stolen" || s.name === "secret"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// adopting a skill that is already installed on this box (the server copies its files; no fetched page is needed)
+// ---------------------------------------------------------------------------
+
+const DESIGN_MD = "---\nname: design-ref\ndescription: Design guidance for interfaces.\nlicense: Apache-2.0\nversion: 4.7.0\n---\n# Design ref\n\nRead reference/layout.md before touching a layout.\nIf the launcher is unavailable, read the context files directly.\n";
+const DESIGN_FILES = {
+  "SKILL.md": DESIGN_MD,
+  "reference/layout.md": "# Layout\n\nSpacing and rhythm come first.\n",
+  "reference/type.md": "# Type\n\nOne scale, few sizes.\n",
+  "scripts/impeccable": "#!/bin/sh\necho context\n",
+  "scripts/lib/detect.mjs": "console.log('detect');\n",
+};
+async function installDesign(f, files = DESIGN_FILES, name = "design-ref") {
+  const root = join(f.base, "installed-skills", name);
+  for (const [rel, text] of Object.entries(files)) {
+    await mkdir(join(root, rel, ".."), { recursive: true });
+    await writeFile(join(root, rel), text);
+  }
+  return root;
+}
+const adoptOp = (installed = {}, over = {}) => ({ name: "design-ref", op: "add", installed: { skill: "design-ref", taken: "whole", ...installed }, ...over });
+const DESIGN_SEARCH = { queries: [{ source: "skills", query: "landing pages" }], candidates: [{ ref: "design-ref", installs: null, stars: null, licence: "Apache-2.0", verdict: "used-part", why: "installed on this box and fits the job" }] };
+
+test("installed: a whole installed skill is copied by the server — every file, a SOURCE.md that says where it came from, no fetched page and no file content from the model", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f);
+    const plan = await planFor(f, { skills: [adoptOp()] });
+    assert.equal(plan.error, undefined, plan.error);
+    for (const [rel, text] of Object.entries(DESIGN_FILES)) assert.equal(plan.bundle[`skills/design-ref/${rel}`], text, rel);
+    const source = plan.bundle["skills/design-ref/SOURCE.md"];
+    for (const re of [/installed on this box/i, /design-ref/, /Apache-2\.0/, /4\.7\.0/, /Taken: whole/]) assert.match(source, re);
+    assert.equal(parseSourceMd(source)?.licence, "Apache-2.0", "the profile reads it back like any other SOURCE.md");
+    assert.equal(parseSourceMd(source)?.taken, "whole");
+    assert.ok(plan.needsTrial, "a skill change needs a trial");
+    // deterministic: the trial's hash equals the proposal's
+    assert.equal(draftHash((await planFor(f, { skills: [adoptOp()] })).bundle), draftHash(plan.bundle));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: taken \"part\" copies only what's listed (SKILL.md always) — dropping scripts/ leaves no script to review", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f);
+    const plan = await planFor(f, { skills: [adoptOp({ taken: "part", take: ["reference"] })] });
+    assert.equal(plan.error, undefined, plan.error);
+    const files = Object.keys(plan.bundle).filter((k) => k.startsWith("skills/design-ref/")).sort();
+    assert.deepEqual(files, ["skills/design-ref/SKILL.md", "skills/design-ref/SOURCE.md", "skills/design-ref/reference/layout.md", "skills/design-ref/reference/type.md"]);
+    assert.match(plan.bundle["skills/design-ref/SOURCE.md"], /Taken: part/);
+    assert.match(plan.bundle["skills/design-ref/SOURCE.md"], /Left out: scripts/);
+    // a single file can be named too
+    const one = await planFor(f, { skills: [adoptOp({ taken: "part", take: ["reference/layout.md"] })] });
+    assert.deepEqual(Object.keys(one.bundle).filter((k) => k.startsWith("skills/design-ref/")).sort(), ["skills/design-ref/SKILL.md", "skills/design-ref/SOURCE.md", "skills/design-ref/reference/layout.md"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: the skill is found by name or by the folder skills_installed lists; an unknown name and an ambiguous one are sentences", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f);
+    const folder = join(f.base, "installed-skills", "design-ref");
+    assert.equal((await planFor(f, { skills: [adoptOp({ skill: folder })] })).error, undefined);
+    assert.match((await planFor(f, { skills: [adoptOp({ skill: "no-such-skill" })] })).error, /no skill .*no-such-skill.*installed on this box|skills_installed/i);
+    assert.match((await planFor(f, { skills: [adoptOp({ skill: "/etc" })] })).error, /installed/i, "a path that isn't a listed skill folder is never read");
+    // another root with the same name
+    await mkdir(join(f.base, "installed-skills-2", "design-ref"), { recursive: true });
+    await writeFile(join(f.base, "installed-skills-2", "design-ref", "SKILL.md"), DESIGN_MD);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: the shape is checked — not with files or provenance, taken whole|part, take only with part and only paths inside the skill", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f);
+    const bad = async (op, re) => {
+      const r = await planFor(f, { skills: [op] });
+      assert.ok(r.error, `expected an error for ${JSON.stringify(op).slice(0, 120)}`);
+      assert.match(r.error, re);
+    };
+    await bad(adoptOp({}, { files: [{ path: "SKILL.md", content: DESIGN_MD, origin: "written" }] }), /files|installed/i);
+    await bad(adoptOp({}, { provenance: { ...PROV } }), /provenance/i);
+    await bad(adoptOp({ taken: "some" }), /taken/i);
+    await bad(adoptOp({ taken: "part" }), /take/i);
+    await bad(adoptOp({ taken: "whole", take: ["reference"] }), /take/i);
+    await bad(adoptOp({ taken: "part", take: ["../x"] }), /path/i);
+    await bad(adoptOp({ taken: "part", take: ["/etc/passwd"] }), /path/i);
+    await bad(adoptOp({ taken: "part", take: ["nope"] }), /nope/);
+    await bad(adoptOp({ extra: 1 }), /unknown/i);
+    await bad({ name: "design-ref", op: "remove", installed: { skill: "design-ref", taken: "whole" } }, /remove/i);
+    await bad(adoptOp({}, { name: "other-name" }), /name.*design-ref|design-ref.*name/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: the licence allowlist still applies — read from the skill's own frontmatter, its SOURCE.md or its licence file; none, or one that doesn't allow copying, refuses", async () => {
+  const f = await fixture();
+  try {
+    const mdWith = (line) => DESIGN_MD.replace("license: Apache-2.0\n", line);
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": mdWith("license: GPL-3.0-only\n") });
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /GPL-3\.0-only.*(doesn't allow copying|allowed)|Apache-2\.0/);
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": mdWith("") });
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /licen[sc]e/i, "no licence stated");
+    // a licence file that says MIT is enough when the frontmatter says nothing; its notice travels as LICENSE
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": mdWith(""), LICENSE: MIT_TEXT });
+    const mit = await planFor(f, { skills: [adoptOp()] });
+    assert.equal(mit.error, undefined, mit.error);
+    assert.equal(mit.bundle["skills/design-ref/LICENSE"], MIT_TEXT);
+    assert.match(mit.bundle["skills/design-ref/SOURCE.md"], /Licence: MIT/);
+    // a frontmatter that disagrees with the licence file is refused
+    await installDesign(f, { ...DESIGN_FILES, LICENSE: MIT_TEXT });
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /Apache-2\.0.*MIT|MIT.*Apache-2\.0/);
+    // Apache-2.0 by frontmatter alone is accepted (this is the installed impeccable's case)
+    await rm(join(f.base, "installed-skills", "design-ref", "LICENSE"));
+    assert.equal((await planFor(f, { skills: [adoptOp()] })).error, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: a SOURCE.md the skill already carries (it was copied to this box before) is carried forward: its origin, repository and commit", async () => {
+  const f = await fixture();
+  try {
+    const was = renderSourceMd({ url: "https://github.com/acme/design/blob/" + A40 + "/design-ref/SKILL.md", sourceId: "src_x", repo: "acme/design", ref: A40, licence: "MIT", taken: "whole" }, { copied: ["SKILL.md"] });
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": DESIGN_MD.replace("license: Apache-2.0\n", ""), "SOURCE.md": was });
+    const plan = await planFor(f, { skills: [adoptOp()] });
+    assert.equal(plan.error, undefined, plan.error);
+    const p = parseSourceMd(plan.bundle["skills/design-ref/SOURCE.md"]);
+    assert.deepEqual([p.repo, p.ref, p.licence, p.url], ["acme/design", A40, "MIT", "https://github.com/acme/design/blob/" + A40 + "/design-ref/SKILL.md"]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: path, link and size protections still apply — a link, a file that isn't text, a path the skill rules refuse, a case-folded duplicate, more than the agent's 1 MiB", async () => {
+  const f = await fixture();
+  try {
+    const root = await installDesign(f);
+    // a link anywhere in what is taken
+    await symlink(join(f.base, "secret.txt"), join(root, "reference", "linked.md"));
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /link.*reference\/linked\.md|reference\/linked\.md.*link/);
+    // …but not when the link is in a part that is left out
+    assert.equal((await planFor(f, { skills: [adoptOp({ taken: "part", take: ["reference/layout.md"] })] })).error, undefined);
+    // and not when the link IS the thing taken
+    assert.match((await planFor(f, { skills: [adoptOp({ taken: "part", take: ["reference/linked.md"] })] })).error, /link/);
+    await rm(join(root, "reference", "linked.md"));
+    // a binary file
+    await writeFile(join(root, "reference", "pic.png"), Buffer.from([137, 80, 78, 71, 0, 1, 2]));
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /pic\.png.*text|text.*pic\.png/);
+    await rm(join(root, "reference", "pic.png"));
+    // a name the skill rules refuse
+    await writeFile(join(root, "reference", "my notes.md"), "x");
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /my notes\.md|path/);
+    await rm(join(root, "reference", "my notes.md"));
+    // a case-folded duplicate
+    await writeFile(join(root, "reference", "Layout.md"), "dup");
+    const dup = await planFor(f, { skills: [adoptOp()] });
+    assert.match(dup.error ?? "", /case|twice/i);
+    await rm(join(root, "reference", "Layout.md"));
+    // hidden files are not part of a skill and are left out without a word
+    await writeFile(join(root, ".DS_Store"), "x");
+    assert.equal((await planFor(f, { skills: [adoptOp()] })).error, undefined);
+    // over the agent's 1 MiB: say so and name the way out
+    for (let i = 0; i < 5; i++) await writeFile(join(root, "reference", `big${i}.md`), "y".repeat(250 * 1024));
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /1 MiB/);
+    assert.match((await planFor(f, { skills: [adoptOp()] })).error, /part/i, "the way out is named: take part of it");
+    assert.equal((await planFor(f, { skills: [adoptOp({ taken: "part", take: ["reference/layout.md", "reference/type.md"] })] })).error, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: a skill bigger than 20 files or 256 KiB is fine (the model sends nothing, so those limits don't apply) as long as the agent's own 250 files / 1 MiB hold", async () => {
+  const f = await fixture();
+  try {
+    const files = { ...DESIGN_FILES };
+    for (let i = 0; i < 30; i++) files[`reference/r${i}.md`] = `# R${i}\n\n${"text ".repeat(2000)}\n`; // ~300 KiB in 32+ files
+    await installDesign(f, files);
+    const plan = await planFor(f, { skills: [adoptOp({ taken: "part", take: ["SKILL.md", "reference"] })] });
+    assert.equal(plan.error, undefined, plan.error);
+    assert.equal(Object.keys(plan.bundle).filter((k) => k.startsWith("skills/design-ref/reference/")).length, 32);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: proposing — the card names the origin, the script review runs for a whole skill with scripts and not for the part without them, and the release writes the files", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f);
+    const whole = await propose(f, { draft: { skills: [adoptOp()] }, skillSearch: DESIGN_SEARCH });
+    assert.equal(whole.ok, true, whole.error);
+    assert.deepEqual(whole.change.skillsDiff[0].scripts, ["scripts/impeccable", "scripts/lib/detect.mjs"].sort());
+    assert.equal(whole.change.skillsDiff[0].provenance.licence, "Apache-2.0");
+    assert.match(whole.change.skillsDiff[0].provenance.url, /installed on this box/);
+    assert.equal(f.w.reviewCalls.length, 1, "its scripts are read independently");
+    await release(f);
+    assert.equal((await lastRec(f)).state, "applied");
+    assert.equal(await readFile(skillFile(f, "design-ref", "reference", "layout.md"), "utf-8"), DESIGN_FILES["reference/layout.md"]);
+    assert.equal(await readFile(skillFile(f, "design-ref", "scripts", "impeccable"), "utf-8"), DESIGN_FILES["scripts/impeccable"]);
+    // the part without scripts is never reviewed
+    const g = await fixture();
+    try {
+      await installDesign(g);
+      const part = await propose(g, { draft: { skills: [adoptOp({ taken: "part", take: ["reference"] })] }, skillSearch: DESIGN_SEARCH });
+      assert.equal(part.ok, true, part.error);
+      assert.deepEqual(part.change.skillsDiff[0].scripts, []);
+      assert.equal(g.w.reviewCalls.length, 0);
+      await release(g);
+      assert.equal((await lastRec(g)).state, "applied");
+      assert.equal(await ok(skillFile(g, "design-ref", "scripts")), false, "the scripts were left out");
+      const shown = (await g.engine.profile("dev")).skills.find((s) => s.name === "design-ref");
+      assert.equal(shown.provenance.taken, "part", "the profile shows where it came from");
+      assert.equal(shown.provenance.licence, "Apache-2.0");
+    } finally {
+      await g.cleanup();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: adding it still needs skillSearch; the installed skill is a candidate like any other", async () => {
+  const f = await fixture();
+  try {
+    await installDesign(f);
+    await refused(f, { draft: { skills: [adoptOp()] }, skillSearch: undefined }, /skillSearch/);
   } finally {
     await f.cleanup();
   }
