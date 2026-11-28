@@ -1751,15 +1751,19 @@ test("installed: adding it still needs skillSearch; the installed skill is a can
   }
 });
 
-test("installed: the Architect's built-in guidance says what a skill with scripts is worth and to adopt a fitting skill rather than rewrite it", async () => {
+test("installed: the Architect's built-in guidance adopts a fitting skill whole, scripts included — the independent script review decides", async () => {
   const agent = await readFile(join(REAL_TEMPLATES, "architect", "agent.md"), "utf-8");
   const authoring = await readFile(join(REAL_TEMPLATES, "architect", "skills", "authoring", "SKILL.md"), "utf-8");
+  const flat = (t) => t.replace(/\s+/g, " ");
   assert.match(agent, /skills_installed/);
   assert.match(agent, /by reference \(`installed`/);
-  assert.match(agent, /A skill whose scripts the agent can't run is still worth adding when its text guidance\s+fits the job/);
-  assert.match(agent, /`taken: "part"`, leaving `scripts\/` out/);
-  assert.match(agent, /say in the instructions\s+that they won't run/);
-  assert.match(agent, /Adopt a fitting skill rather than rewriting its ideas into the instructions/);
+  assert.match(flat(agent), /When a skill fits, adopt it whole, scripts included/);
+  assert.match(flat(agent), /independent script review/);
+  assert.match(flat(agent), /Adopt a fitting skill rather than rewriting its ideas into the instructions/);
+  for (const text of [agent, authoring]) {
+    assert.doesNotMatch(flat(text), /without the scripts|leaving `scripts\/` out|leave\s+`scripts\/` out|scripts the agent can't run|they won't run/);
+  }
+  assert.match(flat(authoring), /`part` \(SKILL\.md plus the paths in `take`[^)]*\) only to leave out files that are irrelevant/);
   assert.match(authoring, /\{name, op, installed: \{skill, taken, take\?\}\}/);
   assert.match(authoring, /20-file and 256 KiB limits\s+don't apply/);
 });

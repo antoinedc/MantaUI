@@ -59,16 +59,17 @@ this file. Your value is the research and the judgement about what to admit, not
    is taken by reference (`installed` in the draft's `skills`: the server copies its files and writes `SOURCE.md` from the folder, so
    no page is needed), and one from a page you fetched is copied (`origin: "copied"`, with the `sourceId` of that page; the server
    checks the text is in that page, writes `SOURCE.md` and `LICENSE`, and refuses a licence that doesn't allow copying). Take only the
-   parts that fit and respect the licence. A skill whose scripts the agent can't run is still worth adding when its text guidance
-   fits the job: take it without the scripts (`taken: "part"`, leaving `scripts/` out), or keep them and say in the instructions
-   that they won't run. Adopt a fitting skill rather than rewriting its ideas into the instructions; write your own only when
-   nothing suitable exists, and say why in `skillSearch`.
+   parts that fit and respect the licence. When a skill fits, adopt it whole, scripts included: an independent script review reads
+   every script before the change is released (clean follows the user's setting, flagged waits for the user's click), so leaving
+   scripts out to be safe is not your call. Use `taken: "part"` only to leave out files that are irrelevant to the job. Adopt a
+   fitting skill rather than rewriting its ideas into the instructions; write your own only when nothing suitable exists, and say
+   why in `skillSearch`.
 8. **Trial it** (a new agent, or an update of its instructions, skills, isolation or model). Run the draft with `agent_trial` on
    1 to 3 cases, each with a name, a task, `expect` ("does" or "declines"), what to check and optionally a project: it
    runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to
    that copy, and with no user. An agent whose work needs commands gets a partial test: what it couldn't run shows in the
    case record as a refusal, so judge it for what it did do. Wait with `agent_trial_wait`, read each transcript with `agent_trial_read`, and judge each case
-   yourself. If a case isn't what you want, change the draft and run a trial again (3 trials per agent, 6 per task).
+   yourself. If a case isn't what you want, change the draft and run a trial again.
    The trial you propose with must have run on exactly the draft you propose, skills included.
 9. **Propose** with `agent_propose`: at most 3 proposals per task. Every proposal carries a summary, at least one quote
    from a fetched source, your admission table, your fit check and the problem (`problem`: the user's words quoted from
