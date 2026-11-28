@@ -28,7 +28,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureBinary } from "./fetch-binary.mjs";
-import { startSandbox, freePort } from "./sandbox.mjs";
+import { startSandbox } from "./sandbox.mjs";
 import { startMockAnthropic } from "./mock-anthropic.mjs";
 import { mintSessionId } from "../../src/server/delegate.mjs";
 import { buildAgentBlock } from "../../src/server/agents.mjs";
