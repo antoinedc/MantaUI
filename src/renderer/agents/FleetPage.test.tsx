@@ -214,6 +214,19 @@ describe("FleetPage", () => {
     expect(qa('[data-testid="fleet-group"]').map((g) => g.dataset.group)).toEqual(["dev", "pd"]);
   });
 
+  it("the Projects / Agents switch is outside the window's drag region, so a click on it reaches the app", async () => {
+    // The header bar is a window drag region (`titlebar-drag`); Electron swallows clicks inside one, so every control in it
+    // needs a `titlebar-no-drag` ancestor closer than the drag region. jsdom cannot show this: the click above passes anyway.
+    await open();
+    const header = q(".manta-agents-header")!;
+    expect(header.className).toContain("titlebar-drag");
+    for (const b of header.querySelectorAll<HTMLElement>("button")) {
+      const owner = b.closest(".titlebar-no-drag, .titlebar-drag");
+      expect(owner?.className, `${b.textContent} is in a drag region`).toContain("titlebar-no-drag");
+    }
+    expect(header.querySelectorAll("button").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("the header counts the work: n in progress · n paused", async () => {
     await open();
     expect(q('[data-testid="fleet-header-counts"]')?.textContent).toBe("3 in progress · 1 paused");

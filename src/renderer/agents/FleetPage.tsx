@@ -224,15 +224,18 @@ export function FleetPage({
         }
       >
         <h1 className="m-0 text-label font-medium text-text">Fleet</h1>
-        <Segmented<FleetBy>
-          label="Group by"
-          value={by}
-          onChange={setBy}
-          options={[
-            { id: "projects", label: "Projects" },
-            { id: "agents", label: "Agents" },
-          ]}
-        />
+        {/* the header bar is a window drag region: without this, Electron swallows every click on the switch */}
+        <span className="titlebar-no-drag inline-flex">
+          <Segmented<FleetBy>
+            label="Group by"
+            value={by}
+            onChange={setBy}
+            options={[
+              { id: "projects", label: "Projects" },
+              { id: "agents", label: "Agents" },
+            ]}
+          />
+        </span>
       </AgentsHeader>
 
       <div className="flex min-h-0 flex-1 [container-type:inline-size]">
