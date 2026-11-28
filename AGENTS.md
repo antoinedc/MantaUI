@@ -4390,7 +4390,7 @@ page + profile line (slice 3) and the repeated-work suggestions (slice 4) are se
   6+ words copied from a private answer of that session. Refusal sentence is fixed; recorded as `{kind, tool}` only; FAILS CLOSED
   ("Couldn't check this query for private material; try again"). Decisions: an IP-literal DESTINATION host is exempt from the private-address test
   (nothing is sent to a resolver), an internal host NAME as destination is not; a `home|Users|Volumes/<a>/<b>` run in a URL path counts as a home
-  directory. Every redirect hop of `research_fetch` runs the same check before its request (`fetchFollowing`'s `check` may be async). Settings →
+  directory. The check lives in the ONE chokepoint every research request goes through, the engine's wrapped `hop` (an AsyncLocalStorage context set by each tool): fetch redirect hops, every built-in adapter, non-private user URL sources, Exa, Jina and GitHub are all checked per request, redirect hops included, and a request made outside any tool context is checked by default; only a source marked private (it may receive private material) and Settings → Test skip it. GitHub / Exa / Jina are single-hop (a 3xx is an error, never followed). Settings →
   Test on a user source or a built-in is a person's own query and skips the check; Test on the `web` row runs it (as `research_search`, so a
   switched-off row can still be tried) and then OpenCode's own `POST /api/websearch` (`oc.webSearch`; the default provider; proven in the e2e). Turning the `web` source off is answered by the same check for
   `websearch` ("The source "web" is turned off in Settings → Research sources") — one mechanism for every session kind (Manta's own chat is not an

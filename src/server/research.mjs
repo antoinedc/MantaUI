@@ -16,6 +16,7 @@
 import fsPromises from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -132,7 +133,8 @@ const HN_ITEM_PAGE = /^https:\/\/news\.ycombinator\.com\/item\?id=(\d{1,12})$/;
  * @param {(b:object, tool:string)=>Promise<{job?:object, childSessionID?:string, refused?:string}>} deps.bind  the Architect binding
  * @param {string} [deps.root]          ~/.manta/research
  * @param {object} [deps.fs]            node:fs/promises
- * @param {Function} [deps.hop]         one HTTP request (the guarded transport); tests inject a fake
+ * @param {Function} [deps.hop]         one HTTP request (the guarded transport); tests inject a fake. The engine wraps it (see `hop` below): the
+ *                                      outside-query check runs on EVERY request that goes through it, redirect hops included
  * @param {()=>Promise<object[]>} [deps.sourceList]   the box-wide ordered research sources (researchSources.rows()): built-in and user rows, enabled or not
  * @param {{check:Function}} [deps.outside]  the outside-query check (default: built from this engine's own stores)
  * @param {(sessionID:string)=>Promise<string|null>} [deps.folderOf]  the folder of a task / chat session, for the outside-query check
@@ -145,7 +147,7 @@ export function createResearchEngine({
   bind,
   root = statePath("research"),
   fs = fsPromises,
-  hop = createGuardedTransport(),
+  hop: transport = createGuardedTransport(),
   sourceList = async () => defaultRows(),
   outside = null,
   folderOf = async () => null,
@@ -324,6 +326,22 @@ export function createResearchEngine({
       log,
     });
 
+  // THE chokepoint of every outgoing research request. All network access of this engine (the fetch tool's redirect following, every built-in
+  // adapter, the user's URL sources, Exa, Jina, GitHub) goes through `hop`, so no adapter can skip the outside-query check, redirect hops
+  // included, and a future one is checked by default: a request made outside any tool context is checked as an outside request. Only a call
+  // explicitly marked private (a user source marked private — it may receive private material) or a person's own Settings → Test is not.
+  const outbound = new AsyncLocalStorage();
+  const asOutside = (sessionID, tool, fn) => outbound.run({ outside: true, sessionID, tool }, fn);
+  const asUnchecked = (fn) => outbound.run({ outside: false }, fn);
+  const hop = async (req) => {
+    const c = outbound.getStore() ?? { outside: true, sessionID: "", tool: "research_search" };
+    if (c.outside) {
+      const verdict = await outsideCheck.check({ sessionID: c.sessionID, tool: c.tool, input: { url: req?.url } });
+      if (!verdict.ok) throw new ResearchError(verdict.error);
+    }
+    return transport(req);
+  };
+
   /** Throws a ResearchError with the check's sentence when the request may not go out. */
   async function assertOutside(sessionID, tool, input) {
     const verdict = await outsideCheck.check({ sessionID, tool, input });
@@ -366,7 +384,7 @@ export function createResearchEngine({
   async function fetchTool(input) {
     const b = await bound(input, "research_fetch", ["url"]);
     if (b.refused) return { ok: false, error: b.refused };
-    return guard(async () => {
+    return guard(() => asOutside(b.child, "research_fetch", async () => {
       useAllowance(b, "fetch");
       const url = typeof b.raw.url === "string" ? b.raw.url.trim() : "";
       if (!url || url.length > 2000) throw new ResearchError("Give one web address");
@@ -383,19 +401,13 @@ export function createResearchEngine({
       } else {
         const hn = HN_ITEM_PAGE.exec(url);
         const target = hn ? `https://hn.algolia.com/api/v1/items/${hn[1]}` : (githubRawUrl(url) ?? url);
-        // every hop (the first and each redirect) is an outgoing request: the address policy AND the outside-query check run before it
-        const hopCheck = async (u) => {
-          const no = addressRefusal(u);
-          if (no) return no;
-          const verdict = await outsideCheck.check({ sessionID: b.child, tool: "research_fetch", input: { url: u } });
-          return verdict.ok ? null : verdict.error;
-        };
-        const res = await fetchFollowing(hop, target, { check: hopCheck, now, pdfByteCap: PDF_BYTE_CAP });
+        // every hop (the first and each redirect) is an outgoing request: the address policy here, the outside-query check in `hop`
+        const res = await fetchFollowing(hop, target, { check: addressRefusal, now, pdfByteCap: PDF_BYTE_CAP });
         const content = await contentOf(res, res.finalUrl);
         rec = await storeSource(b.child, { url, finalUrl: res.finalUrl, title: content.title, text: content.text });
       }
       return { ok: true, ...windowed(rec) };
-    });
+    }));
   }
 
   async function readTool(input) {
@@ -431,7 +443,9 @@ export function createResearchEngine({
   const githubRun = makeThrottle({ limit: 10, interval: 60_000, strict: true })((fn) => fn());
   const throttled = (run, sentence, fn) => {
     if ((run.queueSize ?? 0) >= THROTTLE_QUEUE_MAX) throw new ResearchError(sentence);
-    return run(fn);
+    // the queue may run `fn` later, from another call's timer: keep THIS call's check context
+    const ctx = outbound.getStore();
+    return run(() => (ctx ? outbound.run(ctx, fn) : fn()));
   };
 
   async function searchHn(query) {
@@ -676,12 +690,14 @@ export function createResearchEngine({
         const ids = rows.filter((r) => r.enabled && r.id !== "web").map((r) => r.id);
         return new ResearchError(`Unknown source "${source}". Available: ${[...ids, ...(b.architect ? [SKILLS_SOURCE] : [])].join(", ")}`);
       };
+      // every request below goes through `hop`: checked as an outside request (redirect hops too), except a source marked private
+      const net = (isPrivate, fn) => (isPrivate ? asUnchecked(fn) : asOutside(b.child, "research_search", fn));
       let answer;
       if (source === SKILLS_SOURCE) {
         // the Architect's own: existing skills (src/server/research/skillsCli.mjs)
         if (!b.architect) throw unknown();
         await assertOutside(b.child, "research_search", { query });
-        answer = { ok: true, source, ...(await skillsFinder.find(query)) };
+        answer = { ok: true, source, ...(await net(false, () => skillsFinder.find(query))) };
       } else {
         if (!row) throw unknown();
         if (!row.enabled) throw new ResearchError(OFF(source));
@@ -691,11 +707,11 @@ export function createResearchEngine({
           await assertOutside(b.child, "research_search", row.url ? { url: row.url.replace(QUERY_TOKEN, encodeURIComponent(query)) } : { query });
         }
         if (row.builtin !== true) {
-          answer = { ok: true, source, ...(await searchExtra(row, query, b.child)) };
+          answer = { ok: true, source, ...(await net(row.private !== false, () => searchExtra(row, query, b.child))) };
         } else {
           const refused = queryRefusal(query);
           if (refused) throw new ResearchError(refused);
-          answer = { ok: true, source, ...(await builtinAnswer(source, query)) };
+          answer = { ok: true, source, ...(await net(false, () => builtinAnswer(source, query))) };
         }
       }
       // what the search asked and returned is kept for the server's later checks; a failed search throws above and leaves nothing
@@ -734,7 +750,12 @@ export function createResearchEngine({
     return { count: list.length, ...(top ? { first: { title: String(top.title || top.url || "(untitled)").slice(0, 200), ...(top.url ? { url: top.url } : {}) } } : {}) };
   }
 
-  async function testSource(def, query) {
+  function testSource(def, query) {
+    // a person's own query: its requests are not run through the outside-query check (the web row's test does run it, in `testWeb`)
+    return asUnchecked(() => testSourceUnchecked(def, query));
+  }
+
+  async function testSourceUnchecked(def, query) {
     if (def?.builtin === true) {
       if (def.id === "web") return testWeb(query);
       if (!BASE_SEARCH_SOURCES.includes(def.id)) throw new ResearchError(`Unknown source "${def.id}"`);

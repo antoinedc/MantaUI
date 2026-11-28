@@ -1509,3 +1509,126 @@ test("testSource on the web row: a test of a source that is turned off still wor
     await none.cleanup();
   }
 });
+
+// ---- review round 2: EVERY outgoing research request is checked, redirect hops included (one chokepoint: the engine's hop) ----
+
+test("built-in adapter redirect: a clean Hacker News search redirected (by the server) to an address with a stored secret in its path never makes the second request", async () => {
+  const seen = [];
+  const s = await serve((req, res) => {
+    seen.push(req.url);
+    res.writeHead(302, { location: `https://outside.example/docs/${SECRET}/plans` });
+    res.end();
+  });
+  const real = testTransport();
+  const second = [];
+  const hop = async (req) => {
+    const u = new URL(req.url);
+    if (u.hostname === "hn.algolia.com") return real({ ...req, url: `http://127.0.0.1:${s.port}${u.pathname}${u.search}` }); // the loopback server stands in for HN
+    second.push(req.url); // anything else is the redirect target: it must never be asked
+    return reply(200, { "content-type": "application/json" }, JSON.stringify({ hits: [] }));
+  };
+  const f = await fixture({ secrets: [{ key: "K", scope: "shared", value: SECRET }], engineExtra: { hop } });
+  try {
+    const r = await f.engine.search(call({ source: "hn", query: "agents" }));
+    assert.deepEqual(r, { ok: false, error: OUTSIDE });
+    assert.equal(seen.length, 1, "the search itself was made once");
+    assert.deepEqual(second, [], "the redirect target was never requested");
+    assert.deepEqual(await f.engine.searchesOf("ses_child"), [], "a refused search is not recorded");
+  } finally {
+    await f.cleanup();
+    await s.close();
+  }
+});
+
+test("every built-in adapter that follows redirects is covered: hn, arxiv, packages (deps.dev and npm), stackoverflow — each refuses a redirect to a secret path before the next request", async () => {
+  const cases = [["hn", "agents"], ["arxiv", "agents"], ["packages", "npm:react"], ["packages", "job queue"], ["stackoverflow", "pg queue"]];
+  for (const [source, query] of cases) {
+    const f = await fixture({ secrets: [{ key: "K", scope: "shared", value: SECRET }], routes: { "*": (req) => (req.url.includes("outside.example") ? PAGE : reply(302, { location: `https://outside.example/${SECRET}` }, "")) } });
+    try {
+      const r = await f.engine.search(call({ source, query }));
+      assert.deepEqual(r, { ok: false, error: OUTSIDE }, `${source} ${query}`);
+      assert.equal(f.calls.filter((c) => c.url.includes("outside.example")).length, 0, `${source} ${query}: the target was requested`);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+test("single-hop adapters (GitHub, Exa for Reddit and X) never follow a redirect at all: a 302 is an error and no second request is made", async () => {
+  for (const source of ["github", "reddit", "x"]) {
+    const f = await fixture({ secrets: [{ key: "K", scope: "shared", value: SECRET }], routes: { "*": (req) => (req.url.includes("outside.example") ? PAGE : reply(302, { location: `https://outside.example/${SECRET}` }, "")) } });
+    try {
+      const r = await f.engine.search(call({ source, query: "agents" }));
+      assert.equal(r.ok, false, source);
+      assert.equal(f.calls.filter((c) => c.url.includes("outside.example")).length, 0, source);
+    } finally {
+      await f.cleanup();
+    }
+  }
+});
+
+const PUBLIC_URL_SOURCE = { id: "pubsrc", name: "Pub", description: "d", url: "https://search.example.com/api?q={query}", private: false };
+
+test("non-private user URL source: a same-origin redirect to a path with a stored secret is refused before the next request; a clean same-origin redirect still works", async () => {
+  const f = await fixture({
+    secrets: [{ key: "K", scope: "shared", value: SECRET }],
+    extras: [PUBLIC_URL_SOURCE],
+    routes: {
+      "https://search.example.com/api?q=leak": reply(302, { location: `https://search.example.com/docs/${SECRET}/plans` }, ""),
+      "https://search.example.com/api?q=clean": reply(302, { location: "https://search.example.com/results/1" }, ""),
+      "https://search.example.com/results/1": reply(200, { "content-type": "text/plain" }, "the answer"),
+      "*": PAGE,
+    },
+  });
+  try {
+    assert.deepEqual(await f.engine.search(call({ source: "pubsrc", query: "leak" })), { ok: false, error: OUTSIDE });
+    assert.deepEqual(f.calls.map((c) => c.url), ["https://search.example.com/api?q=leak"], "the redirect target was never requested");
+    f.calls.length = 0;
+    const ok = await f.engine.search(call({ source: "pubsrc", query: "clean" }));
+    assert.equal(ok.ok, true, ok.error);
+    assert.match(ok.text, /the answer/);
+    assert.equal(f.calls.length, 2);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a PRIVATE user URL source may receive private material: its redirects are followed (same origin), even to a path that carries a stored secret, and the query is not checked", async () => {
+  const f = await fixture({
+    secrets: [{ key: "K", scope: "shared", value: SECRET }],
+    extras: [{ ...PUBLIC_URL_SOURCE, id: "privsrc", private: true }],
+    routes: {
+      [`https://search.example.com/api?q=${SECRET}`]: reply(302, { location: `https://search.example.com/docs/${SECRET}/plans` }, ""),
+      [`https://search.example.com/docs/${SECRET}/plans`]: reply(200, { "content-type": "text/plain" }, "private answer"),
+      "*": PAGE,
+    },
+  });
+  try {
+    const r = await f.engine.search(call({ source: "privsrc", query: SECRET }));
+    assert.equal(r.ok, true, r.error);
+    assert.match(r.text, /private answer/);
+    assert.equal(f.calls.length, 2, "the redirect was followed");
+    // a cross-origin redirect is still refused for the existing reason, checked or not
+    const g = await fixture({ extras: [{ ...PUBLIC_URL_SOURCE, id: "privsrc", private: true }], routes: { "*": reply(302, { location: "https://elsewhere.example/x" }, "") } });
+    try {
+      assert.match((await g.engine.search(call({ source: "privsrc", query: "q" }))).error, /another site/);
+    } finally {
+      await g.cleanup();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the check is the DEFAULT of the one chokepoint: when the check can't be made, a built-in adapter's own request is refused too, and Settings → Test (a person's query) is not checked", async () => {
+  const f = await fixture({ secrets: "throw", routes: { [HN_URL]: hnReply } });
+  try {
+    assert.equal((await f.engine.search(call({ source: "hn", query: "agents" }))).ok, false);
+    assert.equal(f.calls.length, 0);
+    // a person typed this query in Settings: no check, so a test of a built-in still runs
+    const t = await f.engine.testSource({ id: "hn", builtin: true, kind: "builtin" }, "agents");
+    assert.equal(t.count, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
