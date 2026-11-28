@@ -1130,6 +1130,8 @@ export function createAgentsEngine({
   sharingOf = null, // (projectSlug) → "share-and-read" | "read-only" | "private": what a seat's memory scope reads
   routines = null, // the routines engine: createInternal / update / remove / get — the monthly refresh routines
   onFleetChanged = () => {}, // a hint that the fleet read model changed (the Fleet page refetches)
+  fleetSessions = null, // () → { projects, statusOf(sessionId) } | null: the box's session tree (each project's `tree`) and per-session status — Fleet rows are working sessions
+  sessionLines = null, // { read(targets) → Promise<{ [sessionId]: line }> }: the one line each Fleet row shows about what its session is doing
   createScanner = createSecretScanner,
   loadSecretsStrict: loadSecretsStrictDep = loadSecretsStrict,
   now = Date.now,
@@ -5622,7 +5624,8 @@ export function createAgentsEngine({
     } catch (e) {
       log.warn?.(`[agents] couldn't count the running tasks: ${e?.message ?? e}`);
     }
-    return shapeFleetTasks({
+    const sessions = await fleetSessionsInput(rounds, names, projectOf);
+    const input = {
       rounds,
       now: t,
       slugOfJob,
@@ -5632,7 +5635,56 @@ export function createAgentsEngine({
       stillNeedsYou: (job) => job.endedBlocked === true && !reviewed.has(job.id),
       boxRunning,
       cap: MAX_RUNNING_JOBS,
-    });
+    };
+    if (!sessionLines) return shapeFleetTasks({ ...input, sessions });
+    // the lines are read for the rows that exist: shape once to find them, read, shape again with the lines
+    const targets = [];
+    shapeFleetTasks({ ...input, sessions, lineOf: (target) => (target.sessionId ? (targets.push(target), "") : "") });
+    let lines = {};
+    try {
+      lines = (await sessionLines.read(targets)) ?? {};
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read what the sessions are doing: ${e?.message ?? e}`);
+    }
+    return shapeFleetTasks({ ...input, sessions, lineOf: (target) => (target.sessionId ? (lines[target.sessionId] ?? "") : "") });
+  }
+
+  /**
+   * The session tree for the Fleet rows (spec §5b): the annotated session list with each project's tree, a status per session, which
+   * agent each chat belongs to, and the registry project of every folder involved. `null` when the box has no tree to give (the rows
+   * are then jobs, as before): a failed read never breaks the page.
+   */
+  async function fleetSessionsInput(rounds, names, projectOf) {
+    let snap = null;
+    try {
+      snap = fleetSessions?.() ?? null;
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the session tree: ${e?.message ?? e}`);
+    }
+    if (!snap || !Array.isArray(snap.projects)) return null;
+    const agentBySession = new Map();
+    try {
+      for (const [slug, sid] of Object.entries(await chats())) agentBySession.set(sid, slug);
+    } catch (e) {
+      log.warn?.(`[agents] couldn't read the agents' conversations: ${e?.message ?? e}`);
+    }
+    const dirs = new Set();
+    for (const p of snap.projects) {
+      if (p.defaultCwd) dirs.add(p.defaultCwd);
+      for (const w of p.windows ?? []) if (w.paneCurrentPath) dirs.add(w.paneCurrentPath);
+    }
+    for (const j of rounds) if (j.parentDirectory) dirs.add(j.parentDirectory);
+    const byDir = new Map();
+    for (const dir of dirs) {
+      const slug = await projectOf(dir);
+      byDir.set(dir, slug ? { slug, name: names.get(slug) ?? slug } : null);
+    }
+    return {
+      projects: snap.projects,
+      statusOf: (sid) => snap.statusOf?.(sid) ?? {},
+      agentOfSession: (sid) => agentBySession.get(sid) ?? null,
+      projectOfDir: (dir) => (dir ? (byDir.get(dir) ?? null) : null),
+    };
   }
 
   async function needsYou() {

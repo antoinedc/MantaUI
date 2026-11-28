@@ -4598,8 +4598,30 @@ export interface NeedsYouReview {
 // Fleet redesign (docs/superpowers/specs/2026-11-28-fleet-redesign.md §2.2): the Fleet page's read.
 export type FleetAskedBy = { by: "you" } | { by: "manta"; sessionId: string | null } | { by: "routine" };
 export type FleetOutcome = "done" | "didnt-finish" | "interrupted" | "stopped";
-export interface FleetTask {
-  jobId: string; // the task's newest round
+// Rows are working sessions (spec §5b): what runs beneath a row (a subagent, a helper job) is listed in its Details, never a row.
+export interface FleetSub {
+  key: string;
+  title: string;
+  status: "in-progress" | "paused-by-you" | "finished" | "didnt-finish";
+  /** The job's id (Resume / Stop apply to it); null for a subagent session that is not a job. */
+  jobId: string | null;
+  agentSlug: string | null;
+}
+/** Fields every row of the box's session-level read carries (all absent on an older box, which sends job rows). */
+export interface FleetRowSession {
+  /** The row's identity: a chat row's session id, a task row's job id. */
+  key?: string;
+  /** `chat`: a session that is working (no job of its own); `task`: the row is a job (Stop and Resume apply). */
+  kind?: "chat" | "task";
+  sessionId?: string | null;
+  /** Where Open session goes for a row that has a window. */
+  window?: { tmuxSession: string; index: number } | null;
+  subs?: FleetSub[];
+}
+export interface FleetTask extends FleetRowSession {
+  jobId: string; // the task's newest round; "" for a chat row
+  /** What the session is doing now, one line (progress report, else in-progress to-do, else its last short status). May be "". */
+  oneLiner?: string;
   rootJobId: string;
   title: string;
   agentSlug: string;
@@ -4612,7 +4634,7 @@ export interface FleetTask {
   status: "in-progress" | "paused-by-you";
   pausedAt: number | null;
 }
-export interface FleetEnded {
+export interface FleetEnded extends FleetRowSession {
   jobId: string;
   rootJobId: string;
   title: string;

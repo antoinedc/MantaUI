@@ -837,6 +837,55 @@ test("fleetTasks (agents:tasks): in-progress and paused tasks, today's ended one
   }
 });
 
+test("fleetTasks with the box's session tree: a running chat is the row, the specialist job started from it is in its subs, the line comes from the reader", async () => {
+  const tree = [
+    {
+      key: "ses_chat",
+      sessionId: "ses_chat",
+      kind: "window",
+      windowIndex: 2,
+      title: "Fleet: one row per session",
+      job: null,
+      outside: false,
+      children: [{ key: "ses_run", sessionId: "ses_run", kind: "virtual", windowIndex: null, title: "Session", job: { id: "run", status: "running", origin: "delegate" }, outside: false, children: [] }],
+    },
+  ];
+  const asked = [];
+  const f = await fixture({
+    extra: {
+      fleetSessions: () => ({
+        projects: [{ tmuxSession: "manta", defaultCwd: "/repo/site", windows: [{ index: 2, name: "Fleet: one row per session", paneCurrentPath: "/repo/site", opencodeSessionId: "ses_chat" }], tree }],
+        statusOf: (sid) => (sid === "ses_chat" || sid === "ses_run" ? { running: true, busy: true, startedAt: T0 - 60_000 } : {}),
+      }),
+      sessionLines: { read: async (targets) => (asked.push(targets.map((t) => t.sessionId).sort()), Object.fromEntries(targets.map((t) => [t.sessionId, `doing ${t.sessionId}`]))) },
+    },
+  });
+  try {
+    await f.engine.init();
+    f.w.jobs = [job({ id: "run", status: "running", finishedAt: null, childSessionID: "ses_run", parentSessionID: "ses_chat", title: "Build the Fleet fixes" })];
+    const t = await f.engine.fleetTasks();
+    assert.equal(t.running.length, 1);
+    const [row] = t.running;
+    assert.deepEqual([row.kind, row.key, row.title, row.oneLiner, row.agentSlug, row.projectName], ["chat", "ses_chat", "Fleet: one row per session", "doing ses_chat", "manta", "Site"]);
+    assert.deepEqual(row.subs.map((s) => [s.jobId, s.title, s.status]), [["run", "Build the Fleet fixes", "in-progress"]]);
+    assert.deepEqual(asked, [["ses_chat"]], "the lines are read once, for the rows that exist");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("fleetTasks: an unreadable session tree gives job rows, never an error", async () => {
+  const f = await fixture({ extra: { fleetSessions: () => { throw new Error("tree is cold"); }, sessionLines: { read: async () => { throw new Error("nope"); } } } });
+  try {
+    await f.engine.init();
+    f.w.jobs = [job({ id: "run", status: "running", finishedAt: null })];
+    const t = await f.engine.fleetTasks();
+    assert.deepEqual(t.running.map((r) => [r.kind, r.jobId]), [["task", "run"]]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("opening a task's session counts as looking at it: every round of the task leaves Needs you, and only specialist tasks are recorded", async () => {
   const f = await fixture();
   try {

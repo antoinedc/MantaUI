@@ -21,7 +21,7 @@ import { errText } from "./agentsView";
 import { FleetDetails, type DetailsItem } from "./FleetDetails";
 import { AgentWho, EndedRow, EndedSection, TaskGroupView, TaskRow } from "./FleetRows";
 import { StopTaskDialog } from "./StopTaskDialog";
-import { fleetHeaderCounts, groupTasks, needsTop, readBanner, readFleetBy, resumeBlockedReason, saveFleetBy, type FleetBy } from "./fleetView";
+import { fallbackAgentName, fleetHeaderCounts, groupTasks, isTaskRow, needsTop, readBanner, readFleetBy, resumeBlockedReason, rowKey, saveFleetBy, type FleetBy } from "./fleetView";
 import { useAfter, type AgentsRead } from "./useAgentsRead";
 import { useOpenTask } from "./useOpenTask";
 import { AgentBadge } from "../AgentBadge";
@@ -93,7 +93,7 @@ export function FleetPage({
   useClockTick(AGE_TICK_MS);
   const now = nowMs();
   const slow = useAfter(tasks.loading, SKELETON_DELAY_MS);
-  const { open: openSession, busyId, error: openError } = useOpenTask();
+  const { openRow, canOpen, busyId, error: openError } = useOpenTask();
 
   const [by, setByState] = useState<FleetBy>(readFleetBy);
   const setBy = (next: FleetBy) => {
@@ -109,7 +109,7 @@ export function FleetPage({
 
   const data = tasks.data;
   const infoOf = (slug: string) => agents?.find((a) => a.slug === slug);
-  const agentName = (slug: string) => infoOf(slug)?.name || slug;
+  const agentName = (slug: string) => infoOf(slug)?.name || fallbackAgentName(slug);
   const chatNameOf = (sessionId: string | null): string | null => {
     if (!sessionId) return null;
     for (const p of projects) for (const w of p.windows) if (w.opencodeSessionId === sessionId) return w.name || null;
@@ -118,9 +118,9 @@ export function FleetPage({
 
   const detail: DetailsItem | null = (() => {
     if (!detailId || !data) return null;
-    const run = data.running.find((t) => t.jobId === detailId);
+    const run = data.running.find((t) => rowKey(t) === detailId);
     if (run) return { kind: "running", task: run };
-    const end = data.ended.find((t) => t.jobId === detailId);
+    const end = data.ended.find((t) => rowKey(t) === detailId);
     return end ? { kind: "ended", task: end } : null;
   })();
 
@@ -134,7 +134,7 @@ export function FleetPage({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [detail]);
-  const detailKey = detail?.task.jobId ?? null;
+  const detailKey = detail ? rowKey(detail.task) : null;
   useEffect(() => {
     if (detailKey) detailRef.current?.querySelector<HTMLElement>("button")?.focus();
   }, [detailKey]);
@@ -147,7 +147,7 @@ export function FleetPage({
       return next;
     });
 
-  const resume = async (t: FleetTask) => {
+  const resume = async (t: { jobId: string; title: string }) => {
     if (actionBusy) return;
     setActionBusy(t.jobId);
     setError(t.jobId, null);
@@ -194,23 +194,26 @@ export function FleetPage({
 
   const rowFor = (t: FleetTask) => (
     <TaskRow
-      key={t.jobId}
+      key={rowKey(t)}
       task={t}
       by={by}
       info={infoOf(t.agentSlug)}
       now={now}
       offline={offline}
       resumeBlocked={resumeBlocked}
-      openBusy={busyId === t.jobId}
+      openBusy={busyId === rowKey(t)}
+      canOpen={canOpen(t)}
       actionBusy={actionBusy === t.jobId}
       error={errors[t.jobId] ?? null}
       onDetails={setDetailId}
-      onOpen={(id) => void openSession(id)}
+      onOpen={(row) => void openRow(row)}
       onResume={(task) => void resume(task)}
       onRetryStop={setStopTarget}
     />
   );
-  const endedRow = (e: FleetEnded) => <EndedRow key={e.jobId} task={e} info={infoOf(e.agentSlug)} now={now} offline={offline} openBusy={busyId === e.jobId} onDetails={setDetailId} onOpen={(id) => void openSession(id)} />;
+  const endedRow = (e: FleetEnded) => (
+    <EndedRow key={rowKey(e)} task={e} info={infoOf(e.agentSlug)} now={now} offline={offline} openBusy={busyId === rowKey(e)} canOpen={canOpen(e)} onDetails={setDetailId} onOpen={(row) => void openRow(row)} />
+  );
 
   return (
     <div className="manta-agents-pane manta-agents-fleet flex h-full w-full flex-col bg-bg" data-screen="agents-fleet">
@@ -318,17 +321,21 @@ export function FleetPage({
             <FleetDetails
               item={detail}
               info={infoOf(detail.task.agentSlug)}
-              storeJob={findJobById(jobs, detail.task.jobId)}
+              storeJob={isTaskRow(detail.task) ? findJobById(jobs, detail.task.jobId) : undefined}
               skew={skews[detail.task.jobId] ?? skewOf(skews, jobs, detail.task.jobId)}
               now={now}
               chatName={chatNameOf(detail.task.askedBy.by === "manta" ? detail.task.askedBy.sessionId : null)}
               offline={offline}
               resumeBlocked={resumeBlocked}
-              openBusy={busyId === detail.task.jobId}
+              openBusy={busyId === rowKey(detail.task)}
+              canOpen={canOpen(detail.task)}
               actionBusy={actionBusy === detail.task.jobId}
+              busyJobId={actionBusy}
               error={errors[detail.task.jobId] ?? null}
+              errors={errors}
+              agentName={agentName}
               onClose={() => setDetailId(null)}
-              onOpen={(id) => void openSession(id)}
+              onOpen={(row) => void openRow(row)}
               onStop={setStopTarget}
               onResume={(t) => void resume(t)}
             />

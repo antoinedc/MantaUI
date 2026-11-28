@@ -1293,6 +1293,13 @@ and worktree all belong to it.
   a refresh / check-up) is `given`; else the first sentence of the request is stored at once (`fallback`) and one `generateText` call
   (the `generateTitle` dependency: Summary model, else the asking conversation's own — same writer as auto-rename) replaces it in the
   background (`generated`), never delaying the launch; a failure or a slug answer keeps the fallback. Do not show `name` anywhere new.
+- **Fleet rows are working SESSIONS, not jobs** (spec `docs/superpowers/specs/2026-11-28-fleet-redesign.md` §5b). `agents:tasks` shapes
+  (`shapeFleetTasks`, `agentsFleetTasks.mjs`) one row per busy top-level session of the sidebar's session tree (`syncState.snapshot().projects[].tree`
+  + `sessionStatus.windowStatusMap()`); a subagent or helper job beneath a session is never a row, it is in that row's `subs` (title + status, shown in
+  Details). A row's title is the session's own title; its one-liner (`sessionLine.mjs`) is the job card's line for any session: the fresh `progress_report`
+  label, else the in-progress to-do, else the last short assistant line. A job whose session isn't placed in a tree is its own `task` row; with no tree the
+  rows are jobs (older boxes). Ended today groups ended jobs per top-level session. `fleetHints.mjs` turns session status frames and progress reports into
+  the throttled `agentFleet` hint. Rows carry `key`/`kind`/`window` so Open session selects a chat's window; Stop and Resume belong to `task` rows only.
 - Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
   refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
   sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the
