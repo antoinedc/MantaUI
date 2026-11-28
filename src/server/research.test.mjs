@@ -297,7 +297,7 @@ test("research_search hn and arxiv: compact results; web is not a source; an unk
     assert.equal(ax.results[0].url, "https://arxiv.org/abs/2602.12670v1");
     assert.ok(ax.results[0].summary.length <= 300);
     assert.match((await f.engine.search(call({ source: "web", query: "q" }))).error, /websearch/);
-    assert.match((await f.engine.search(call({ source: "nope", query: "q" }))).error, /Available: bookface, github, packages, stackoverflow, hn, reddit, arxiv, x$/);
+    assert.match((await f.engine.search(call({ source: "nope", query: "q" }))).error, /Available: bookface, github, packages, stackoverflow, hn, reddit, arxiv, x, skills$/);
     assert.match((await f.engine.search(call({ source: "hn", query: "-x" }))).error, /dash/);
     assert.match((await f.engine.search(call({ source: "hn", query: "x".repeat(201) }))).error, /1 to 200/);
     assert.match((await f.engine.search(call({ source: "hn", query: "" }))).error, /1 to 200/);
@@ -445,7 +445,7 @@ test("research_search github with a shared GITHUB_TOKEN: the token goes to api.g
   }
 });
 
-test("research_search github: a project- or session-scoped GITHUB_TOKEN is ignored; an unreadable secrets store still searches without one; a failing code search keeps the repositories", async () => {
+test("research_search github: a project- or session-scoped GITHUB_TOKEN is ignored; an unreadable secrets store refuses the search (fail closed); a failing code search keeps the repositories", async () => {
   const f = await fixture({ secrets: [{ key: "GITHUB_TOKEN", scope: "project", value: "ghp_nope" }], routes: { "*": ghJson({ items: [repoItem()] }) } });
   try {
     assert.equal((await f.engine.search(call({ source: "github", query: "cro" }))).ok, true);
@@ -453,11 +453,12 @@ test("research_search github: a project- or session-scoped GITHUB_TOKEN is ignor
   } finally {
     await f.cleanup();
   }
+  // the outside-query check reads the same store and FAILS CLOSED (AC-2.9b): an unreadable store means nothing is sent at all
   const g = await fixture({ secrets: "throw", routes: { "*": ghJson({ items: [repoItem()] }) } });
   try {
     const r = await g.engine.search(call({ source: "github", query: "cro" }));
-    assert.equal(r.ok, true, r.error);
-    assert.equal(g.calls[0].headers.Authorization, undefined);
+    assert.deepEqual(r, { ok: false, error: "Couldn't check this query for private material; try again" });
+    assert.equal(g.calls.length, 0);
   } finally {
     await g.cleanup();
   }
@@ -869,7 +870,7 @@ test("a binding that does not say the caller is the Architect reaches user sourc
 
 test("AC-1.5 / FR-007: a source that is turned off is refused with its sentence before anything runs; an unknown one lists the enabled ids in priority order", async () => {
   let ran = 0;
-  const f = await fixture({ extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }], disabled: ["bookface", "hn", "web"], exec: async () => ((ran += 1), { stdout: "x" }) });
+  const f = await fixture({ architect: false, extras: [{ id: "bookface", name: "BF", description: "d", command: ["yc", "{query}"], private: true }], disabled: ["bookface", "hn", "web"], exec: async () => ((ran += 1), { stdout: "x" }) });
   try {
     await withProgram(f, "yc");
     const off = await f.engine.search(call({ source: "bookface", query: "agents" }));
