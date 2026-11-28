@@ -1,0 +1,380 @@
+<!doctype html>
+<!-- THROWAWAY MOCKUP — research layer: the agent profile's sources line, Manta's "this might deserve an agent" card, and the
+     quiet row shown when the outside-query check blocks a search.
+     Spec: docs/superpowers/specs/2026-11-28-research-layer.md (US4, US5, AC-2.8, AC-2.9b, §6.5, §6.6, §9.2, §9.3).
+     Decisions: docs/screens/research/decisions.md. Builds on docs/screens/agents/profile-v5.html (profile) and
+     docs/screens/agents/chat-tasks.html (transcript, result card, the "Not started" tool row). Tokens copied from
+     src/renderer/tokens.css via those files; no new tokens.
+     MOCK BEHAVIOUR: nothing talks to a box. The card's buttons move the mock through its own states (an accept shows
+     "sending" for ~1.5 s, then posted or failed by the "Post result" switch); "Settings → Research sources" shows a note.
+     URL params for screenshots: ?screen=profile|chat&state=<id>&theme=light|dark&w=420|900|1280 -->
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Research layer: profile line and suggestion card (throwaway mockup)</title>
+<style>
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;
+  --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-full:999px;
+  --font-sans:"Inter Variable",Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --cto-col-max-w:960px;
+  --motion-fast:120ms;--ease-out:cubic-bezier(0.22,1,0.36,1);
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-solid:#5A88FF;--on-accent:#0B1020;
+  --ok:#3DD9A4;--warn:#FACC15;--danger:#FF6B7A;--danger-bg:#FF6B7A1f;--ok-bg:#3DD9A41f;--warn-bg:#FACC151f;--accent-bg:#5A88FF1f;
+  --fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);--fill-active:rgba(255,255,255,.10);
+  --shadow-sm:0 1px 2px rgb(0 0 0 / .4);
+}
+[data-theme="light"]{
+  color-scheme:light;
+  --canvas:#FAF9F7;--panel:#F2F0EC;--card:#FFFFFF;--raised:#EAE7E1;
+  --border-subtle:#E8E4DD;--border:#DAD5CC;--border-strong:#857C6E;
+  --tx1:#33302B;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;
+  --accent:#2E6BFF;--accent-tx:#1F55D6;--accent-solid:#1F55D6;--on-accent:#FFFFFF;
+  --ok:#0A7A53;--warn:#6E6200;--danger:#BE2F3C;--danger-bg:#BE2F3C14;--ok-bg:#0A7A5314;--warn-bg:#6E620014;--accent-bg:#2E6BFF14;
+  --fill:rgba(26,24,21,.035);--fill-hover:rgba(26,24,21,.06);--fill-active:rgba(26,24,21,.09);
+  --shadow-sm:0 1px 2px rgb(26 24 21 / .06);
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html,body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+button,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-xs)}
+svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+svg.i.s12{width:12px;height:12px}svg.i.s14{width:14px;height:14px}
+.mono{font-family:var(--font-mono);font-size:11.5px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* ---------- demo chrome ---------- */
+.demo{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-5);align-items:center;padding:var(--sp-2) var(--sp-4);background:var(--raised);border-bottom:1px solid var(--border);font-size:12px;color:var(--tx2)}
+.demo b{font-weight:600;color:var(--tx1)}
+.demo label{display:flex;align-items:center;gap:6px}
+.demo select{height:26px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--card);padding:0 6px;font-size:12px}
+.demo .tag{margin-left:auto;color:var(--tx3)}
+.demo .src{flex-basis:100%;color:var(--tx3)}
+.stage{padding:var(--sp-6) var(--sp-4);display:flex;justify-content:center}
+.frame{container:app/inline-size;width:var(--frame-w,1280px);max-width:100%}
+.app{height:860px;display:flex;flex-direction:column;background:var(--canvas);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;box-shadow:0 8px 30px rgb(0 0 0 / .12)}
+
+/* ---------- shared bits (profile-v5 / chat-tasks) ---------- */
+.btn{height:30px;padding:0 var(--sp-3);border-radius:var(--r-sm);border:1px solid var(--border);background:var(--card);font-size:13px;font-weight:500;box-shadow:var(--shadow-sm);white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.btn:hover:not(:disabled){background:var(--fill-hover)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--tx2)}
+.btn.ghost:hover:not(:disabled){background:var(--fill-hover)}
+.btn.sm{height:28px;padding:0 var(--sp-2);font-size:12px}
+.link{font-size:12px;font-weight:500;color:var(--accent-tx);background:none;border:0;padding:0;text-decoration:none}
+.link:hover{text-decoration:underline}
+.quiet{font-size:12px;color:var(--tx3);background:none;border:0;padding:0 2px;min-height:24px;text-decoration:underline;text-underline-offset:2px}
+.quiet:hover{color:var(--tx1)}
+.pill{display:inline-flex;align-items:center;gap:4px;border-radius:var(--r-full);padding:1px var(--sp-2);font-size:12px;line-height:1.4;white-space:nowrap}
+.pill.ok{background:var(--ok-bg);color:var(--ok)}.pill.warn{background:var(--warn-bg);color:var(--warn)}
+.phead{height:44px;flex:none;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-4);border-bottom:1px solid var(--border);font-size:13px;font-weight:500}
+.phead .crumb{color:var(--tx3)}.phead .sep{color:var(--tx4)}
+.scroller{flex:1;min-height:0;overflow-y:auto;container:col/inline-size}
+
+/* ---------- profile (profile-v5) ---------- */
+.col{max-width:var(--cto-col-max-w);margin:0 auto;padding:var(--sp-8) var(--sp-6) var(--sp-10);display:flex;flex-direction:column;gap:var(--sp-6)}
+@container app (max-width:600px){.col{padding:var(--sp-5) var(--sp-4) var(--sp-8);gap:var(--sp-5)}}
+.hero{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:var(--sp-4);align-items:start}
+.av{width:44px;height:44px;border-radius:var(--r-md);display:grid;place-items:center;font-size:15px;font-weight:600;color:#0B1020}
+.hero h1{margin:0;font-size:24px;line-height:1.25;font-weight:600}
+.facts{display:flex;flex-wrap:wrap;margin-top:var(--sp-1);font-size:13px;color:var(--tx3)}
+.facts span:not(:last-child)::after{content:"·";margin:0 var(--sp-2);color:var(--tx4)}
+.desc{margin:var(--sp-3) 0 0;max-width:68ch;font-size:15px;line-height:1.55;color:var(--tx2)}
+.actions{display:flex;gap:var(--sp-2)}
+@container app (max-width:640px){.hero{grid-template-columns:44px minmax(0,1fr)}.actions{grid-column:1 / -1}}
+.tabs{display:flex;gap:var(--sp-5);border-bottom:1px solid var(--border);font-size:13px;overflow-x:auto;scrollbar-width:none}
+.tab{position:relative;flex:none;padding:var(--sp-2) 0;border:0;background:none;color:var(--tx3);white-space:nowrap}
+.tab .n{margin-left:var(--sp-1);color:var(--tx3)}
+.tab[aria-selected="true"]{color:var(--tx1);font-weight:500}
+.tab[aria-selected="true"]::after{content:"";position:absolute;inset:auto 0 0 0;border-bottom:2px solid var(--accent)}
+@container app (max-width:600px){.tabs{gap:var(--sp-4)}}
+.h2{display:flex;align-items:baseline;gap:var(--sp-2);margin:0 0 var(--sp-3);font-size:14px;font-weight:600;color:var(--tx1)}
+
+/* NEW: the sources line (top of the Research tab) */
+.srcline{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-2) var(--sp-4);margin:0;font-size:13px;line-height:1.5}
+.srcline dt{color:var(--tx3)}
+.srcline dd{margin:0;min-width:0;color:var(--tx1)}
+.srcline ol{display:inline;list-style:none;margin:0;padding:0}
+.srcline li{display:inline}
+.srcline li:not(:last-child)::after{content:" · ";color:var(--tx4)}
+.srcline .lk{display:inline-flex;vertical-align:-2px;color:var(--accent-tx)}
+.srcline .off{color:var(--tx3)}
+.srcfoot{display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-3);margin:var(--sp-2) 0 0;padding-bottom:var(--sp-4);border-bottom:1px solid var(--border-subtle);font-size:12px;color:var(--tx3)}
+@container app (max-width:520px){.srcline{grid-template-columns:1fr;gap:2px}.srcline dd{margin-bottom:var(--sp-2)}}
+
+/* Research rows (AgentResearch.tsx) */
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--border-subtle)}
+.rows>li{border-bottom:1px solid var(--border-subtle)}
+.rrow{display:flex;align-items:center;gap:var(--sp-3);min-height:40px;padding:var(--sp-2) 0}
+.rrow .grow{min-width:0;flex:1;font-size:14px}
+.rrow .meta{font-size:12px;color:var(--tx3);white-space:nowrap;display:flex;gap:var(--sp-3);align-items:center}
+@container app (max-width:600px){.rrow{flex-wrap:wrap;row-gap:var(--sp-1)}.rrow .meta{flex-basis:100%;padding-left:28px}}
+.pane{border-top:1px solid var(--border-subtle);padding-top:var(--sp-4)}
+.pane h3{margin:0 0 var(--sp-2);font-size:12px;font-weight:600;color:var(--tx2)}
+.pane p{margin:0;font-size:13px;line-height:1.5;color:var(--tx1);max-width:72ch}
+.empty{margin:0;font-size:13px;line-height:1.5;color:var(--tx3)}
+
+/* ---------- chat (chat-tasks) ---------- */
+.shead{height:44px;flex:none;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3);border-bottom:1px solid var(--border)}
+.crumb2{display:flex;align-items:center;gap:7px;font:500 13px/1 var(--font-sans);color:var(--tx1);min-width:0;white-space:nowrap}
+.crumb2 .mut{color:var(--tx3)}.crumb2 .slash{color:var(--tx4)}
+.msgs{max-width:760px;margin:0 auto;padding:var(--sp-6) var(--sp-4) var(--sp-8);display:flex;flex-direction:column;gap:var(--sp-5)}
+.uwrap{display:flex;justify-content:flex-end}
+.umsg{background:var(--fill);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:11px var(--sp-4);font:400 15px/1.55 var(--font-sans);max-width:min(88%,64ch)}
+.amsg{font:400 15px/1.6 var(--font-sans);max-width:68ch;display:flex;flex-direction:column;gap:var(--sp-3)}
+.amsg p{margin:0}
+.amsg b{font-weight:600}
+.tc{display:grid;grid-template-columns:8px minmax(0,1fr) auto;column-gap:var(--sp-2);align-items:center;border:1px solid var(--border-subtle);background:var(--panel);border-radius:var(--r-md);padding:10px var(--sp-3);font-size:12px;line-height:1.4}
+.tc>.tc-m{grid-column:2 / -1}
+.tc-t{margin:0;min-width:0;font:600 13px/1.35 var(--font-sans);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.g{width:8px;height:8px;border-radius:50%;flex:none;background:var(--tx4)}
+.g.ok{background:var(--ok)}.g.bad{background:var(--danger)}
+.tc-m{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:4px;color:var(--tx3)}
+.tc-m .sep{color:var(--tx4)}.tc-m .ok{color:var(--ok)}
+.lnk{display:inline-flex;align-items:center;min-height:24px;padding:0 6px;border:0;background:none;border-radius:var(--r-xs);font-size:12px;font-weight:500;color:var(--tx3);white-space:nowrap}
+.lnk:hover{background:var(--fill-hover);color:var(--tx1)}
+/* the existing "Not started" tool row (chat-tasks .trow) */
+.trow{display:flex;gap:var(--sp-2);align-items:flex-start;font-size:12px;line-height:1.45;color:var(--tx3);padding:2px 0}
+.trow .g{margin-top:4px}
+.trow b{color:var(--tx2);font-weight:600}
+.trow .why{color:var(--tx2);overflow-wrap:anywhere}
+.trow .q{font-family:var(--font-mono);font-size:11.5px}
+
+/* NEW: the suggestion card — the DelegateApprovalCard shell (.appr) under Manta's message */
+.sug{border:1px solid color-mix(in srgb,var(--accent) 33%,transparent);border-radius:var(--r-md);background:var(--card);padding:10px var(--sp-3);font-size:13px;line-height:1.5;display:grid;grid-template-columns:16px minmax(0,1fr);column-gap:var(--sp-2);max-width:68ch}
+.sug.done{border-color:var(--border-subtle);background:var(--panel)}
+.sug>svg{margin-top:3px;color:var(--accent-tx)}
+.sug.done>svg{color:var(--tx3)}
+.sug-q{margin:0;color:var(--tx1)}
+.sug.done .sug-q{color:var(--tx2)}
+.sug-q b{font-weight:600}
+.sug-why{margin:2px 0 0;font-size:12px;color:var(--tx3)}
+.sug-acts{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin-top:var(--sp-2)}
+.sug-acts .quiet{margin-left:auto}
+@container col (max-width:460px){.sug-acts .quiet{margin-left:0;flex-basis:100%;text-align:left}}
+.sug-st{display:flex;flex-wrap:wrap;align-items:center;gap:6px var(--sp-2);margin-top:var(--sp-2);font-size:12px;color:var(--tx2)}
+.sug-st.ok{color:var(--ok)}.sug-st.err{color:var(--danger)}
+.sug-st .tx{color:var(--tx2)}
+.sug-st>span:not(.spin){flex:1 1 220px;min-width:0}
+.sug-st>svg{align-self:flex-start;margin-top:2px}
+.spin{width:10px;height:10px;flex:none;border-radius:50%;border:2px solid color-mix(in srgb,var(--accent) 35%,transparent);border-top-color:var(--accent-tx);animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(1turn)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.composer{flex:none;padding:0 0 var(--sp-3)}
+.comp-in{max-width:760px;margin:0 auto;padding:0 var(--sp-4)}
+.cbox{border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--card);padding:var(--sp-3) var(--sp-4);display:flex;align-items:center;gap:var(--sp-2);box-shadow:var(--shadow-sm);font:400 15px/1.55 var(--font-sans);color:var(--tx3)}
+.cbox span{flex:1}
+.cbox .send{width:28px;height:28px;border-radius:var(--r-sm);border:0;display:grid;place-items:center;background:var(--accent);color:var(--on-accent)}
+.mav{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#0B1020;background:#5A88FF;flex:none}
+.who{display:flex;align-items:center;gap:var(--sp-2);font-size:13px;font-weight:600;color:var(--tx2)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+<symbol id="i-branch" viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+</defs></svg>
+
+<div class="demo" role="region" aria-label="Mockup controls (not part of the design)">
+  <b>Research layer</b>
+  <label>Screen <select id="d-screen"><option value="profile">Agent profile</option><option value="chat">Manta’s chat</option></select></label>
+  <label>State <select id="d-state"></select></label>
+  <label>Theme <select id="d-theme"><option>light</option><option>dark</option></select></label>
+  <label>Width <select id="d-w"><option>1280</option><option>900</option><option>420</option></select></label>
+  <label>Post result <select id="d-post"><option value="ok">works</option><option value="fail">fails 5 times</option></select></label>
+  <span class="tag">throwaway mockup · no network</span>
+  <span class="src" id="d-src"></span>
+</div>
+<div class="stage"><div class="frame" id="frame"><div class="app" id="app"></div></div></div>
+<p id="announce" class="sr" role="status"></p>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const icon = (n, c='') => `<svg class="i ${c}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+const announce = (t) => { const a = document.getElementById('announce'); a.textContent=''; setTimeout(()=>{a.textContent=t;}, 50); };
+
+/* ---------------- profile ---------------- */
+const SOURCES = [['Bookface (YC) search',1],['Bookface posts',1],['Web'],['GitHub'],['Packages'],['Stack Overflow'],['Hacker News'],['Reddit'],['arXiv'],['X']];
+const AGENTS = {
+  dev:{name:'Dev', bg:'#7BD88F', facts:['Built in','Auto model','Isolation: own branch'], desc:'Writes and fixes code across your projects, on its own branch.', saved:12,
+    research:[['Postgres job queues for Node (2026)','4 sources · 9 days old','fresh'],['pnpm + Turborepo monorepo layout','3 sources · 41 days old','stale']]},
+  architect:{name:'Architect', bg:'#F6C177', facts:['Built in','Opus 5.5','Builds the team'], desc:'Builds and improves the team’s agents from research: what the evidence says works, not what sounds right.', saved:61,
+    research:[['How to hand off work between agents','5 sources · 2 days old','fresh'],['Conversion-rate review practice','3 sources · 12 days old','fresh']]},
+};
+const PSTATES = {
+  ideal:{label:'1 · Dev: sources + library', src:'AC-5.1, AC-5.2: enabled sources in order, private marked, library size, link to Settings', agent:'dev'},
+  architect:{label:'2 · The Architect', src:'AC-5.1 “for the Architect too”', agent:'architect'},
+  webOff:{label:'3 · Web turned off', src:'AC-5.3: the line doesn’t list web', agent:'dev', webOff:true},
+  fresh:{label:'4 · New box: empty library', src:'Defaults only, nothing saved yet', agent:'dev', fresh:true},
+  older:{label:'5 · Older box (no research field)', src:'agents:profile without `research` → the line isn’t drawn; the tab is as today', agent:'dev', older:true},
+};
+function srcLine(p, a){
+  if (p.older) return '';
+  let list = p.fresh ? SOURCES.slice(2) : SOURCES.slice();
+  if (p.webOff) list = list.filter(([n])=>n!=='Web');
+  const entries = p.fresh ? 0 : 214, saved = p.fresh ? 0 : a.saved;
+  return `<section aria-labelledby="sl-h" data-testid="profile-sources">
+    <h2 class="sr" id="sl-h">What ${esc(a.name)} searches</h2>
+    <dl class="srcline">
+      <dt>Searches, in order</dt>
+      <dd><ol>${list.map(([n,priv])=>`<li>${esc(n)}${priv?` <span class="lk" title="Private: may receive project details; never quoted or named">${icon('lock','s12')}<span class="sr">(private)</span></span>`:''}</li>`).join('')}</ol>${p.webOff?' <span class="off">· Web is off</span>':''}</dd>
+      <dt>Library</dt>
+      <dd>${entries} entries · ${saved ? `${saved} saved by ${esc(a.name)}` : `none saved by ${esc(a.name)} yet`}</dd>
+    </dl>
+    <p class="srcfoot"><span>The same for every agent on this box.</span><a class="link" href="#" data-note="Opens Settings at Research sources.">Change in Settings → Research sources</a></p>
+  </section>`;
+}
+function profile(p){
+  const a = AGENTS[p.agent];
+  const rows = p.fresh ? `<p class="empty">Nothing yet. The research this agent’s changes rest on shows here.</p>` :
+    `<ul class="rows">${a.research.map(([t,m,s])=>`<li><div class="rrow">${icon('chev','s12 tx3')}${icon('book')}<span class="grow">${esc(t)}</span><span class="meta"><span>${esc(m)}</span><span class="pill ${s==='stale'?'warn':'ok'}">${s}</span></span></div></li>`).join('')}</ul>`;
+  return `<div class="phead"><span class="crumb">Agents</span><span class="sep">/</span><span>${esc(a.name)}</span></div>
+  <div class="scroller"><div class="col">
+    <header class="hero"><div class="av" style="background:${a.bg}">${esc(a.name[0])}</div>
+      <div><h1>${esc(a.name)}</h1><div class="facts">${a.facts.map((f)=>`<span>${esc(f)}</span>`).join('')}</div><p class="desc">${esc(a.desc)}</p></div>
+      <div class="actions">${p.agent==='architect'?'':`<button class="btn" type="button">${icon('chat','s14')}Chat</button>`}</div></header>
+    <div class="tabs" role="tablist" aria-label="Profile sections">
+      ${['Overview','Seats','Skills','Learned','History'].map((t)=>`<button class="tab" role="tab" type="button" aria-selected="false" tabindex="-1">${t}</button>`).join('')}
+      <button class="tab" role="tab" type="button" aria-selected="true">Research<span class="n">${p.fresh?'':a.research.length}</span></button>
+      <button class="tab" role="tab" type="button" aria-selected="false" tabindex="-1">Settings</button>
+    </div>
+    <div role="tabpanel" aria-label="Research" style="display:flex;flex-direction:column;gap:var(--sp-8)">
+      ${srcLine(p, a)}
+      <section><h2 class="h2">Research it relies on</h2>${rows}</section>
+      <aside class="pane" aria-label="Research"><h3>About the library</h3><p>The research library is shared by every agent. Fresh means within its shelf life, stale past it, and thin means fewer than 3 independent sources.</p></aside>
+    </div>
+  </div></div>`;
+}
+
+/* ---------------- chat ---------------- */
+const KIND = 'weekly release notes';
+const CSTATES = {
+  pending:{label:'1 · Offer: dedicated agent', src:'AC-4.1: shown under Manta’s message from the stored offer; verdict “agent”', verdict:'agent', card:'pending'},
+  skill:{label:'2 · Offer: a skill is enough', src:'AC-4.1 skill wording; the primary button follows the verdict', verdict:'skill', card:'pending'},
+  posting:{label:'3 · Accepted, sending', src:'AC-4.3b: accept.state “posting” (also after a crash: the card says it’s sending)', verdict:'agent', card:'posting', answer:'agent'},
+  posted:{label:'4 · Accepted, posted', src:'AC-4.3: one user message posted in the chat; Manta hands it to the Architect', verdict:'agent', card:'posted', answer:'agent'},
+  failed:{label:'5 · Couldn’t send → Retry', src:'AC-4.3b: 5 attempts failed; Retry posts once with the same message id', verdict:'agent', card:'failed', answer:'agent'},
+  later:{label:'6 · Not now', src:'AC-4.4: offered again after 3 more similar requests', verdict:'agent', card:'later', answer:'later'},
+  later2:{label:'7 · Second offer, then Not now', src:'AC-4.4: after a second “Not now” it is never offered again', verdict:'agent', card:'later2', answer:'later', count:6},
+  never:{label:'8 · Don’t ask again', src:'AC-4.4 / §6.1: into the suppression set, for good', verdict:'agent', card:'never', answer:'never'},
+  already:{label:'9 · Answered on another device', src:'AC-4.1 two clients: the second answer gets { already }', verdict:'agent', card:'already', answer:'agent'},
+  refused:{label:'10 · Search blocked (private material)', src:'AC-2.8: the check refuses before any request; one quiet row, then Manta asks in general terms', refused:'private'},
+  unchecked:{label:'11 · Search blocked (check unavailable)', src:'AC-2.9b: fail closed', refused:'unchecked'},
+};
+let cs = null;
+function sugCard(){
+  const s = cs, count = s.count || 3, agent = s.verdict==='agent';
+  const q = agent ? `You’ve asked for <b>${KIND}</b> ${count} times — want a dedicated agent?` : `You’ve asked for <b>${KIND}</b> ${count} times — want a skill for it?`;
+  const why = agent ? 'It needs its own rules about format and tone, and could run each Friday on its own.' : 'The steps are the same each time; Dev can follow a written method without a separate agent.';
+  const ACC = {agent:'Make an agent', skill:'Make a skill'};
+  const text = s.answer==='skill' ? `Yes — make a skill for ${KIND}.` : `Yes — build a dedicated agent for ${KIND}.`;
+  let tail = '';
+  if (s.card==='pending'){
+    const first = agent ? 'agent' : 'skill', second = agent ? 'skill' : 'agent';
+    tail = `<div class="sug-acts">
+      <button class="btn sm primary" type="button" data-a="${first}">${ACC[first]}</button>
+      <button class="btn sm" type="button" data-a="${second}">${ACC[second]}</button>
+      <button class="btn sm ghost" type="button" data-a="later">Not now</button>
+      <button class="quiet" type="button" data-a="never">Don’t ask again for this</button></div>`;
+  }
+  const chose = `You chose ${ACC[s.answer]||''}`;
+  if (s.card==='posting') tail = `<p class="sug-st" role="status"><span class="spin" aria-hidden="true"></span><span class="tx">${esc(chose)}. Sending your answer to Manta…</span></p>`;
+  if (s.card==='posted') tail = `<p class="sug-st ok" role="status">${icon('check','s14')}<span>${esc(chose)}. Sent to Manta as your message below.</span></p>`;
+  if (s.card==='failed') tail = `<p class="sug-st err" role="alert">${icon('alert','s14')}<span>${esc(chose)}, but it couldn’t be sent: the box didn’t answer after 5 tries. Nothing was lost.</span><button class="btn sm" type="button" data-a="retry">Retry</button></p>`;
+  if (s.card==='later') tail = `<p class="sug-st" role="status"><span class="tx">Not now. Manta asks again after 3 more requests like this.</span></p>`;
+  if (s.card==='later2') tail = `<p class="sug-st" role="status"><span class="tx">Not now. Manta won’t suggest this again; ask it any time if you change your mind.</span></p>`;
+  if (s.card==='never') tail = `<p class="sug-st" role="status"><span class="tx">Manta won’t suggest an agent or a skill for ${KIND} again. You can still ask it for one.</span></p>`;
+  if (s.card==='already') tail = `<p class="sug-st ok" role="status">${icon('check','s14')}<span>Already answered on another device: Make an agent.</span></p>`;
+  const done = s.card!=='pending';
+  return `<section class="sug${done?' done':''}" role="group" aria-labelledby="sug-q" data-testid="agent-suggestion">${icon('spark')}<div>
+    <p class="sug-q" id="sug-q">${q}</p>${done?'':`<p class="sug-why">${esc(why)}</p>`}${tail}</div></section>
+    ${s.card==='posted' ? `<div class="uwrap"><div class="umsg">${esc(text)} Earlier briefs: “Release notes for v0.0.39”, “Changelog for the 0.0.40 release”, “Release notes for v0.0.41”.</div></div>
+      <div class="amsg"><div class="who"><span class="mav">M</span>Manta</div><p>I’ve asked the Architect to design a release-notes agent from those three briefs. Its proposal will wait for your click in Needs you.</p></div>` : ''}`;
+}
+function resultCard(){
+  return `<div class="tc"><span class="g ok" aria-hidden="true"></span><p class="tc-t">Release notes for v0.0.41</p>
+    <span><button class="lnk" type="button">Open session</button></span>
+    <div class="tc-m"><span class="ok">Done</span><span class="sep">·</span><span>Dev</span><span class="sep">·</span><span>4 min</span><span class="sep">·</span><span style="display:inline-flex;gap:4px;align-items:center">${icon('branch','s12')}release-notes-0-0-41</span></div></div>`;
+}
+function chatRefused(){
+  const unchecked = cs.refused==='unchecked';
+  const why = unchecked ? 'Couldn’t check this query for private material; try again' : 'This query would send private material to an outside source; rephrase it in general terms, or use a private source';
+  return `<div class="uwrap"><div class="umsg">Which job queue should Kestrel’s billing service use? It runs on billing.int.kestrel.lan and handles Halvorsen Freight’s invoices.</div></div>
+    <div class="amsg"><div class="who"><span class="mav">M</span>Manta</div>
+      <p>Let me check what’s current before I pick one.</p>
+      <div class="trow" role="note"><span class="g bad" aria-hidden="true"></span><div><b>Search not sent</b> · web<div class="why">${esc(why)}</div></div></div>
+      ${unchecked ? `<p>I couldn’t confirm that search was safe to send, so it didn’t go out. I’ll try again in a moment.</p>` :
+      `<div class="trow"><span class="g ok" aria-hidden="true"></span><div><b>Searched</b> · web · <span class="q">postgres job queue node at-least-once delivery 2026</span></div></div>
+      <div class="trow"><span class="g ok" aria-hidden="true"></span><div><b>Searched</b> · packages · <span class="q">npm:pg-boss</span></div></div>
+      <p>For a Postgres-backed Node service with at-least-once delivery, here’s what teams use now and how they compare … <i>(sample answer)</i></p>`}
+    </div>`;
+}
+function chat(){
+  const body = cs.refused ? chatRefused() : `
+    <div class="uwrap"><div class="umsg">Write this week’s release notes from the merged PRs.</div></div>
+    <div class="amsg"><div class="who"><span class="mav">M</span>Manta</div>
+      <p>Handed to Dev with the list of merged PRs since Friday.</p>
+      ${resultCard()}
+      <p>Dev’s draft is ready: <b>9 changes</b>, grouped as New, Fixed and Under the hood.</p>
+    </div>
+    ${sugCard()}`;
+  return `<div class="shead"><div class="crumb2"><span class="mut">MantaUI</span><span class="slash">/</span><span>Release notes</span></div></div>
+    <div class="scroller"><div class="msgs">${body}</div></div>
+    <div class="composer"><div class="comp-in"><div class="cbox"><span>Message Manta…</span><button class="send" type="button" aria-label="Send">${icon('send','s14')}</button></div></div></div>`;
+}
+
+/* ---------------- wiring ---------------- */
+const st = {screen: qs.get('screen')==='chat'?'chat':'profile', theme: qs.get('theme')==='dark'?'dark':'light', w: qs.get('w')||'1280', post:'ok'};
+const STATESOF = () => st.screen==='chat' ? CSTATES : PSTATES;
+st.state = STATESOF()[qs.get('state')] ? qs.get('state') : Object.keys(STATESOF())[0];
+const $ = (id) => document.getElementById(id);
+function fillStates(){ $('d-state').innerHTML = Object.entries(STATESOF()).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join(''); $('d-state').value = st.state; }
+function render(){
+  document.documentElement.dataset.theme = st.theme;
+  $('frame').style.setProperty('--frame-w', st.w+'px');
+  const s = STATESOF()[st.state];
+  $('d-src').textContent = 'Shows: ' + s.src;
+  if (st.screen==='chat'){ if (!cs || cs._k!==st.state) cs = {...s, _k:st.state}; $('app').innerHTML = chat(); }
+  else $('app').innerHTML = profile(s);
+}
+$('app').addEventListener('click', (e)=>{
+  const n = e.target.closest('[data-note]'); if (n){ e.preventDefault(); alert('Mock: '+n.dataset.note); return; }
+  const b = e.target.closest('[data-a]'); if (!b || !cs) return;
+  const a = b.dataset.a;
+  if (a==='later'){ cs.card = (cs.count||3) > 3 ? 'later2' : 'later'; cs.answer='later'; render(); return; }
+  if (a==='never'){ cs.card='never'; cs.answer='never'; render(); return; }
+  if (a==='agent' || a==='skill' || a==='retry'){
+    if (a!=='retry') cs.answer = a;
+    cs.card='posting'; render();
+    setTimeout(()=>{ cs.card = st.post==='ok' ? 'posted' : 'failed'; render(); }, 1500);
+  }
+});
+$('d-screen').value = st.screen; $('d-theme').value = st.theme; $('d-w').value = st.w;
+$('d-screen').addEventListener('change', (e)=>{ st.screen = e.target.value; st.state = Object.keys(STATESOF())[0]; cs = null; fillStates(); render(); });
+$('d-state').addEventListener('change', (e)=>{ st.state = e.target.value; cs = null; render(); });
+$('d-theme').addEventListener('change', (e)=>{ st.theme = e.target.value; render(); });
+$('d-w').addEventListener('change', (e)=>{ st.w = e.target.value; render(); });
+$('d-post').addEventListener('change', (e)=>{ st.post = e.target.value; });
+fillStates(); render();
+</script>
+</body>
+</html>
