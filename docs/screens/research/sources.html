@@ -1,0 +1,666 @@
+<!doctype html>
+<!-- THROWAWAY MOCKUP — Settings → Research sources (research layer).
+     Spec: docs/superpowers/specs/2026-11-28-research-layer.md (US1, §6.6, §7, §9.1, §9.4).
+     Decisions: docs/screens/research/decisions.md. Tokens copied from src/renderer/tokens.css (via profile-v5 / chat-tasks); no new tokens.
+     Shell = the Settings window of docs/screens/settings/mockup.html (section rail, sethead, setgrp, setrow, SettingsRow, Toggle).
+     MOCK BEHAVIOUR: nothing talks to a box. Switches, ↑/↓, Test, Add, Edit and Remove only change this page's own state;
+     Test answers after ~1.2 s with a canned result; "Save result" in the demo bar decides whether a save works.
+     Dragging is shown by the handle only: in the mock, reorder with the ↑/↓ buttons (the real list does both).
+     URL params for screenshots: ?state=<id>&theme=light|dark&w=420|900|1280 -->
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings → Research sources (throwaway mockup)</title>
+<style>
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;
+  --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:14px;--r-full:999px;
+  --font-sans:"Inter Variable",Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --motion-fast:120ms;--ease-out:cubic-bezier(0.22,1,0.36,1);
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-solid:#5A88FF;--on-accent:#0B1020;
+  --ok:#3DD9A4;--warn:#FACC15;--danger:#FF6B7A;--danger-bg:#FF6B7A1f;--ok-bg:#3DD9A41f;--warn-bg:#FACC151f;--accent-bg:#5A88FF1f;
+  --fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);--fill-active:rgba(255,255,255,.10);
+  --shadow-sm:0 1px 2px rgb(0 0 0 / .4);--shadow-lg:0 12px 40px rgb(0 0 0 / .5);
+}
+[data-theme="light"]{
+  color-scheme:light;
+  --canvas:#FAF9F7;--panel:#F2F0EC;--card:#FFFFFF;--raised:#EAE7E1;
+  --border-subtle:#E8E4DD;--border:#DAD5CC;--border-strong:#857C6E;
+  --tx1:#33302B;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;
+  --accent:#2E6BFF;--accent-tx:#1F55D6;--accent-solid:#1F55D6;--on-accent:#FFFFFF;
+  --ok:#0A7A53;--warn:#6E6200;--danger:#BE2F3C;--danger-bg:#BE2F3C14;--ok-bg:#0A7A5314;--warn-bg:#6E620014;--accent-bg:#2E6BFF14;
+  --fill:rgba(26,24,21,.035);--fill-hover:rgba(26,24,21,.06);--fill-active:rgba(26,24,21,.09);
+  --shadow-sm:0 1px 2px rgb(26 24 21 / .06);--shadow-lg:0 12px 40px rgb(26 24 21 / .18);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+button,select,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-xs)}
+svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+svg.i.s12{width:12px;height:12px}svg.i.s14{width:14px;height:14px}
+.mono{font-family:var(--font-mono)}
+[hidden]{display:none !important}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* ---------- demo chrome (outside the app frame) ---------- */
+.demo{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-5);align-items:center;padding:var(--sp-2) var(--sp-4);background:var(--raised);border-bottom:1px solid var(--border);font-size:12px;color:var(--tx2)}
+.demo b{font-weight:600;color:var(--tx1)}
+.demo label{display:flex;align-items:center;gap:6px}
+.demo select{height:26px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--card);padding:0 6px;font-size:12px}
+.demo .tag{margin-left:auto;color:var(--tx3)}
+.demo .src{flex-basis:100%;color:var(--tx3)}
+.stage{padding:var(--sp-6) var(--sp-4);display:flex;justify-content:center}
+
+/* ---------- Settings window (docs/screens/settings/mockup.html) ---------- */
+.frame{container:set/inline-size;width:var(--frame-w,1280px);max-width:100%}
+.setwin{width:100%;height:860px;display:grid;grid-template-columns:212px minmax(0,1fr);background:var(--canvas);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;box-shadow:0 8px 30px rgb(0 0 0 / .12);position:relative}
+@container set (max-width:820px){.setwin{grid-template-columns:1fr}}
+.snav{background:var(--panel);border-right:1px solid var(--border-subtle);display:flex;flex-direction:column;padding:var(--sp-3) var(--sp-2);overflow-y:auto}
+.snav h3{margin:0;font:600 15px/1 var(--font-sans);padding:var(--sp-1) var(--sp-2) var(--sp-3)}
+.sfind{display:flex;align-items:center;gap:7px;height:30px;padding:0 9px;border-radius:var(--r-md);background:var(--fill);color:var(--tx3);font-size:12.5px;margin-bottom:var(--sp-3)}
+.cl{font:600 10px/1 var(--font-sans);letter-spacing:.09em;text-transform:uppercase;color:var(--tx4);padding:0 9px;margin:var(--sp-4) 0 var(--sp-2)}
+.snav-i{display:flex;align-items:center;gap:var(--sp-2);padding:7px 9px;border-radius:var(--r-md);font:500 13px/1 var(--font-sans);color:var(--tx3);margin-bottom:1px;border:0;background:transparent;width:100%;text-align:left}
+.snav-i:hover{background:var(--fill-hover);color:var(--tx1)}
+.snav-i[aria-current="page"]{background:var(--raised);color:var(--tx1);font-weight:600}
+.setmain{display:flex;flex-direction:column;min-width:0;min-height:0}
+.sethead{height:46px;flex:none;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-5);border-bottom:1px solid var(--border-subtle)}
+.sethead h2{margin:0;font:600 15px/1 var(--font-sans)}
+.sethead .back{display:none}
+@container set (max-width:820px){.snav{display:none}.sethead .back{display:grid}.sethead{padding:0 var(--sp-3)}}
+.spacer{flex:1}
+.ibtn{min-width:28px;height:28px;display:grid;place-items:center;border:0;background:none;border-radius:var(--r-sm);color:var(--tx3)}
+.ibtn:hover:not(:disabled){background:var(--fill-hover);color:var(--tx1)}
+.ibtn:disabled{opacity:.35;cursor:default}
+.setbody{flex:1;overflow-y:auto;padding:var(--sp-5) var(--sp-5) var(--sp-10);min-height:0}
+@container set (max-width:600px){.setbody{padding:var(--sp-4) var(--sp-3) var(--sp-8)}}
+.setgrp{max-width:760px}
+.setgrp+.setgrp{margin-top:var(--sp-8)}
+.setgrp>h3{display:flex;align-items:center;gap:var(--sp-2);margin:0 0 var(--sp-2);font:600 11px/1 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)}
+.lead{margin:0 0 var(--sp-4);font-size:13px;line-height:1.55;color:var(--tx2);max-width:68ch}
+.lead a,.link{color:var(--accent-tx);font-weight:500;text-decoration:none;background:none;border:0;padding:0;font-size:inherit}
+.lead a:hover,.link:hover{text-decoration:underline}
+/* SettingsRow */
+.setrow{display:flex;align-items:flex-start;gap:var(--sp-5);padding:var(--sp-3) 0;border-bottom:1px solid var(--border-subtle)}
+.setrow:last-child{border-bottom:0}
+.setrow .lab{flex:1;min-width:0}
+.setrow .lab b{display:block;font:500 14px/1.5 var(--font-sans);color:var(--tx1)}
+.setrow .lab span{display:block;font-size:12.5px;line-height:1.5;color:var(--tx3);margin-top:3px;max-width:62ch}
+.setrow .ctl{flex-shrink:0;display:flex;align-items:center;gap:var(--sp-2);padding-top:2px}
+.placeholder{font-size:12.5px;color:var(--tx4);border:1px dashed var(--border);border-radius:var(--r-md);padding:var(--sp-3);margin-bottom:var(--sp-2)}
+
+/* Toggle (src/renderer/Toggle.tsx: button role=switch, 36×20 track, 14px knob) */
+.tg{position:relative;flex:none;width:36px;height:20px;border-radius:var(--r-full);border:1px solid var(--border);background:var(--fill-active);padding:0;transition:background-color var(--motion-fast) var(--ease-out)}
+.tg::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--tx3);transition:left var(--motion-fast) var(--ease-out)}
+.tg[aria-checked="true"]{background:var(--accent-solid);border-color:var(--accent-solid)}
+.tg[aria-checked="true"]::after{left:18px;background:var(--on-accent)}
+.tg:focus-visible{outline-offset:1px;border-radius:var(--r-full)}
+.tg:disabled{opacity:.5;cursor:default}
+
+/* buttons (Button.tsx look) */
+.btn{height:30px;padding:0 var(--sp-3);border-radius:var(--r-sm);border:1px solid var(--border);background:var(--card);font-size:13px;font-weight:500;box-shadow:var(--shadow-sm);white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.btn:hover:not(:disabled){background:var(--fill-hover)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.btn.primary:hover:not(:disabled){background:var(--accent-solid);filter:brightness(1.08)}
+.btn.danger{background:var(--danger);border-color:transparent;color:#fff}
+[data-theme="dark"] .btn.danger{color:#0B1020}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--tx2)}
+.btn.sm{height:26px;padding:0 var(--sp-2);font-size:12px}
+
+/* Pill / Tag */
+.pill{display:inline-flex;align-items:center;gap:4px;border-radius:var(--r-full);padding:1px 8px 1px 6px;font-size:11.5px;font-weight:500;line-height:1.5;white-space:nowrap}
+.pill.priv{background:var(--accent-bg);color:var(--accent-tx)}
+.pill.out{color:var(--tx2);box-shadow:inset 0 0 0 1px var(--border)}
+.pill.off{color:var(--tx3);background:var(--fill-active)}
+.pill.warn{background:var(--warn-bg);color:var(--warn)}
+
+/* notice (the profile's .locknote look) */
+.notice{display:flex;gap:var(--sp-3);align-items:flex-start;background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:var(--sp-3) var(--sp-4);font-size:13px;line-height:1.5;color:var(--tx2);margin:0 0 var(--sp-5);max-width:760px}
+.notice>svg{margin-top:2px;color:var(--accent-tx)}
+.notice.err>svg{color:var(--danger)}
+.notice p{margin:0}
+.notice ul{margin:var(--sp-1) 0 0;padding-left:18px}
+.notice li{margin:2px 0}
+.notice code{font-family:var(--font-mono);font-size:12px;background:var(--fill-active);border-radius:var(--r-xs);padding:0 4px}
+.notice .x{margin-left:auto;margin-top:-4px;margin-right:-8px}
+
+/* list header */
+.lhead{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2) var(--sp-3);margin:0 0 var(--sp-2)}
+.lhead h3{margin:0;font:600 11px/1 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--tx3)}
+.lhead .cnt{font-size:12px;color:var(--tx3)}
+.lhead .btn{margin-left:auto}
+.limit{flex-basis:100%;text-align:right;font-size:12px;color:var(--tx3)}
+.legend{display:flex;flex-wrap:wrap;gap:var(--sp-1) var(--sp-5);margin:0 0 var(--sp-3);font-size:12px;color:var(--tx3);line-height:1.45}
+.legend>span{display:flex;gap:6px;align-items:flex-start;max-width:44ch}
+.legend .pill{flex:none}
+.saved{font-size:12px;margin:0 0 var(--sp-2)}.saved:empty{margin:0}
+.saved.ok{color:var(--ok)}.saved.err{color:var(--danger)}
+
+/* ---------- the source list (an <ol>: order = priority) ---------- */
+.srcs{list-style:none;margin:0;padding:0;border-top:1px solid var(--border-subtle);counter-reset:src}
+.srcs>li{counter-increment:src;border-bottom:1px solid var(--border-subtle);scroll-margin:var(--sp-4)}
+.srow{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:var(--sp-1) var(--sp-3);padding:var(--sp-3) 0;align-items:start}
+.srow:has(.grip:focus-visible){outline:2px solid var(--accent);outline-offset:-2px;border-radius:var(--r-sm)}
+.grip{display:flex;flex-direction:column;align-items:center;gap:2px;padding-top:1px;color:var(--tx4);cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none;border:0;background:none;border-radius:var(--r-xs);min-height:24px}
+.grip::after{content:counter(src);font:500 11px/1 var(--font-mono);color:var(--tx3);font-variant-numeric:tabular-nums}
+.grip:is(:hover,:focus-visible){color:var(--tx2);background:var(--fill-hover)}
+.sbody{min-width:0}
+.sl1{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-1) var(--sp-2)}
+.sname{font:600 14px/1.4 var(--font-sans);color:var(--tx1)}
+.sid{font:400 11.5px/1.4 var(--font-mono);color:var(--tx3)}
+.sdesc{margin:2px 0 0;font-size:13px;line-height:1.45;color:var(--tx2);max-width:70ch}
+.smeta{display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--sp-2);margin-top:4px;font-size:12px;color:var(--tx3)}
+.smeta>*+*::before{content:"·";margin-right:var(--sp-2);color:var(--tx4)}
+.smeta .w{color:var(--warn);font-weight:500;display:inline-flex;gap:4px;align-items:center}
+.smeta .cmd{font-family:var(--font-mono);font-size:11.5px;overflow-wrap:anywhere}
+.sctl{display:flex;align-items:center;gap:var(--sp-1)}
+.sctl .tg{margin-left:var(--sp-2)}
+li.is-off .sname,li.is-off .sdesc{color:var(--tx3)}
+@container set (max-width:600px){
+  .srow{grid-template-columns:28px minmax(0,1fr)}
+  .sctl{grid-column:2;margin-left:-6px}
+  .sctl .tg{margin-left:auto}
+}
+/* Test result, under its row */
+.test{grid-column:2 / -1;display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);margin-top:var(--sp-2);padding:var(--sp-2) var(--sp-3);background:var(--panel);border-radius:var(--r-md);font-size:12.5px;line-height:1.45}
+.test label{color:var(--tx3)}
+.test input{height:26px;width:16ch;border:1px solid var(--border);background:var(--card);border-radius:var(--r-sm);padding:0 var(--sp-2);font-size:12.5px}
+.test .res{flex-basis:100%;display:flex;gap:6px;align-items:flex-start;color:var(--tx2);overflow-wrap:anywhere}
+.test .res.ok{color:var(--ok)}.test .res.err{color:var(--danger)}
+.test .res .t{color:var(--tx2)}
+.test .samp{flex-basis:100%;font-family:var(--font-mono);font-size:11.5px;color:var(--tx3);border-left:2px solid var(--border);padding-left:var(--sp-2);white-space:pre-wrap}
+.spin{width:10px;height:10px;flex:none;margin-top:3px;border-radius:50%;border:2px solid color-mix(in srgb,var(--accent) 35%,transparent);border-top-color:var(--accent-tx);animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(1turn)}}
+/* empty hint for "your sources" */
+.mine-empty{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2) var(--sp-4);padding:var(--sp-3) var(--sp-4);border:1px dashed var(--border);border-radius:var(--r-md);margin:0 0 var(--sp-4);font-size:13px;line-height:1.5;color:var(--tx2)}
+.mine-empty p{margin:0;flex:1 1 300px}
+/* loading skeleton */
+.sk{height:58px;border-bottom:1px solid var(--border-subtle);display:grid;grid-template-columns:28px 1fr;gap:var(--sp-3);align-items:center}
+.sk i{display:block;height:10px;border-radius:var(--r-xs);background:var(--fill-active)}
+.sk i.a{width:16px;height:16px}.sk div{display:flex;flex-direction:column;gap:8px}.sk div i:first-child{width:30%}.sk div i:last-child{width:60%}
+@media (prefers-reduced-motion:no-preference){.sk i{animation:pulse 1.4s ease-in-out infinite}}
+@keyframes pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}.tg,.tg::after{transition:none}}
+
+/* ⋯ menu (native popover) */
+.menu{position:fixed;inset:auto;margin:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--card);box-shadow:var(--shadow-lg);padding:4px;min-width:180px;color:var(--tx1)}
+.menu button{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:7px 8px;border-radius:var(--r-sm);font-size:13px;text-align:left}
+.menu button:hover,.menu button:focus-visible{background:var(--fill-hover)}
+.menu button.dang{color:var(--danger)}
+
+/* ---------- dialogs (native <dialog>, like StopTaskDialog / ClearBlockedModal) ---------- */
+dialog{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);color:var(--tx1);box-shadow:var(--shadow-lg);padding:0;width:min(600px,calc(100vw - 24px));max-height:calc(100dvh - 32px)}
+dialog::backdrop{background:rgb(11 16 32 / .45)}
+.dlg{display:flex;flex-direction:column;max-height:calc(100dvh - 34px)}
+.dlg header{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-4) var(--sp-5) var(--sp-2)}
+.dlg header h2{margin:0;font:600 16px/1.3 var(--font-sans)}
+.dlg .body{overflow-y:auto;padding:var(--sp-2) var(--sp-5) var(--sp-4);display:flex;flex-direction:column;gap:var(--sp-4)}
+.dlg footer{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-5) var(--sp-4);border-top:1px solid var(--border-subtle)}
+.dlg footer .spacer{flex:1}
+.dlg p.sub{margin:0;font-size:13px;line-height:1.5;color:var(--tx2)}
+.f{display:flex;flex-direction:column;gap:4px;min-width:0}
+.f>label,.f>legend,.lbl{font-size:13px;font-weight:500;color:var(--tx1)}
+.f .hint{font-size:12px;color:var(--tx3);line-height:1.45}
+.f input[type=text],.f input[type=url],.f textarea,.kv input{width:100%;border:1px solid var(--border);background:var(--canvas);border-radius:var(--r-sm);padding:6px var(--sp-2);font-size:13px;line-height:1.45}
+.f textarea{resize:vertical;min-height:56px}
+.f .mono,.kv input{font-family:var(--font-mono);font-size:12.5px}
+.f :is(input,textarea):user-invalid,.f :is(input,textarea)[aria-invalid="true"]{border-color:var(--danger)}
+.err{display:none;font-size:12px;color:var(--danger);line-height:1.45}
+.f:has([aria-invalid="true"]) .err,.f:has(:user-invalid) .err,.kv-row:has([aria-invalid="true"]) + .err{display:block}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,15rem);gap:var(--sp-3)}
+@media (max-width:520px){.two{grid-template-columns:1fr}}
+fieldset{border:0;margin:0;padding:0;min-width:0}
+.seg{display:inline-flex;background:var(--fill-active);border-radius:var(--r-sm);padding:2px;font-size:12.5px;align-self:flex-start}
+.seg label{position:relative;border-radius:var(--r-xs);padding:4px var(--sp-3);color:var(--tx3);cursor:pointer;white-space:nowrap}
+.seg input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.seg label:has(input:checked){background:var(--card);color:var(--tx1);font-weight:500;box-shadow:var(--shadow-sm)}
+.seg label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:1px}
+.kv{display:flex;flex-direction:column;gap:var(--sp-2)}
+.kv-row{display:grid;grid-template-columns:minmax(0,10rem) minmax(0,1fr) auto;gap:var(--sp-2);align-items:center}
+@media (max-width:520px){.kv-row{grid-template-columns:minmax(0,1fr) auto}.kv-row input:nth-child(2){grid-column:1}}
+.kv-row input[aria-invalid="true"]{border-color:var(--danger)}
+.kv .err{margin-top:-4px}
+.kvacts{display:flex;flex-wrap:wrap;align-items:center;gap:var(--sp-2) var(--sp-3)}
+.kvacts select{height:26px;border:1px solid var(--border);background:var(--card);border-radius:var(--r-sm);padding:0 6px;font-size:12px}
+.chk{display:flex;gap:var(--sp-2);align-items:flex-start;font-size:13px;line-height:1.45}
+.chk input{margin:3px 0 0;accent-color:var(--accent-solid);width:15px;height:15px;flex:none}
+.chk b{font-weight:500}
+.chk span span{display:block;color:var(--tx3);font-size:12px}
+.consq{font-size:12px;color:var(--warn);background:var(--warn-bg);border-radius:var(--r-sm);padding:6px var(--sp-2);line-height:1.45}
+.formerr{font-size:12.5px;color:var(--danger);flex-basis:100%}
+.tested{font-size:12px;color:var(--tx3);display:flex;align-items:center;gap:6px}
+.tested.ok{color:var(--ok)}.tested.bad{color:var(--danger)}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-grip" viewBox="0 0 24 24"><circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+<symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20a15 15 0 0 1 0-20"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></symbol>
+</defs></svg>
+
+<div class="demo" role="region" aria-label="Mockup controls (not part of the design)">
+  <b>Research sources</b>
+  <label>State <select id="d-state"></select></label>
+  <label>Theme <select id="d-theme"><option>light</option><option>dark</option></select></label>
+  <label>Width <select id="d-w"><option>1280</option><option>900</option><option>420</option></select></label>
+  <label>Save result <select id="d-save"><option value="ok">works</option><option value="fail">fails</option></select></label>
+  <span class="tag">throwaway mockup · no network</span>
+  <span class="src" id="d-src"></span>
+</div>
+
+<div class="stage">
+  <div class="frame" id="app"><div class="setwin">
+    <nav class="snav" aria-label="Settings sections">
+      <h3>Settings</h3>
+      <div class="sfind"><svg class="i s14"><use href="#i-search"/></svg><span>Find a setting</span></div>
+      <button class="snav-i" type="button">General</button>
+      <div class="cl">Setup</div>
+      <button class="snav-i" type="button">Box</button>
+      <button class="snav-i" type="button">Accounts</button>
+      <button class="snav-i" type="button">Models</button>
+      <button class="snav-i" type="button">Background work</button>
+      <div class="cl">Agent</div>
+      <button class="snav-i" type="button" data-sec="sessions">Sessions</button>
+      <button class="snav-i" type="button">Knowledge</button>
+      <button class="snav-i" type="button" data-sec="research">Research sources</button>
+      <button class="snav-i" type="button">Files</button>
+      <button class="snav-i" type="button">Extensions</button>
+      <button class="snav-i" type="button">Secrets</button>
+      <button class="snav-i" type="button">Voice</button>
+    </nav>
+    <div class="setmain">
+      <div class="sethead">
+        <button class="ibtn back" type="button" aria-label="All settings"><svg class="i"><use href="#i-left"/></svg></button>
+        <h2 id="sec-title">Research sources</h2><span class="spacer"></span>
+        <button class="ibtn" type="button" aria-label="Close settings"><svg class="i"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="setbody" id="body"></div>
+    </div>
+  </div></div>
+</div>
+
+<p id="announce" class="sr" role="status"></p>
+
+<div id="row-menu" class="menu" popover>
+  <button type="button" data-act="edit">Edit…</button>
+  <button type="button" data-act="remove" class="dang">Remove…</button>
+</div>
+
+<!-- Add / Edit a source -->
+<dialog id="dlg-src" aria-labelledby="dlg-src-h">
+  <form class="dlg" method="dialog" novalidate id="src-form">
+    <header><h2 id="dlg-src-h">Add a source</h2><span class="spacer"></span>
+      <button class="ibtn" type="button" value="cancel" formmethod="dialog" data-close aria-label="Close"><svg class="i"><use href="#i-x"/></svg></button></header>
+    <div class="body">
+      <p class="sub">Agents search it when a question fits its description, in the order of the list. It’s added at the top of your own sources; move it afterwards if you like.</p>
+      <div class="two">
+        <div class="f"><label for="f-name">Name</label><input id="f-name" type="text" autofocus required maxlength="60" autocomplete="off" placeholder="Bookface posts">
+          <span class="err">Give it a name.</span></div>
+        <div class="f"><label for="f-id">Id</label><input id="f-id" class="mono" type="text" required maxlength="30" pattern="[a-z0-9][a-z0-9\-]*" autocomplete="off" spellcheck="false" placeholder="bookface-posts" aria-describedby="f-id-h">
+          <span class="hint" id="f-id-h">How agents name it. Lowercase, digits and dashes.</span>
+          <span class="err" id="f-id-err">“packages” is a built-in source id. Pick another, e.g. packages-mine.</span></div>
+      </div>
+      <div class="f"><label for="f-desc">What it’s good for</label>
+        <textarea id="f-desc" rows="2" maxlength="300" placeholder="Full posts from YC’s founder forum, by keyword: fundraising, hiring, pricing advice."></textarea>
+        <span class="hint">Agents read this to decide when to search it. Name the kind of question, not the tool.</span></div>
+      <fieldset class="f"><legend>How Manta reaches it</legend>
+        <div class="seg" role="presentation">
+          <label><input type="radio" name="kind" value="command" checked>Program on this box</label>
+          <label><input type="radio" name="kind" value="url">Web address</label>
+        </div>
+      </fieldset>
+      <div class="f" data-kind="command"><label for="f-cmd">Program and arguments, one per line</label>
+        <textarea id="f-cmd" class="mono" rows="3" spellcheck="false" placeholder="/home/dev/.yc/bin/yc&#10;posts&#10;{query}"></textarea>
+        <span class="hint">No shell: pipes, quotes and variables aren’t read. One line must be exactly <span class="mono">{query}</span>; it can’t start with a dash.</span>
+        <span class="err">One line must be exactly {query}.</span></div>
+      <div class="f" data-kind="url" hidden><label for="f-url">Address</label>
+        <input id="f-url" class="mono" type="url" spellcheck="false" placeholder="https://search.example.com/api?q={query}">
+        <span class="hint">https only. Put <span class="mono">{query}</span> as one value after <span class="mono">?</span>, e.g. <span class="mono">?q={query}</span>.</span>
+        <span class="err">Put {query} as one query value, e.g. ?q={query}.</span></div>
+      <div class="f">
+        <span class="lbl" id="kv-h">Environment variables</span>
+        <span class="hint" id="kv-hint">Credentials only as a reference to a secret: <span class="mono">{secret:NAME}</span>. The value stays in Secrets and is never shown here.</span>
+        <div class="kv" id="kv" role="group" aria-labelledby="kv-h"></div>
+        <div class="kvacts">
+          <button class="btn sm" type="button" id="kv-add"><svg class="i s14"><use href="#i-plus"/></svg><span id="kv-add-l">Add variable</span></button>
+          <label class="hint">Insert a secret <select id="kv-secret" aria-label="Insert a secret into the focused value"><option value="">Choose…</option><option>YC_TOKEN</option><option>GITHUB_TOKEN</option><option>NOTION_KEY</option></select></label>
+          <a class="link hint" href="#" data-note="Opens Settings → Secrets; this form stays open with what you typed.">Manage secrets</a>
+        </div>
+      </div>
+      <label class="chk"><input type="checkbox" id="f-private" checked>
+        <span><b>Private</b><span>Agents may put project details in what they send to it. They use what it says but never quote it or name it as a source.</span></span></label>
+      <div class="consq" id="f-consq" hidden>Outside: agents will keep private project details out of everything they send to this source.</div>
+    </div>
+    <footer>
+      <button class="btn" type="button" id="f-test">Test</button>
+      <span class="tested" id="f-tested" role="status"></span>
+      <span class="spacer"></span>
+      <button class="btn ghost" type="button" data-close>Cancel</button>
+      <button class="btn primary" type="submit" id="f-save" value="save">Add source</button>
+      <span class="formerr" id="f-formerr" role="alert" hidden></span>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Remove -->
+<dialog id="dlg-rm" aria-labelledby="dlg-rm-h">
+  <form class="dlg" method="dialog">
+    <header><h2 id="dlg-rm-h">Remove “Bookface posts”?</h2></header>
+    <div class="body"><p class="sub">Agents stop searching it. What they already learned from it stays in the research library. Its command and settings are deleted; the secret it uses stays in Secrets.</p></div>
+    <footer><span class="spacer"></span><button class="btn ghost" value="cancel" autofocus>Cancel</button><button class="btn danger" value="remove">Remove</button></footer>
+  </form>
+</dialog>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const icon = (n, c='') => `<svg class="i ${c}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+
+/* built-ins: names and descriptions come from code (spec §6.1, §7) */
+const BUILTIN = {
+  web:{name:'Web', desc:'Anything, and official docs with site:. Uses the built-in web search.'},
+  github:{name:'GitHub', desc:'Libraries in use: stars, last push, licence, description.'},
+  packages:{name:'Packages', desc:'Versions, licences, deprecations and security advisories for npm, PyPI, Go, Maven, Cargo, NuGet and RubyGems.'},
+  stackoverflow:{name:'Stack Overflow', desc:'How others solved a concrete error or pattern; accepted answers and their dates.'},
+  hn:{name:'Hacker News', desc:'Practitioner discussion, launches and opinions on tools.'},
+  reddit:{name:'Reddit', desc:'Practitioner experience. Searched through Exa, a third-party service.'},
+  arxiv:{name:'arXiv', desc:'Research papers.'},
+  x:{name:'X', desc:'Announcements and practitioner threads. Searched through Exa, a third-party service.'},
+};
+const DEFAULT_ORDER = ['web','github','packages','stackoverflow','hn','reddit','arxiv','x'];
+const B = (id, enabled=true) => ({id, builtin:true, enabled, private:false});
+const BOOKFACE = {id:'bookface', builtin:false, enabled:true, private:true, kind:'command', name:'Bookface (YC) search',
+  desc:'YC’s private founder forum: companies, founders and advice threads. Good for fundraising, hiring and pricing questions.',
+  command:['/home/dev/.yc/bin/yc','search','{query}'], env:{YC_TOKEN:'{secret:YC_TOKEN}'}, addedBy:'migration', secretRefs:['YC_TOKEN'], missing:[]};
+const POSTS = {id:'bookface-posts', builtin:false, enabled:true, private:true, kind:'command', name:'Bookface posts',
+  desc:'Full Bookface posts by keyword, when a search result needs its whole thread.',
+  command:['/home/dev/.yc/bin/yc','posts','{query}'], env:{YC_TOKEN:'{secret:YC_TOKEN}'}, addedBy:'migration', secretRefs:['YC_TOKEN'], missing:[]};
+const PKGMINE = {id:'packages-mine', builtin:false, enabled:true, private:true, kind:'url', name:'Our package registry',
+  desc:'Internal packages published by the team, with owners and versions.',
+  url:'https://registry.acme-internal.dev/-/search?text={query}', headers:{Authorization:'Bearer {secret:REGISTRY_TOKEN}'}, addedBy:'migration', secretRefs:['REGISTRY_TOKEN'], missing:[]};
+const SOMINE = {id:'stackoverflow-mine', builtin:false, enabled:true, private:true, kind:'url', name:'Stack Overflow for Teams',
+  desc:'Our team’s private Q&A: internal how-tos and past incidents.',
+  url:'https://api.stackoverflowteams.com/2.3/search?intitle={query}&team=acme', headers:{'X-API-Access-Token':'{secret:SO_TEAMS_KEY}'}, addedBy:'migration', secretRefs:['SO_TEAMS_KEY'], missing:[]};
+const WIKI = (n) => ({id:`wiki-${n}`, builtin:false, enabled:true, private:true, kind:'url', name:`Team wiki ${n}`, desc:'Internal docs.', url:'https://wiki.example/api?q={query}', headers:{}, addedBy:'user', secretRefs:[], missing:[]});
+
+const MIGRATED_NOTE = 'Sources moved from the Architect are private; make one public here if you want.';
+const STATES = {
+  migrated:{label:'1 · Bookface moved from the Architect (ideal)', src:'AC-1.1, AC-1.1b: migrated sources first, forced private, one notice',
+    sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{moved:['Bookface (YC) search','Bookface posts']}},
+  renamed:{label:'2 · Renamed ids + a skipped entry', src:'AC-1.14 (-mine renames) and AC-1.15 (entry invalid under the old rules is skipped and named)',
+    sources:()=>[{...PKGMINE}, BOOKFACE, {...SOMINE}, ...DEFAULT_ORDER.map((i)=>B(i))],
+    notices:{moved:['Our package registry','Bookface (YC) search','Stack Overflow for Teams'], renamed:[['packages','packages-mine'],['stackoverflow','stackoverflow-mine']],
+      skipped:[['yc-jobs','The url must contain {query} as one query value']]}},
+  fresh:{label:'3 · New box: defaults only (empty)', src:'AC-1.3: the defaults of §7, all on, none private, no user sources', sources:()=>DEFAULT_ORDER.map((i)=>B(i)), notices:{}},
+  loading:{label:'4 · Loading', src:'Before research:sources-list answers', loading:true},
+  error:{label:'5 · Couldn’t load', src:'research:sources-list failed (class-1 safe sentence)', error:'Couldn’t reach the box. Check that it’s running, then try again.'},
+  unsupported:{label:'6 · Older box', src:'Unknown rpc channel → the existing UpdateBoxNote', unsupported:true},
+  missing:{label:'7 · Missing secret', src:'AC-1.9: “missing secret YC_TOKEN”, a name never a value',
+    sources:()=>[{...BOOKFACE, missing:['YC_TOKEN']}, {...POSTS, missing:['YC_TOKEN']}, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}},
+  webOff:{label:'8 · Web turned off', src:'AC-1.6: listed as off; agents get a refusal, not an empty result',
+    sources:()=>[BOOKFACE, POSTS, B('web',false), ...DEFAULT_ORDER.slice(1).map((i)=>B(i))], notices:{}},
+  testing:{label:'9 · Test running', src:'AC-1.10: up to 60 s', sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, test:{id:'bookface', st:'run'}},
+  testOk:{label:'10 · Test works (private sample)', src:'AC-1.10 + AC-1.11: count, time, first title; private sample = first 200 characters, not logged',
+    sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, test:{id:'bookface', st:'ok'}},
+  testFail:{label:'11 · Test fails', src:'AC-1.10: the sentence the search itself would give', sources:()=>[{...BOOKFACE, missing:['YC_TOKEN']}, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, test:{id:'bookface', st:'fail'}},
+  testBuiltin:{label:'12 · Test a built-in (outside)', src:'Built-ins: Test only; no sample panel for outside results beyond the first title',
+    sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, test:{id:'packages', st:'ok'}},
+  saveFail:{label:'13 · Reorder didn’t save', src:'research:sources-save → { ok:false, error }: the list goes back, the error says why',
+    sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, saved:{err:'Couldn’t save the new order: the box didn’t answer. The list is back to how it was; try again.'}},
+  limit:{label:'14 · 20 of your own (limit)', src:'AC-1.12: Add is disabled with the reason', sources:()=>[BOOKFACE, POSTS, ...Array.from({length:18},(_,i)=>WIKI(i+1)), ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}},
+  add:{label:'15 · Add a source: program', src:'Add form, command shape, {secret:NAME} helper', sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, dialog:'add'},
+  addUrl:{label:'16 · Add a source: web address', src:'Add form, url shape (headers)', sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, dialog:'addUrl'},
+  addErr:{label:'17 · Add refused: built-in id + credential', src:'AC-1.13 built-in id; AC-1.8 credential literal → the existing hint; nothing written', sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, dialog:'addErr'},
+  edit:{label:'18 · Edit: make Bookface public', src:'AC-1.1b: turning private off is an explicit choice, with its consequence', sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, dialog:'edit'},
+  remove:{label:'19 · Remove (confirm)', src:'User sources only (AC-1.7); built-ins have no Remove', sources:()=>[BOOKFACE, POSTS, ...DEFAULT_ORDER.map((i)=>B(i))], notices:{}, dialog:'remove'},
+  sessions:{label:'20 · Settings → Sessions: suggestions switch', src:'AC-4.6 / §9.4: “Suggest agents for repeated work”, default on', sessions:true},
+};
+
+const sel = document.getElementById('d-state');
+sel.innerHTML = Object.entries(STATES).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
+const st = {state: STATES[qs.get('state')] ? qs.get('state') : 'migrated', theme: qs.get('theme')==='dark'?'dark':'light', w: qs.get('w')||'1280', save:'ok'};
+sel.value = st.state; document.getElementById('d-theme').value = st.theme; document.getElementById('d-w').value = st.w;
+
+let list = [], notices = {}, test = null, saved = null, noticeHidden = false, suggestOn = true;
+function load(){
+  const s = STATES[st.state];
+  list = s.sources ? s.sources().map((x)=>({...x})) : [];
+  notices = s.notices || {}; test = s.test ? {...s.test, q:'test'} : null; saved = s.saved || null; noticeHidden = false;
+  document.getElementById('d-src').textContent = 'Shows: ' + s.src;
+}
+
+const mine = () => list.filter((s)=>!s.builtin);
+const nameOf = (s) => s.builtin ? BUILTIN[s.id].name : s.name;
+const descOf = (s) => s.builtin ? BUILTIN[s.id].desc : s.desc;
+
+function label(s){
+  return s.private
+    ? `<span class="pill priv" title="May receive project details. Agents use it but never quote it or name it.">${icon('lock','s12')}Private</span>`
+    : `<span class="pill out" title="Agents keep private project details out of what they send to it.">${icon('globe','s12')}Outside</span>`;
+}
+
+function meta(s){
+  const parts = [];
+  if (s.builtin) parts.push('<span>Built in</span>');
+  else if (s.kind==='command') parts.push(`<span class="cmd">${esc(s.command.join(' '))}</span>`);
+  else parts.push(`<span class="cmd">${esc(s.url)}</span>`);
+  if (!s.builtin && s.addedBy==='migration') parts.push('<span>Moved from the Architect</span>');
+  for (const m of s.missing||[]) parts.push(`<span class="w">${icon('alert','s12')}Missing secret ${esc(m)}</span><a class="link" href="#" data-note="Opens Settings → Secrets with “${esc(m)}” filled in as the name.">Add it in Secrets</a>`);
+  if (!s.enabled) parts.push(s.id==='web' ? '<span class="w">Off: agents can’t search the web</span>' : '<span>Off: agents don’t search it</span>');
+  return parts.join('');
+}
+
+function testPanel(s){
+  if (!test || test.id!==s.id) return '';
+  let res = '';
+  if (test.st==='run') res = `<div class="res"><span class="spin" aria-hidden="true"></span><span class="t">Searching “${esc(test.q)}”… this can take up to a minute.</span></div>`;
+  if (test.st==='ok' && s.private) res = `<div class="res ok">${icon('check','s14')}<span>Works — 8 results in 1.4 s. First: <span class="t">“How we priced our seed round (and what we’d change)”</span></span></div>
+      <div class="samp" aria-label="Sample of the answer, first 200 characters, not saved">[1] How we priced our seed round (and what we’d change) — 2026-10-02 · 41 replies
+We raised on a post-money SAFE at a cap we picked from three comparable rounds in our batch. In hindsight the cap was…</div>`;
+  if (test.st==='ok' && !s.private) res = `<div class="res ok">${icon('check','s14')}<span>Works — 10 results in 0.9 s. First: <span class="t">“npm:zod — 3.25.76, MIT, no advisories”</span></span></div>`;
+  if (test.st==='fail') res = `<div class="res err">${icon('alert','s14')}<span>The source’s secret YC_TOKEN is missing. <a class="link" href="#" data-note="Opens Settings → Secrets with YC_TOKEN filled in.">Add it in Secrets</a></span></div>`;
+  return `<div class="test" data-test>
+    <label for="tq-${s.id}">Query</label><input id="tq-${s.id}" type="text" value="${esc(test.q)}" ${test.st==='run'?'disabled':''}>
+    <button class="btn sm" type="button" data-act="run" ${test.st==='run'?'disabled':''}>Run again</button>
+    <button class="btn sm ghost" type="button" data-act="closetest">Close</button>
+    ${res}
+  </div>`;
+}
+
+function row(s, i){
+  const n = list.length, nm = nameOf(s);
+  const menu = s.builtin ? '<span class="ibtn" aria-hidden="true"></span>' : `<button class="ibtn" type="button" popovertarget="row-menu" data-act="menu" aria-label="More for ${esc(nm)}">${icon('more')}</button>`;
+  return `<li id="src-${s.id}" data-id="${s.id}" class="${s.enabled?'':'is-off'}"><div class="srow">
+    <button class="grip" type="button" data-act="grip" aria-label="Reorder ${esc(nm)}, position ${i+1} of ${n}" title="Drag to reorder">${icon('grip','s14')}</button>
+    <div class="sbody">
+      <div class="sl1"><span class="sname">${esc(nm)}</span><span class="sid">${esc(s.id)}</span>${label(s)}</div>
+      <p class="sdesc">${esc(descOf(s))}</p>
+      <div class="smeta">${meta(s)}</div>
+    </div>
+    <div class="sctl">
+      <button class="btn sm" type="button" data-act="test">Test</button>
+      <button class="ibtn" type="button" data-act="up" aria-label="Move ${esc(nm)} up" ${i===0?'disabled':''}>${icon('up')}</button>
+      <button class="ibtn" type="button" data-act="down" aria-label="Move ${esc(nm)} down" ${i===n-1?'disabled':''}>${icon('down')}</button>
+      ${menu}
+      <button class="tg" type="button" role="switch" aria-checked="${s.enabled}" data-act="toggle" aria-label="Search ${esc(nm)}"></button>
+    </div>
+    ${testPanel(s)}
+  </div></li>`;
+}
+
+function noticeBlock(){
+  const parts = [];
+  if (notices.moved && !noticeHidden){
+    let h = `<p><b>${notices.moved.length} ${notices.moved.length===1?'source':'sources'} moved here from the Architect:</b> ${notices.moved.map(esc).join(', ')}. Every agent can search them now. ${esc(MIGRATED_NOTE)}</p>`;
+    const items = [];
+    for (const [from,to] of notices.renamed||[]) items.push(`<li>Your <code>${esc(from)}</code> is now <code>${esc(to)}</code>, because “${esc(from)}” became a built-in source.</li>`);
+    for (const [id,why] of notices.skipped||[]) items.push(`<li>Not moved: <code>${esc(id)}</code>. ${esc(why)}. It was never usable; add it again with Add source if you still want it.</li>`);
+    if (items.length) h += `<ul>${items.join('')}</ul>`;
+    parts.push(`<div class="notice" role="note">${icon('info')}<div>${h}</div><button class="ibtn x" type="button" data-act="hidenotice" aria-label="Hide this note">${icon('x','s14')}</button></div>`);
+  }
+  return parts.join('');
+}
+
+function researchPanel(){
+  const s = STATES[st.state];
+  const intro = `<p class="lead">When a decision rests on facts that change — a library, a version, a price, how others do it — agents check the research library first, then search these sources, top first. Sources here are shared by every agent on this box.</p>`;
+  if (s.loading) return intro + `<div class="lhead"><h3>Sources, in priority order</h3></div><div aria-busy="true" aria-label="Loading sources">${'<div class="sk"><i class="a"></i><div><i></i><i></i></div></div>'.repeat(6)}</div>`;
+  if (s.error) return intro + `<div class="notice err" role="alert">${icon('alert')}<div><p><b>Couldn’t load research sources.</b> ${esc(s.error)}</p></div><button class="btn sm" type="button" data-note="Retries research:sources-list.">Try again</button></div>`;
+  if (s.unsupported) return intro + `<div class="notice" role="note">${icon('info')}<p>Update the box to manage research sources here. Until then only the Architect searches Bookface and other sources of your own.</p></div>`;
+  const m = mine().length, full = m >= 20;
+  const empty = m===0 ? `<div class="mine-empty"><p><b>No sources of your own yet.</b> Add one to have agents search it first: a forum you’re a member of, your team’s wiki, an internal search. Agents already use the defaults below.</p><button class="btn" type="button" data-act="add">${icon('plus','s14')}Add source</button></div>` : '';
+  return intro + noticeBlock() + empty + `
+    <div class="lhead"><h3 id="list-h">Sources, in priority order</h3><span class="cnt">${m} of 20 of your own</span>
+      ${m ? `<button class="btn" type="button" data-act="add" ${full?'disabled aria-describedby="limit"':''}>${icon('plus','s14')}Add source</button>` : ''}
+      ${full ? '<span class="limit" id="limit">At most 20 sources of your own. Remove one to add another.</span>' : ''}</div>
+    <div class="legend">
+      <span><span class="pill priv">${icon('lock','s12')}Private</span>may receive project details; agents use it but never quote or name it.</span>
+      <span><span class="pill out">${icon('globe','s12')}Outside</span>agents keep private project details out of what they send.</span>
+    </div>
+    <p class="saved ${saved?.err?'err':saved?'ok':''}" role="status" id="saved">${saved?.err ? esc(saved.err) : saved ? 'Saved' : ''}</p>
+    <ol class="srcs" aria-labelledby="list-h">${list.map(row).join('')}</ol>`;
+}
+
+function sessionsPanel(){
+  return `<div class="setgrp"><h3>Agents</h3>
+    <div class="placeholder">… the autonomy rows already in Sessions (unchanged) …</div>
+    <div class="setrow"><span class="lab"><b id="sg-l">Suggest agents for repeated work</b><span>When you ask Manta for the same kind of work 3 times, it offers once to make a dedicated agent or a skill for it. At most one offer a day in a chat. Turning this off keeps counting, so turning it back on works on recent requests.</span></span>
+      <span class="ctl"><button class="tg" type="button" role="switch" aria-checked="${suggestOn}" aria-labelledby="sg-l" data-act="suggest"></button></span></div>
+  </div>`;
+}
+
+function render(){
+  document.documentElement.dataset.theme = st.theme;
+  document.getElementById('app').style.setProperty('--frame-w', st.w+'px');
+  const s = STATES[st.state];
+  document.getElementById('sec-title').textContent = s.sessions ? 'Sessions' : 'Research sources';
+  document.querySelectorAll('.snav-i').forEach((b)=>b.toggleAttribute('aria-current', false));
+  const cur = document.querySelector(`.snav-i[data-sec="${s.sessions?'sessions':'research'}"]`); cur.setAttribute('aria-current','page');
+  document.getElementById('body').innerHTML = `<div class="setgrp">${s.sessions ? sessionsPanel() : researchPanel()}</div>`;
+}
+
+/* ---------- mock behaviour ---------- */
+const announce = (t) => { const a = document.getElementById('announce'); a.textContent=''; setTimeout(()=>{a.textContent=t;}, 50); };
+let menuFor = null;
+function save(okText, revert){
+  if (st.save==='fail'){ revert(); saved = {err:'Couldn’t save: the box didn’t answer. Nothing changed; try again.'}; }
+  else saved = {ok:true};
+  render();
+  if (okText && st.save==='ok') announce(okText);
+}
+document.getElementById('body').addEventListener('click', (e)=>{
+  const b = e.target.closest('[data-act],[data-note]'); if (!b) return;
+  if (b.dataset.note){ e.preventDefault(); alert('Mock: ' + b.dataset.note); return; }
+  const li = b.closest('li[data-id]'); const id = li?.dataset.id; const i = list.findIndex((x)=>x.id===id); const s = list[i];
+  const act = b.dataset.act;
+  if (act==='toggle'){ const was = s.enabled; s.enabled = !was; save(`${nameOf(s)} ${s.enabled?'on':'off'}`, ()=>{ s.enabled = was; }); document.querySelector(`#src-${CSS.escape(id)} [data-act=toggle]`)?.focus(); }
+  if (act==='up' || act==='down'){
+    const j = act==='up' ? i-1 : i+1; const before = list.slice();
+    [list[i], list[j]] = [list[j], list[i]];
+    save(`${nameOf(s)} moved to position ${j+1} of ${list.length}`, ()=>{ list = before; });
+    const again = document.querySelector(`#src-${CSS.escape(id)} [data-act=${act}]`);
+    (again && !again.disabled ? again : document.querySelector(`#src-${CSS.escape(id)} [data-act=${act==='up'?'down':'up'}]`))?.focus({preventScroll:true});
+    document.getElementById('src-'+id)?.scrollIntoView({block:'nearest'});
+  }
+  if (act==='grip') announce('Mock: drag the handle, or use the arrow buttons. The real list also accepts Space to pick up, arrows to move, Space to drop, Escape to cancel.');
+  if (act==='test' || act==='run'){
+    const q = li.querySelector('[data-test] input')?.value || 'test';
+    test = {id, st:'run', q}; render();
+    setTimeout(()=>{ if (test?.id===id){ test.st = (s.missing||[]).length ? 'fail' : 'ok'; render(); announce(test.st==='ok'?'Test worked':'Test failed'); } }, 1200);
+  }
+  if (act==='closetest'){ test = null; render(); }
+  if (act==='menu'){ menuFor = id; const m = document.getElementById('row-menu'); const r = b.getBoundingClientRect(); m.style.top = (r.bottom+4)+'px'; m.style.left = Math.max(8, r.right-180)+'px'; }
+  if (act==='add') openSrc('add');
+  if (act==='hidenotice'){ noticeHidden = true; render(); announce('Note hidden on this device'); }
+  if (act==='suggest'){ suggestOn = !suggestOn; render(); announce(`Suggestions ${suggestOn?'on':'off'}`); }
+});
+document.getElementById('row-menu').addEventListener('click', (e)=>{
+  const b = e.target.closest('[data-act]'); if (!b) return; document.getElementById('row-menu').hidePopover();
+  if (b.dataset.act==='edit') openSrc('edit', menuFor);
+  if (b.dataset.act==='remove') openRemove(menuFor);
+});
+
+/* ---------- Add / Edit dialog ---------- */
+const dlg = document.getElementById('dlg-src'), form = document.getElementById('src-form');
+const $ = (id) => document.getElementById(id);
+function kvRows(pairs, isHeaders){
+  $('kv-h').textContent = isHeaders ? 'Headers' : 'Environment variables';
+  $('kv-add-l').textContent = isHeaders ? 'Add header' : 'Add variable';
+  $('kv').innerHTML = pairs.map(([k,v,bad],n)=>`<div class="kv-row"><input type="text" aria-label="${isHeaders?'Header':'Variable'} ${n+1} name" value="${esc(k)}" spellcheck="false"><input type="text" aria-label="${isHeaders?'Header':'Variable'} ${n+1} value" value="${esc(v)}" spellcheck="false" placeholder="{secret:NAME}" ${bad?'aria-invalid="true" aria-describedby="kv-err-'+n+'"':''}><button class="ibtn" type="button" data-kvdel aria-label="Remove ${isHeaders?'header':'variable'} ${n+1}">${icon('x','s14')}</button></div>${bad?`<span class="err" id="kv-err-${n}">Put this value in Secrets and use {secret:NAME} in a header or env value.</span>`:''}`).join('');
+}
+function setKind(k){
+  form.querySelectorAll('[data-kind]').forEach((el)=>el.hidden = el.dataset.kind!==k);
+  form.querySelector(`input[name=kind][value=${k}]`).checked = true;
+}
+function openSrc(mode, id){
+  form.reset(); $('f-tested').textContent=''; $('f-tested').className='tested'; $('f-formerr').hidden = true; $('f-consq').hidden = true;
+  form.querySelectorAll('[aria-invalid]').forEach((el)=>el.removeAttribute('aria-invalid'));
+  const edit = mode==='edit';
+  $('dlg-src-h').textContent = edit ? 'Edit “Bookface (YC) search”' : 'Add a source';
+  $('f-save').textContent = edit ? 'Save' : 'Add source';
+  form.querySelector('.sub').hidden = edit;
+  if (mode==='add'){ setKind('command'); kvRows([['YC_TOKEN','{secret:YC_TOKEN}']], false); }
+  if (mode==='addUrl'){ setKind('url'); $('f-name').value='Team wiki'; $('f-id').value='team-wiki'; $('f-desc').value='Our internal docs: runbooks, architecture notes, decisions.'; $('f-url').value='https://wiki.acme-internal.dev/api/search?q={query}'; kvRows([['Authorization','Bearer {secret:WIKI_TOKEN}']], true); }
+  if (mode==='addErr'){ setKind('url'); $('f-name').value='Packages'; $('f-id').value='packages'; $('f-id').setAttribute('aria-invalid','true'); $('f-desc').value='Our package registry.'; $('f-url').value='https://registry.acme-internal.dev/-/search?text={query}'; kvRows([['Authorization','Bearer npm_8f3kQ2…',true]], true);
+    $('f-formerr').hidden = false; $('f-formerr').textContent = 'Not added. Fix the 2 fields marked in red.'; }
+  if (edit){ setKind('command'); const s = list.find((x)=>x.id===(id||'bookface')) || BOOKFACE; $('f-name').value=s.name; $('f-id').value=s.id; $('f-id').readOnly = true; $('f-id-h').textContent='The id can’t change: agents and the library refer to it.'; $('f-desc').value=s.desc; $('f-cmd').value=s.command?.join('\n')||''; kvRows(Object.entries(s.env||{}), false);
+    if (st.state==='edit'){ $('f-private').checked = false; $('f-consq').hidden = false; } }
+  else { $('f-id').readOnly = false; $('f-id-h').textContent='How agents name it. Lowercase, digits and dashes.'; }
+  if (!dlg.open) dlg.showModal();
+}
+form.addEventListener('change', (e)=>{
+  if (e.target.name==='kind'){ setKind(e.target.value); kvRows([['','']], e.target.value==='url'); }
+  if (e.target.id==='f-private') $('f-consq').hidden = e.target.checked;
+});
+$('f-name').addEventListener('input', ()=>{ if (!$('f-id').readOnly && !$('f-id').dataset.touched) $('f-id').value = $('f-name').value.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,30); });
+$('f-id').addEventListener('input', ()=>{ $('f-id').dataset.touched='1'; const bad = Object.keys(BUILTIN).includes($('f-id').value) || $('f-id').value==='skills'; if (bad){ $('f-id').setAttribute('aria-invalid','true'); $('f-id-err').textContent = `“${$('f-id').value}” is a built-in source id. Pick another, e.g. ${$('f-id').value}-mine.`; } else $('f-id').removeAttribute('aria-invalid'); });
+$('kv-add').addEventListener('click', ()=>{ const isH = $('kv-h').textContent==='Headers'; const pairs = [...$('kv').querySelectorAll('.kv-row')].map((r)=>[r.children[0].value, r.children[1].value]); kvRows([...pairs,['','']], isH); $('kv').querySelector('.kv-row:last-of-type input').focus(); });
+$('kv').addEventListener('click', (e)=>{ if (e.target.closest('[data-kvdel]')){ const r = e.target.closest('.kv-row'); const er = r.nextElementSibling?.classList.contains('err') ? r.nextElementSibling : null; r.remove(); er?.remove(); }});
+let lastVal = null; $('kv').addEventListener('focusin', (e)=>{ if (e.target.matches('.kv-row input:nth-child(2)')) lastVal = e.target; });
+$('kv-secret').addEventListener('change', (e)=>{ const v = e.target.value; if (!v) return; const t = lastVal || $('kv').querySelector('.kv-row input:nth-child(2)'); if (t){ t.value = (t.value.replace(/\{secret:[^}]*\}|$/, '') + `{secret:${v}}`).trim(); t.removeAttribute('aria-invalid'); t.focus(); } e.target.value=''; });
+$('f-test').addEventListener('click', ()=>{ const t = $('f-tested'); t.className='tested'; t.innerHTML = '<span class="spin" aria-hidden="true"></span>Testing with “test”…'; setTimeout(()=>{ const bad = form.querySelector('[aria-invalid="true"]'); t.className = 'tested ' + (bad?'bad':'ok'); t.textContent = bad ? 'Not tested: fix the fields marked in red first.' : 'Works — 6 results in 0.8 s'; }, 1100); });
+form.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  const bad = form.querySelectorAll('[aria-invalid="true"], :invalid:not(fieldset)');
+  const shown = [...bad].filter((el)=>!el.closest('[hidden]'));
+  if (shown.length){ shown.forEach((el)=>el.setAttribute('aria-invalid','true')); $('f-formerr').hidden=false; $('f-formerr').textContent = `Not ${$('f-save').textContent==='Save'?'saved':'added'}. Fix the ${shown.length===1?'field':shown.length+' fields'} marked in red.`; shown[0].focus(); return; }
+  if (st.save==='fail'){ $('f-formerr').hidden=false; $('f-formerr').textContent='Couldn’t save: the box didn’t answer. What you typed is still here; try again.'; return; }
+  dlg.close(); saved = {ok:true}; render(); announce('Saved');
+});
+dlg.addEventListener('click', (e)=>{ if (e.target.closest('[data-close]')) dlg.close(); });
+function openRemove(id){ const s = list.find((x)=>x.id===(id||'bookface-posts')) || POSTS; const d = $('dlg-rm'); $('dlg-rm-h').textContent = `Remove “${s.name}”?`; d.dataset.id = s.id; d.showModal(); }
+$('dlg-rm').addEventListener('close', ()=>{ const d = $('dlg-rm'); if (d.returnValue==='remove'){ const before = list.slice(); list = list.filter((x)=>x.id!==d.dataset.id); save('Source removed', ()=>{ list = before; }); } });
+
+/* ---------- demo bar ---------- */
+function go(){ load(); render(); const s = STATES[st.state];
+  if (dlg.open) dlg.close(); if ($('dlg-rm').open) $('dlg-rm').close();
+  if (s.dialog==='remove') openRemove('bookface-posts'); else if (s.dialog) openSrc(s.dialog, 'bookface'); }
+sel.addEventListener('change', ()=>{ st.state = sel.value; go(); });
+document.getElementById('d-theme').addEventListener('change', (e)=>{ st.theme = e.target.value; render(); });
+document.getElementById('d-w').addEventListener('change', (e)=>{ st.w = e.target.value; render(); });
+document.getElementById('d-save').addEventListener('change', (e)=>{ st.save = e.target.value; });
+go();
+</script>
+</body>
+</html>
