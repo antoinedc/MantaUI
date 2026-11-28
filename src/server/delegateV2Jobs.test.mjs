@@ -4309,6 +4309,8 @@ test("task model: the posted result carries the model the task ran on in its man
   const { w, id } = await finishedOnModel("anthropic/claude-sonnet-5-5");
   const next = await continueJob(id, { prompt: "review it", sessionID: PARENT, model: "openai/gpt-6-sol" }, w.deps);
   assert.equal(buildResultSynthetic(next.job).metadata.manta.model, "openai/gpt-6-sol");
+});
+
 // ---------------------------------------------------------------------------
 // Agent chat tasks (docs/superpowers/specs/2026-11-28-agent-chat-tasks.md §6.6–§6.8): the knowledge pin is awaited and verified
 // BEFORE the opening prompt; the record carries the project and where the task started; a seat owed is on the record.

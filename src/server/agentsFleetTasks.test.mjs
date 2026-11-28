@@ -171,6 +171,8 @@ test("shapeFleetTasks: every row says the model its task ran on — the one the 
   assert.equal(model("m4"), null);
   const ended = shape([job({ id: "e1", model: "openai/gpt-6-sol", requestedModel: "openai/gpt-6-sol", launch: { model: { providerID: "openai", modelID: "gpt-6-sol" } } })]);
   assert.equal(ended.ended[0].model, "openai/gpt-6-sol");
+});
+
 test("the chat cards and Fleet share ONE outcome mapping: outcomeOfJob agrees with endedOutcome for every way a task can end", async () => {
   const { outcomeOfJob } = await import("../shared/fleetOutcome.mjs");
   const table = [
