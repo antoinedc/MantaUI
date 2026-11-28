@@ -45,6 +45,7 @@ import {
 } from "../shared/optimizerPolicy.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import * as tmux from "./tmux.mjs";
+import { gitRun } from "./gitExec.mjs";
 import * as oc from "./opencode.mjs";
 import * as pty from "./pty.mjs";
 import * as local from "./local.mjs";
@@ -870,7 +871,7 @@ const routinesEngine = createRoutinesEngine({
   local: {
     gitAddWorktree: (a) => local.gitAddWorktree(a),
     gitRemoveWorktree: (a) => local.gitRemoveWorktree(a),
-    git: (args) => tmux.run("git", args),
+    git: (args) => gitRun(args),
   },
   push,
   // Agents Phase 2: a routine can run as an agent. The agents engine is created further down, so it is read at call time
@@ -1431,7 +1432,7 @@ const projectActions = createProjectActions({
   ...knowledgeSeam(() => knowledgeEngine),
   gitMainWorktree: async (dir) => {
     try {
-      return parseMainWorktree((await tmux.run("git", ["-C", dir, "worktree", "list", "--porcelain"]))?.stdout);
+      return parseMainWorktree((await gitRun(["-C", dir, "worktree", "list", "--porcelain"]))?.stdout);
     } catch {
       return null;
     }
@@ -1471,7 +1472,7 @@ const delegateEngine = createDelegateEngine({
   rebaseHolder: (s, i, dir) => tmux.rebaseHolder(s, i, dir),
   gitAddWorktree: (input) => local.gitAddWorktree(input),
   gitRemoveWorktree: (input) => local.gitRemoveWorktree(input),
-  gitRun: (args) => tmux.run("git", args),
+  gitRun: (args, opts) => gitRun(args, opts),
   listMessages: (sid) => oc.listMessages(sid),
   listModels: (overrides) => oc.listModels(overrides),
   // BET-1220: routing inputs for the subagent model decision in startJob.
@@ -2654,7 +2655,7 @@ const agentTrials = createAgentTrials({
   agents: () => agentsEngine,
   oc,
   local: { gitAddWorktree: (a) => local.gitAddWorktree(a), gitRemoveWorktree: (a) => local.gitRemoveWorktree(a) },
-  gitRun: (args) => tmux.run("git", args),
+  gitRun: (args, opts) => gitRun(args, opts),
   editConfig: (edits) => editOpencodeConfig(edits),
   // the shared background budget is told what each case really cost, never asked: a trial is part of the task the user asked for,
   // so the background level (even "off") must not refuse it
@@ -2764,7 +2765,7 @@ const agentLearning = createAgentLearning({
   isUserAuthored: createKnowledgeIsUserAuthored(promptOrigins),
   questionsOf: (root) => agentsEngine.questionsForRoot(root),
   changesOf: (root) => agentsEngine.changesForRoot(root),
-  userCommits: createUserCommitReader({ gitRun: (args) => tmux.run("git", args) }),
+  userCommits: createUserCommitReader({ gitRun: (args) => gitRun(args) }),
   // the same lookup the engine uses to give a task its project's rules (security review L3)
   projectOf: (directory) => agentsEngine.learnedProjectOf(directory),
   ask: async (prompt) => {

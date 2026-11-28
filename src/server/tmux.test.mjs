@@ -14,6 +14,7 @@ import {
   newWindowGetIndex,
   resolveCwdOrThrow,
   _setRun,
+  spawnRun,
   CHAT_HOLDER_CMD,
   loadOwnedSessions,
   loadOwnedSessionsSync,
@@ -1271,4 +1272,8 @@ test("stampViewArmed sets @manta-view-armed to 1 on the window", async () => {
     _setRun(null);
   }
   assert.deepEqual(cmds.find((c) => c.args.includes("set-window-option")).args, ["set-window-option", "-t", "proj:5", "@manta-view-armed", "1"]);
+});
+
+test("a timeout names the command that timed out, not always tmux", async () => {
+  await assert.rejects(spawnRun("sleep", ["5"], 100), /^Error: sleep timed out after 0\.1s$/);
 });
