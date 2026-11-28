@@ -12,6 +12,7 @@ import {
   groupNeedsByProject,
   groupSummary,
   groupTasks,
+  rowKey,
   inProgressCount,
   lastUpdateLabel,
   needsCounts,
@@ -113,9 +114,27 @@ describe("groupTasks", () => {
       ["Product Designer", "pd", ["c", "d"]],
     ]);
   });
+  it("a chat in a workspace the registry doesn't know is grouped under the workspace's name, apart from rows with no project at all", () => {
+    const g = groupTasks(
+      [task({ jobId: "", key: "s1", kind: "chat", project: null, projectName: "mantaui-box" }), task({ jobId: "", key: "s2", kind: "chat", project: null, projectName: "mantaui-box" }), task({ jobId: "x", project: null, projectName: null })],
+      "projects",
+      names,
+    );
+    expect(g.map((x) => [x.label, x.tasks.map((t) => t.key ?? t.jobId)])).toEqual([
+      ["mantaui-box", ["s1", "s2"]],
+      ["No project", ["x"]],
+    ]);
+  });
   it("a group that is only paused goes last", () => {
     const g = groupTasks([task({ jobId: "p", project: "z", projectName: "Z", status: "paused-by-you" }), task({ jobId: "r" })], "projects", names);
     expect(g.map((x) => x.label)).toEqual(["Site", "Z"]);
+  });
+});
+
+describe("rowKey", () => {
+  it("is the row's own key, else its job id (an older box sends no key)", () => {
+    expect(rowKey(task({ jobId: "j", key: "ses_1" }))).toBe("ses_1");
+    expect(rowKey(task({ jobId: "j" }))).toBe("j");
   });
 });
 

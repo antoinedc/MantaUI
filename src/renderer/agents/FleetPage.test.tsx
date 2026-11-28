@@ -449,4 +449,85 @@ describe("FleetPage", () => {
     expect(q('[data-job="j1"]')!.className).toContain("@container(min-width:560px)");
     expect(q('[data-job="j1"]')!.className).toContain("@container(min-width:850px)");
   });
+
+  describe("rows are sessions (spec §5b)", () => {
+    const chat = (over: Partial<FleetTask> = {}): FleetTask => ({
+      jobId: "",
+      rootJobId: "",
+      key: "ses_chat",
+      kind: "chat",
+      sessionId: "ses_chat",
+      window: { tmuxSession: "manta", index: 3 },
+      title: "Fleet: one row per session",
+      oneLiner: "Writing the failing tests for the one-liner",
+      agentSlug: "manta",
+      project: "mantaui",
+      projectName: "mantaui",
+      startedAt: NOW - 18 * MIN,
+      branch: null,
+      askedBy: { by: "you" },
+      status: "in-progress",
+      pausedAt: null,
+      subs: [
+        { key: "j1", title: "Build the Fleet fixes", status: "in-progress", jobId: "j1", agentSlug: "dev" },
+        { key: "j9", title: "Review the wording", status: "paused-by-you", jobId: "j9", agentSlug: "pd" },
+        { key: "ses_sub", title: "Find the pump code", status: "finished", jobId: null, agentSlug: null },
+      ],
+      ...over,
+    });
+    const data = () => tasksData({ running: [chat()], ended: [] });
+
+    it("a row draws the session's title and the one-liner under it; the agent is Manta for a plain chat", async () => {
+      await open({ tasks: read(data()) });
+      const row = q('[data-row="ses_chat"]')!;
+      expect(row.textContent).toContain("Fleet: one row per session");
+      expect(q('[data-row="ses_chat"] [data-testid="fleet-task-line"]')?.textContent).toBe("Writing the failing tests for the one-liner");
+      expect(q('[data-row="ses_chat"] [data-testid="fleet-task-who"]')?.textContent).toContain("Manta");
+    });
+
+    it("a row without a one-liner draws none", async () => {
+      await open({ tasks: read(tasksData({ running: [chat({ oneLiner: "" })], ended: [] })) });
+      expect(q('[data-testid="fleet-task-line"]')).toBeNull();
+    });
+
+    it("Details lists what runs beneath it as title + status — no Stop on a chat row, Resume on a paused job", async () => {
+      await open({ tasks: read(data()) });
+      await click(byLabel("Details: Fleet: one row per session"));
+      const subs = qa('[data-testid="fleet-details-sub"]');
+      expect(subs.map((s) => s.textContent)).toEqual([
+        expect.stringContaining("Build the Fleet fixes"),
+        expect.stringContaining("Review the wording"),
+        expect.stringContaining("Find the pump code"),
+      ]);
+      expect(subs[0].textContent).toContain("In progress");
+      expect(subs[1].textContent).toContain("Paused by you");
+      expect(subs[2].textContent).toContain("Finished");
+      expect(byText("Stop task")).toBeUndefined();
+      await click(byLabel("Resume: Review the wording"));
+      expect(api.calls.delegateResume).toEqual([["j9"]]);
+    });
+
+    it("Open session on a chat row selects its window; it never asks the box to open a job", async () => {
+      const activate = vi.fn(() => Promise.resolve());
+      const refresh = vi.fn(() => Promise.resolve());
+      resetStore({ usage: [], jobs: {}, jobSkew: {}, drafts: [], connectionState: { state: "connected" }, activateWindow: activate, refresh } as never);
+      await open({ tasks: read(data()) });
+      await click(byLabel("Open session: Fleet: one row per session"));
+      expect(activate).toHaveBeenCalledWith("manta", 3);
+      expect(api.calls.delegateOpenSession ?? []).toEqual([]);
+    });
+
+    it("a chat row has no row-level Resume or Stop, even when paused (its paused jobs carry the Resume)", async () => {
+      await open({ tasks: read(tasksData({ running: [chat({ status: "paused-by-you", pausedAt: NOW - 3_600_000 })], ended: [] })) });
+      expect(byLabel("Resume: Fleet: one row per session")).toBeNull();
+    });
+
+    it("an Ended row is one per session: the session's title, and Details lists the jobs that ended in it", async () => {
+      const e = ended({ jobId: "e1", key: "ses_chat", kind: "chat", sessionId: "ses_chat", window: { tmuxSession: "manta", index: 3 }, title: "Fleet: one row per session", subs: [{ key: "e1", title: "Fix the footer", status: "didnt-finish", jobId: "e1", agentSlug: "dev" }, { key: "e0", title: "Audit the pricing page", status: "finished", jobId: "e0", agentSlug: "dev" }] });
+      await open({ tasks: read(tasksData({ running: [], ended: [e] })) });
+      await click(byLabel("Details: Fleet: one row per session"));
+      expect(qa('[data-testid="fleet-details-sub"]').map((s) => s.textContent)).toEqual([expect.stringContaining("Fix the footer"), expect.stringContaining("Audit the pricing page")]);
+      expect(qa('[data-testid="fleet-details-sub"]')[0].textContent).toContain("Didn’t finish");
+    });
+  });
 });
