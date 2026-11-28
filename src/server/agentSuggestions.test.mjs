@@ -463,6 +463,21 @@ describe("answers (AC-4.3, AC-4.3b, AC-4.4)", () => {
     assert.equal(b.w.docs.supp.entries.length, 1);
   });
 
+  test("the read says whether a Not now was the last one, so the card can say it won't be offered again", async () => {
+    const { b, o } = await offered();
+    await b.engine.act({ id: o.id, action: "later" });
+    assert.ok(!(await offersOf(b))[0].final, "the first Not now: it will ask again");
+    await handoff(b, "Release notes for v4");
+    b.w.clock += 2 * DAY;
+    await handoff(b, "Release notes for v5");
+    await handoff(b, "Release notes for v6");
+    const second = (await offersOf(b))[1];
+    await b.engine.act({ id: second.id, action: "later" });
+    const after = await offersOf(b);
+    assert.equal(after[1].final, true);
+    assert.ok(!after[0].final, "the first one still reads as a Not now that will ask again");
+  });
+
   test("Don't ask again survives 600 unrelated handoffs and 100 days of history: three similar briefs never make an offer", async () => {
     const { b, o } = await offered();
     await b.engine.act({ id: o.id, action: "never" });

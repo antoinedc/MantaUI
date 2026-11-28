@@ -114,6 +114,7 @@ export function offerWire(o) {
   };
   if (o.state === "answered") {
     out.answer = o.answer;
+    if (o.final === true) out.final = true;
     if (o.accept) out.accept = { state: o.accept.state, messageId: o.accept.messageId };
   }
   return out;
@@ -357,6 +358,7 @@ export function createAgentSuggestions(deps) {
       } else if (c) {
         c.laterCount = (c.laterCount ?? 0) + 1;
         if (c.laterCount >= 2) {
+          o.final = true; // the card says it won't be offered again
           c.state = "dismissed";
           ceiling = await addSuppression(await loadSupp(), c);
         } else {
