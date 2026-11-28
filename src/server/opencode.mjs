@@ -500,6 +500,17 @@ async function hydrateRunningShells(messages, sessionId) {
   return messages;
 }
 
+/**
+ * One web search through OpenCode's own provider (`POST /api/websearch`, location-scoped; the default provider the user selected). Used by
+ * Settings → Research sources → Test on the web row — an agent's `websearch` TOOL goes through the plugin's guard instead. Returns
+ * `[{ url, title?, content?, time }]`; throws on a transport / HTTP error (the caller turns it into a sentence).
+ */
+export async function webSearch({ query, directory, signal = AbortSignal.timeout(30_000) }) {
+  const body = await ocCall("webSearch", (c, o) => c.websearch.query({ query, ...(directory ? { location: { directory } } : {}) }, o), { signal });
+  const results = body?.data?.results ?? body?.results;
+  return Array.isArray(results) ? results : [];
+}
+
 /** The session's directory (cache first, one lookup on a miss); undefined when unknown. */
 async function directoryForTitles(sessionId) {
   return cachedSessionDirectory(sessionId) ?? (await getSessionInfo(sessionId))?.directory ?? undefined;

@@ -137,6 +137,7 @@ const HN_ITEM_PAGE = /^https:\/\/news\.ycombinator\.com\/item\?id=(\d{1,12})$/;
  * @param {{check:Function}} [deps.outside]  the outside-query check (default: built from this engine's own stores)
  * @param {(sessionID:string)=>Promise<string|null>} [deps.folderOf]  the folder of a task / chat session, for the outside-query check
  * @param {(opts:object)=>Function} [deps.makeThrottle]  p-throttle-shaped, for the per-source throttles
+ * @param {(req:{query:string,directory:string})=>Promise<object[]>} [deps.webSearch]  OpenCode's own web-search route (`POST /api/websearch`), for Settings → Test on the web row
  * @param {()=>Promise<object[]>} [deps.loadSecretsStrict]  the stored secrets, read strictly
  * @param {Function} [deps.exec]        execFile-shaped, for command sources
  */
@@ -148,6 +149,9 @@ export function createResearchEngine({
   sourceList = async () => defaultRows(),
   outside = null,
   folderOf = async () => null,
+  webSearch = async () => {
+    throw new ResearchError("Testing web search isn't available here");
+  },
   makeThrottle = (opts) => pThrottle(opts),
   loadSecretsStrict = defaultLoadSecretsStrict,
   exec = (file, args, opts) => execFileAsync(file, args, { ...opts, encoding: "utf8" }),
@@ -709,9 +713,30 @@ export function createResearchEngine({
    * only for a user source: the page shows its first 200 characters). Stores nothing, records nothing, never reads the answer cache.
    * Throws a ResearchError with the sentence the search itself would give. A person typed this query, so the outside check is not applied.
    */
+  async function testWeb(query) {
+    const refused = queryRefusal(query);
+    if (refused) throw new ResearchError(refused);
+    // the same check an agent's websearch passes; the research_search tool name keeps it working while the source is still turned off
+    await assertOutside("", "research_search", { query });
+    let results;
+    try {
+      results = await webSearch({ query, directory: home });
+    } catch (e) {
+      if (e instanceof ResearchError) throw e;
+      log.warn?.(`[research] web search test failed: ${e?.message ?? e}`);
+      const text = String(e?.message ?? "");
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") throw new ResearchError("Web search took too long to answer");
+      if (/provider/i.test(text)) throw new ResearchError("OpenCode has no web search provider set up on this box yet");
+      throw new ResearchError("Web search failed; try again");
+    }
+    const list = Array.isArray(results) ? results : [];
+    const top = list[0];
+    return { count: list.length, ...(top ? { first: { title: String(top.title || top.url || "(untitled)").slice(0, 200), ...(top.url ? { url: top.url } : {}) } } : {}) };
+  }
+
   async function testSource(def, query) {
     if (def?.builtin === true) {
-      if (def.id === "web") throw new ResearchError("Web search is run by OpenCode's websearch tool; ask an agent to search the web to try it");
+      if (def.id === "web") return testWeb(query);
       if (!BASE_SEARCH_SOURCES.includes(def.id)) throw new ResearchError(`Unknown source "${def.id}"`);
       const refused = queryRefusal(query);
       if (refused) throw new ResearchError(refused);

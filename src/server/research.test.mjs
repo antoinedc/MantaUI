@@ -1448,3 +1448,64 @@ test("caps: a binding that names no turn is not capped (older callers keep worki
     await f.cleanup();
   }
 });
+
+// ---- review round 1, finding 5 (AC-1.10): Test on the web row runs the query through OpenCode's own web-search route ----
+
+const WEB = { id: "web", builtin: true, kind: "builtin" };
+
+test("testSource on the web row: the editable query goes through the outside-query check, then OpenCode's web search; count and first result are reported; nothing is stored", async () => {
+  const asked = [];
+  const f = await fixture({
+    secrets: [{ key: "K", scope: "shared", value: SECRET }],
+    engineExtra: { webSearch: async (req) => (asked.push(req), [{ url: "https://example.com/a", title: "A result", content: "text" }, { url: "https://example.com/b" }]) },
+  });
+  try {
+    const r = await f.engine.testSource(WEB, "postgres job queue");
+    assert.deepEqual(r, { count: 2, first: { title: "A result", url: "https://example.com/a" } });
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].query, "postgres job queue");
+    assert.equal(typeof asked[0].directory, "string");
+    // the check runs first: a secret in the typed query is refused and OpenCode is never asked
+    await assert.rejects(f.engine.testSource(WEB, `postgres ${SECRET}`), (e) => e.message === OUTSIDE);
+    assert.equal(asked.length, 1);
+    await assert.rejects(readdir(f.root), /ENOENT/, "no session folder, no stored source");
+    // a result without a title shows its address
+    const g = await fixture({ engineExtra: { webSearch: async () => [{ url: "https://example.com/only" }] } });
+    try {
+      assert.deepEqual(await g.engine.testSource(WEB, "q"), { count: 1, first: { title: "https://example.com/only", url: "https://example.com/only" } });
+    } finally {
+      await g.cleanup();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("testSource on the web row: a test of a source that is turned off still works (the check used is the research_search one); failures are sentences, never a stack", async () => {
+  const f = await fixture({ disabled: ["web"], engineExtra: { webSearch: async () => [] } });
+  try {
+    assert.deepEqual(await f.engine.testSource(WEB, "q"), { count: 0 });
+  } finally {
+    await f.cleanup();
+  }
+  for (const [thrown, re] of [[new Error("Web search provider is required"), /no web search provider/i], [new Error("ECONNREFUSED 127.0.0.1:4096 /home/dev/.config"), /Web search failed; try again/], [Object.assign(new Error("timeout"), { name: "TimeoutError" }), /took too long/i]]) {
+    const g = await fixture({ engineExtra: { webSearch: async () => { throw thrown; } } });
+    try {
+      await assert.rejects(g.engine.testSource(WEB, "q"), (e) => e instanceof ResearchError && re.test(e.message) && !/4096|home/.test(e.message));
+    } finally {
+      await g.cleanup();
+    }
+  }
+  const h = await fixture({ secrets: "throw", engineExtra: { webSearch: async () => [{ url: "https://x" }] } });
+  try {
+    await assert.rejects(h.engine.testSource(WEB, "q"), (e) => /Couldn't check this query/.test(e.message));
+  } finally {
+    await h.cleanup();
+  }
+  const none = await fixture();
+  try {
+    await assert.rejects(none.engine.testSource(WEB, "q"), (e) => e instanceof ResearchError && /isn't available/.test(e.message));
+  } finally {
+    await none.cleanup();
+  }
+});

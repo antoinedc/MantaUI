@@ -2669,6 +2669,8 @@ const researchSources = createResearchSources({
 const researchEngine = createResearchEngine({
   bind: (b, tool) => agentsEngine.bindResearcher(b, tool),
   sourceList: () => researchSources.rows(),
+  // Settings → Test on the web row: OpenCode's own web-search route (never the tool, which the plugin guards)
+  webSearch: (req) => oc.webSearch(req),
   // the folder of a task or chat, for the outside-query check (an unreadable session fails the check closed)
   folderOf: async (sessionID) => {
     if (typeof sessionID !== "string" || !sessionID) return null;

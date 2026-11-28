@@ -160,6 +160,19 @@ try {
   const fetchUrl = (url) => ({ re: /^webfetch$/, input: { url, format: "text" } });
   const errorOf = (part) => (part?.state?.status === "error" ? String(part.state.error ?? "") : "");
 
+  // 0. Settings → Test on the web row uses OpenCode's own route (POST /api/websearch) through the production client: it answers with the
+  // default provider's results (here the recorder), which is what `research.testSource` relays after the outside-query check
+  // (a location's providers load a moment after the server starts)
+  for (let i = 0; i < 40; i++) {
+    const listed = await api("GET", `/api/websearch/provider?location[directory]=${encodeURIComponent(cwd)}`).catch(() => null);
+    if (listed?.data?.some((p) => p.id === "recorder")) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  recorded.length = 0;
+  const viaRoute = await oc.webSearch({ query: "postgres job queue library for node", directory: cwd });
+  check("oc.webSearch (POST /api/websearch) returns the provider's results as an array", Array.isArray(viaRoute) && viaRoute.length === 1 && viaRoute[0].url === `${recorderUrl}/result/1` && viaRoute[0].title === "Recorded result", JSON.stringify(viaRoute));
+  check("oc.webSearch reached the provider (the recording server saw the query)", recorded.some((r) => r.startsWith("GET /provider-search?q=postgres")), recorded.join(" | "));
+
   for (const kind of ["lead chat", "agent task", "agent conversation", "plain session"]) {
     // 1. private material: a secret value in a query, and in the PATH of an address (no query string, no fragment)
     recorded.length = 0;
