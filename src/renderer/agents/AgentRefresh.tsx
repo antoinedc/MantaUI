@@ -1,13 +1,12 @@
-// "Refresh with new research": Monthly | Off, in the details pane of the Overview and of the Research tab. The box owns the
+// "Refresh with new research": Monthly | Off, a row of the profile's Settings tab. The box owns the
 // routine; the control shows its word, says "Saving…" while it asks, and a refusal is a sentence under it (never silence).
 
 import { useEffect, useRef, useState } from "react";
 import type { AgentProfile } from "../../shared/types";
 import { Segmented } from "../Segmented";
-import { PaneGroup } from "./ProfileLayout";
 import { errText } from "./agentsView";
 
-/** `note`: the sentence under the control saying what Monthly does (the Overview's; the Research tab's own pane says it already). */
+/** `note`: the sentence under the control saying what Monthly does. */
 export function RefreshControl({ profile, onChanged, note = true }: { profile: AgentProfile; onChanged: () => void; note?: boolean }) {
   const slug = profile.info.slug;
   const [override, setOverride] = useState<boolean | null>(null);
@@ -37,7 +36,7 @@ export function RefreshControl({ profile, onChanged, note = true }: { profile: A
   };
 
   return (
-    <PaneGroup title="Refresh with new research" testId="profile-refresh">
+    <div data-testid="profile-refresh">
       <div className="flex items-center gap-3">
         <Segmented
           label="Refresh with new research"
@@ -60,6 +59,6 @@ export function RefreshControl({ profile, onChanged, note = true }: { profile: A
           {error}
         </div>
       )}
-    </PaneGroup>
+    </div>
   );
 }
