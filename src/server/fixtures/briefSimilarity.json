@@ -1,0 +1,846 @@
+{
+ "version": 1,
+ "about": "Labelled brief pairs for the suggestion counter's similarity measure (spec 2026-11-28-research-layer.md §6.5). `same` = the two briefs are the same kind of work. Written before the measure existed; never edited to make a threshold pass.",
+ "pairs": [
+  {
+   "id": "p01",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "release-notes",
+   "a": {
+    "title": "Write this week's release notes",
+    "brief": "Write the release notes for this week. Go through the pull requests merged since last Friday and group them into new features, fixes and internal changes. Keep it short and in plain language, the readers are customers, not developers."
+   },
+   "b": {
+    "title": "Draft the changelog for v2.3",
+    "brief": "We are about to tag v2.3. Draft the changelog entry from everything merged since v2.2: user-facing changes first, then fixes. Leave out dependency bumps and anything that only touched tests."
+   }
+  },
+  {
+   "id": "p02",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "e2e-test",
+   "a": {
+    "title": "Add a Playwright test for login",
+    "brief": "There is no browser test for logging in. Add a Playwright spec that signs in with a valid account, checks the dashboard shows, and checks a wrong password shows the error message. Put it next to the other specs in tests/e2e."
+   },
+   "b": {
+    "title": "Cover the sign-in flow with an end-to-end test",
+    "brief": "Please write an end-to-end test of the sign-in flow using the browser test runner we already have. Happy path and a bad-credentials case are enough. It should run in CI with the rest of the e2e suite."
+   }
+  },
+  {
+   "id": "p03",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "flaky-test",
+   "a": {
+    "title": "Fix the flaky upload test",
+    "brief": "The upload spec fails about one run in five on CI and never locally. Find out why it is flaky and make it deterministic. Don't just add a retry."
+   },
+   "b": {
+    "title": "Stabilise the intermittent failure in the file upload tests",
+    "brief": "tests/upload.test.ts sometimes times out on the build server but passes on my machine. Track down the race behind it and fix it so the suite stops failing at random."
+   }
+  },
+  {
+   "id": "p04",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "settings-toggle",
+   "a": {
+    "title": "Add a dark mode toggle to settings",
+    "brief": "Users want to pick a dark appearance. Add a switch in the Settings page that turns dark mode on and off, remember the choice, and apply it to every screen. Default follows the system."
+   },
+   "b": {
+    "title": "Let people choose the theme from preferences",
+    "brief": "Add a theme choice (light, dark, follow system) to the preferences screen. The pick has to survive a restart and take effect straight away without reloading the window."
+   }
+  },
+  {
+   "id": "p05",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "db-migration",
+   "a": {
+    "title": "Add a billing email column to accounts",
+    "brief": "Accounts need a separate billing email. Add a nullable column to the accounts table, backfill it from the owner's email, and update the model. Write the migration so it can be rolled back."
+   },
+   "b": {
+    "title": "Migration: store the invoice contact on the customers table",
+    "brief": "We need somewhere to keep the invoice contact address for each customer. Create a schema change adding that field, fill existing rows from the main contact, and make the down step work."
+   }
+  },
+  {
+   "id": "p06",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "dependency-upgrade",
+   "a": {
+    "title": "Upgrade React to version 19",
+    "brief": "We are on React 18. Upgrade to 19, fix whatever breaks (deprecated APIs, the types, the test utilities), and make sure the app still builds and the tests pass."
+   },
+   "b": {
+    "title": "Bump react and react-dom to the new major",
+    "brief": "The react packages are a major version behind. Move them up, sort out the breaking changes in our components and typings, and confirm the build and test suite are green again."
+   }
+  },
+  {
+   "id": "p07",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "docs-readme",
+   "a": {
+    "title": "Update the README with setup steps",
+    "brief": "The README still describes the old setup. Rewrite the getting-started section: prerequisites, install, environment variables, how to start the dev server and run the tests. Test the steps on a clean checkout."
+   },
+   "b": {
+    "title": "Document how to install and run the project locally",
+    "brief": "A new teammate couldn't get the project running. Write clear instructions for installing it and running it on their own machine, including the env file and the database, and put them in the main readme."
+   }
+  },
+  {
+   "id": "p08",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "api-endpoint",
+   "a": {
+    "title": "Add an endpoint that lists a user's invoices",
+    "brief": "Add GET /users/:id/invoices. It returns the invoices of that user, newest first, with pagination. Only the user themselves or an admin may call it. Add tests."
+   },
+   "b": {
+    "title": "New route returning the invoices for a customer",
+    "brief": "Please expose the invoices of a given customer over the API: a read-only route, paginated, sorted with the latest on top, protected so that only the owner or an administrator can see them. Cover it with tests."
+   }
+  },
+  {
+   "id": "p09",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "rename-refactor",
+   "a": {
+    "title": "Rename the Session type to Conversation everywhere",
+    "brief": "The code calls them sessions but the product says conversations. Rename the Session type, its fields and the files, across the whole repo, without changing behaviour. The tests must still pass."
+   },
+   "b": {
+    "title": "Refactor: use the word conversation instead of session throughout",
+    "brief": "Do a codebase-wide rename so that what we call a session in code becomes a conversation, matching the product language. Types, variables, file names and comments. No behaviour change."
+   }
+  },
+  {
+   "id": "p10",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "ci-fix",
+   "a": {
+    "title": "CI is failing on the lint step",
+    "brief": "Every pull request is red because the lint job fails on the build server. Reproduce it, find the cause and fix the pipeline so lint passes again."
+   },
+   "b": {
+    "title": "Repair the broken GitHub Actions workflow",
+    "brief": "The eslint job in our workflow errors out before it even lints anything, so all PRs are blocked. Work out what changed in the workflow or the runner and get the checks passing."
+   }
+  },
+  {
+   "id": "p11",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "performance",
+   "a": {
+    "title": "The dashboard loads slowly, find out why",
+    "brief": "The dashboard takes around six seconds to show data. Profile it, find where the time goes (queries, bundle, rendering) and fix the biggest cause. Give me before and after numbers."
+   },
+   "b": {
+    "title": "Profile the home page and speed it up",
+    "brief": "Our home screen is sluggish: it needs about 6 s to become usable. Measure what is slow, fix the main offender and tell me how much faster it got."
+   }
+  },
+  {
+   "id": "p12",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "translation",
+   "a": {
+    "title": "Translate the onboarding screens to Spanish",
+    "brief": "Add a Spanish version of the onboarding flow. Extract the strings that are still hard-coded, create the es locale file, and make the language follow the browser setting."
+   },
+   "b": {
+    "title": "Add Spanish strings for the first-run flow",
+    "brief": "We want the first-run experience available in Spanish. Pull the remaining literal text into the translation files, provide the Spanish copy and pick the language from the user's system."
+   }
+  },
+  {
+   "id": "p13",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "bug-crash",
+   "a": {
+    "title": "App crashes when opening an empty project",
+    "brief": "Opening a project folder with no files throws an unhandled exception and the window goes blank. Reproduce it, fix the cause and add a regression test."
+   },
+   "b": {
+    "title": "Fix the exception on a project that has no files",
+    "brief": "If somebody opens a project that is empty, the app dies with an error. Find out why, make it show an empty state instead, and write a test so it can't come back."
+   }
+  },
+  {
+   "id": "p14",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "accessibility",
+   "a": {
+    "title": "Check the forms for accessibility problems",
+    "brief": "Go through the signup and checkout forms with the keyboard and a screen reader. List and fix the problems: labels, focus order, error announcements, contrast."
+   },
+   "b": {
+    "title": "Audit keyboard and screen reader support on the signup page",
+    "brief": "Test the registration and payment pages without a mouse and with VoiceOver. Fix whatever blocks a user: missing names for inputs, bad tab order, errors that are not announced."
+   }
+  },
+  {
+   "id": "p15",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "logging",
+   "a": {
+    "title": "Add logging around the payment webhook",
+    "brief": "We can't tell why some payment webhooks fail. Add structured logs around the webhook handler: the event id, the outcome and the error, without logging card data."
+   },
+   "b": {
+    "title": "Instrument the Stripe callback so failures show up",
+    "brief": "When the Stripe callback fails we learn about it from customers. Add log lines and an error report in that handler: event identifier, result, exception. Never write sensitive payment details."
+   }
+  },
+  {
+   "id": "p16",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "export-script",
+   "a": {
+    "title": "Write a script to export customers to CSV",
+    "brief": "Support needs a one-off script that exports every customer (name, email, plan, created date) to a CSV file. It should stream, since there are a few hundred thousand rows."
+   },
+   "b": {
+    "title": "A command that dumps all users into a spreadsheet file",
+    "brief": "Please make a small command-line tool that writes all users with their email, subscription and signup date into a file that Excel can open. The table is big, so don't load it all in memory."
+   }
+  },
+  {
+   "id": "p17",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "landing-copy",
+   "a": {
+    "title": "Rewrite the landing page hero copy",
+    "brief": "The hero section on the landing page reads like a feature list. Rewrite the headline, the subheading and the button label so they lead with the benefit. Give me three options."
+   },
+   "b": {
+    "title": "Refresh the headline and subtitle on the home page",
+    "brief": "The top section of the marketing home page is dull. Come up with better text for the main title, the line below it and the call-to-action, focused on what the customer gains. Three variants please."
+   }
+  },
+  {
+   "id": "p18",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "release-notes",
+   "a": {
+    "title": "Write the release notes for 4.1",
+    "brief": "Write release notes for version 4.1 from the merged PRs. Sections: highlights, improvements, bug fixes. Link each item to its PR."
+   },
+   "b": {
+    "title": "Summarise what shipped this month for the changelog",
+    "brief": "Collect everything we merged this month and turn it into a changelog post: the highlights on top, then smaller improvements and fixes, each with a link to the pull request."
+   }
+  },
+  {
+   "id": "p19",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "e2e-test",
+   "a": {
+    "title": "Add e2e coverage for checkout",
+    "brief": "Checkout has no end-to-end test. Write one that adds an item to the cart, pays with the test card, and checks the confirmation page and the order email."
+   },
+   "b": {
+    "title": "Playwright test for the purchase flow",
+    "brief": "Write a browser test of buying something: put a product in the basket, complete payment using the sandbox card, and verify the order confirmation. It should run with the other specs."
+   }
+  },
+  {
+   "id": "p20",
+   "label": "paraphrase",
+   "same": true,
+   "kind": "fix-tests",
+   "a": {
+    "title": "Fix failing snapshot tests after the header redesign",
+    "brief": "The new header broke twenty snapshot tests. Look at each diff, confirm it is the intended change, update the snapshots and make sure no real regression is hidden in there."
+   },
+   "b": {
+    "title": "Update the broken jest snapshots, the navbar tests are red",
+    "brief": "After the navigation bar redesign a pile of component snapshot tests fail. Review the differences, regenerate the ones that are expected and flag anything that looks like a genuine bug."
+   }
+  },
+  {
+   "id": "t01",
+   "label": "templated",
+   "same": true,
+   "kind": "release-notes",
+   "a": {
+    "title": "Write the weekly release notes",
+    "brief": "Goal: write the release notes for this week's release of the web app\nWhy: customers read them in the in-app news panel\nScope: in — pull requests merged since the last release tag; out — internal refactors and dependency bumps\nDone when: a markdown file with highlights, improvements and fixes, each item linking to its PR\nOutput wanted: docs/releases/2026-11-28.md\nDecisions already made: plain language, no more than 12 bullets\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Release notes for the mobile app 3.8",
+    "brief": "Goal: write the release notes for the mobile app version 3.8\nWhy: they go in the store listing and the newsletter\nScope: in — everything merged since the 3.7 tag; out — build tooling changes and test-only changes\nDone when: a release notes file with highlights, improvements and fixes, each linked to its pull request\nOutput wanted: RELEASE_NOTES/3.8.md\nDecisions already made: friendly tone, at most 10 bullets\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t02",
+   "label": "templated",
+   "same": true,
+   "kind": "e2e-test",
+   "a": {
+    "title": "Add an end-to-end test for the signup flow",
+    "brief": "Goal: add a Playwright test for the signup flow of the web app\nWhy: signup broke twice last month without anyone noticing\nScope: in — the signup form, email confirmation page and first login; out — the marketing pages and password reset\nDone when: a spec in tests/e2e that passes locally and in CI, covering success and a duplicate email error\nOutput wanted: tests/e2e/signup.spec.ts\nDecisions already made: use the existing fixtures and the sandbox mail catcher\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "End-to-end test for the booking flow",
+    "brief": "Goal: write a Playwright test for the booking flow of the scheduling app\nWhy: bookings are the core path and have no browser coverage\nScope: in — choosing a slot, entering details, and the confirmation screen; out — the admin calendar and payments\nDone when: a spec in e2e/ that passes locally and in CI, covering a booking and a slot already taken\nOutput wanted: e2e/booking.spec.ts\nDecisions already made: reuse the seeded test calendar, no mocks of our own API\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t03",
+   "label": "templated",
+   "same": true,
+   "kind": "flaky-test",
+   "a": {
+    "title": "Fix the flaky export test",
+    "brief": "Goal: fix the flaky test in tests/export.test.ts\nWhy: it fails about 20% of CI runs and people re-run until green\nScope: in — the test and the code it exercises; out — other tests in the suite\nDone when: the test passes 50 runs in a row in CI conditions\nOutput wanted: the cause in two sentences and the fix\nDecisions already made: no blind retries and no longer timeouts\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Stop the intermittent failure in the sync spec",
+    "brief": "Goal: fix the intermittent failure of the sync spec in the desktop client\nWhy: it blocks merges on the build server about once a day\nScope: in — the spec and the sync code under test; out — the rest of the desktop test suite\nDone when: the spec passes 50 consecutive runs on the build server\nOutput wanted: the root cause and the fix, briefly\nDecisions already made: do not add retries and do not skip the test\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t04",
+   "label": "templated",
+   "same": true,
+   "kind": "db-migration",
+   "a": {
+    "title": "Add a deleted_at column to projects",
+    "brief": "Goal: add a nullable deleted_at timestamp column to the projects table for soft deletes\nWhy: the product needs an undo for deleting a project\nScope: in — the migration, the model, and queries that list projects; out — the UI for restoring projects\nDone when: the migration applies and rolls back cleanly and list queries skip deleted rows\nOutput wanted: the migration file and the changed queries\nDecisions already made: no data backfill, existing rows stay null\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Add an archived flag to workspaces",
+    "brief": "Goal: add a boolean archived column to the workspaces table, default false\nWhy: teams want to hide old workspaces without deleting them\nScope: in — the schema change, the model, and queries that list workspaces; out — the settings screen for archiving\nDone when: the migration applies and reverts cleanly and listing queries skip archived rows\nOutput wanted: the migration file and the updated queries\nDecisions already made: existing rows get false, no manual backfill\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t05",
+   "label": "templated",
+   "same": true,
+   "kind": "dependency-upgrade",
+   "a": {
+    "title": "Upgrade Next.js to the latest major",
+    "brief": "Goal: upgrade Next.js from 15 to 16 in the web app\nWhy: 15 stops receiving security fixes next month\nScope: in — package.json, config, and code that uses removed or changed APIs; out — unrelated dependency bumps\nDone when: the build, the type check and all tests pass on the new version\nOutput wanted: a list of the breaking changes you had to handle\nDecisions already made: stay on the app router, no migration to turbopack yet\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Upgrade Fastify to the new major version",
+    "brief": "Goal: upgrade Fastify from 4 to 5 in the API service\nWhy: version 4 is end of life and plugins are dropping support\nScope: in — package.json, server setup, and code using changed APIs; out — unrelated dependency bumps\nDone when: the build, the type check and the full test suite pass on the new version\nOutput wanted: a list of breaking changes you had to deal with\nDecisions already made: keep the existing plugin set, replace only what no longer works\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t06",
+   "label": "templated",
+   "same": true,
+   "kind": "docs-readme",
+   "a": {
+    "title": "Rewrite the README setup section",
+    "brief": "Goal: rewrite the getting-started section of the README for the dashboard project\nWhy: new hires keep asking the same setup questions\nScope: in — prerequisites, install, env vars, running the dev server and the tests; out — architecture docs and the API reference\nDone when: someone can follow it on a clean machine and get the app running\nOutput wanted: the updated README.md\nDecisions already made: keep it under one screen, link to details instead of copying them\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Document how to run the worker locally",
+    "brief": "Goal: write the local setup instructions for the background worker in the README\nWhy: nobody except the author knows how to start it\nScope: in — prerequisites, install, env vars, starting the worker and running its tests; out — deployment docs and the queue internals\nDone when: a teammate can follow the steps on a clean machine and have the worker processing jobs\nOutput wanted: the updated worker/README.md\nDecisions already made: short, with links for details rather than copied text\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t07",
+   "label": "templated",
+   "same": true,
+   "kind": "api-endpoint",
+   "a": {
+    "title": "Add an endpoint for team members",
+    "brief": "Goal: add GET /teams/:id/members to the API\nWhy: the new team page needs the member list\nScope: in — the route, the query, auth checks and tests; out — inviting or removing members\nDone when: the endpoint returns members, paginated, only to members of the team, and its tests pass\nOutput wanted: the route and test files\nDecisions already made: cursor pagination like the other list endpoints\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Add an endpoint for project files",
+    "brief": "Goal: add GET /projects/:id/files to the API\nWhy: the new files tab needs the file list\nScope: in — the route, the query, auth checks and tests; out — uploading or deleting files\nDone when: the endpoint returns the files, paginated, only to people on the project, and its tests pass\nOutput wanted: the route and test files\nDecisions already made: cursor pagination as in the other list endpoints\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t08",
+   "label": "templated",
+   "same": true,
+   "kind": "ci-fix",
+   "a": {
+    "title": "Fix the failing deploy workflow",
+    "brief": "Goal: fix the failing GitHub Actions workflow for the web app\nWhy: every pull request is red and merges are blocked\nScope: in — the workflow file and anything it calls; out — changing the hosting provider\nDone when: the workflow passes on a fresh pull request and on main\nOutput wanted: what was wrong and the fix\nDecisions already made: keep the existing jobs and caching\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Repair the broken CI pipeline in the API repo",
+    "brief": "Goal: fix the failing CI pipeline of the API service\nWhy: all pull requests are red and nothing can be merged\nScope: in — the workflow files and the scripts they run; out — moving to another CI provider\nDone when: the pipeline passes on a new pull request and on main\nOutput wanted: the cause and the fix, briefly\nDecisions already made: keep the current jobs and the cache setup\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t09",
+   "label": "templated",
+   "same": true,
+   "kind": "translation",
+   "a": {
+    "title": "Add German translations",
+    "brief": "Goal: add a German translation of the web app\nWhy: a customer in Berlin is rolling it out to their team\nScope: in — extracting hard-coded strings, the de locale file, language detection; out — translating the marketing site and emails\nDone when: switching to German shows no English text in the app screens\nOutput wanted: the locale file and the code that picks the language\nDecisions already made: formal address (Sie), keep brand names untranslated\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Add French translations",
+    "brief": "Goal: add a French translation of the mobile app\nWhy: we are launching in Quebec and France next quarter\nScope: in — extracting hard-coded strings, the fr locale file, language detection; out — translating store listings and push notifications\nDone when: switching to French shows no English text in the app screens\nOutput wanted: the locale file and the code that selects the language\nDecisions already made: use vous, keep brand names untranslated\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "t10",
+   "label": "templated",
+   "same": true,
+   "kind": "export-script",
+   "a": {
+    "title": "Script to export orders to CSV",
+    "brief": "Goal: write a script that exports all orders to a CSV file\nWhy: finance needs them for the quarterly audit\nScope: in — a command-line script, streaming output, the columns finance listed; out — a UI for exports and scheduled exports\nDone when: running it produces a valid CSV of every order and it doesn't load the table in memory\nOutput wanted: scripts/export-orders.mjs and a usage note\nDecisions already made: UTC dates in ISO format, one row per order\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Script to export subscribers to CSV",
+    "brief": "Goal: write a script that exports all subscribers to a CSV file\nWhy: marketing needs the list for a campaign migration\nScope: in — a command-line script, streaming output, the columns marketing listed; out — a UI for exports and scheduled exports\nDone when: running it produces a valid CSV with every subscriber and it doesn't load the table in memory\nOutput wanted: scripts/export-subscribers.mjs and a usage note\nDecisions already made: ISO dates in UTC, one row per subscriber\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h01",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "settings-toggle vs settings-migration",
+   "a": {
+    "title": "Add a settings toggle",
+    "brief": "Goal: add an on/off toggle in the Settings page for desktop notifications\nWhy: some users find the notifications distracting\nScope: in — the Settings page, the stored preference, and the notification code that reads it; out — notification content and sounds\nDone when: the toggle persists across restarts and turns notifications off immediately\nOutput wanted: the changed components and a test\nDecisions already made: default on, stored with the other preferences\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Add a settings migration",
+    "brief": "Goal: add a migration that moves the old notification settings to the new settings format\nWhy: the settings file format changed and old installs would lose their preferences\nScope: in — the migration step, the version marker, and a test with an old file; out — the Settings page and the notification code\nDone when: an old settings file is upgraded on start without losing values and is not migrated twice\nOutput wanted: the migration and its test\nDecisions already made: keep a backup of the old file next to the new one\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h02",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "flaky-test vs release-notes",
+   "a": {
+    "title": "Fix the flaky upload test",
+    "brief": "Goal: fix the flaky upload test in the web app\nWhy: it fails about one CI run in five\nScope: in — the test and the upload code it exercises; out — other tests\nDone when: the test passes 50 runs in a row on CI\nOutput wanted: the cause and the fix\nDecisions already made: no blind retries\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Write the release notes",
+    "brief": "Goal: write the release notes for the web app release\nWhy: customers read them in the news panel\nScope: in — pull requests merged since the last tag; out — internal refactors and dependency bumps\nDone when: a markdown file with highlights, improvements and fixes, each linked to its PR\nOutput wanted: docs/releases/next.md\nDecisions already made: plain language, at most 12 bullets\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h03",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "docs vs bug-fix",
+   "a": {
+    "title": "Write docs for the upload feature",
+    "brief": "Goal: write the user documentation for the file upload feature\nWhy: support gets the same questions every week\nScope: in — supported file types, size limits, and what happens on failure; out — the upload code itself\nDone when: a docs page that answers the top support questions, with screenshots\nOutput wanted: docs/uploads.md\nDecisions already made: written for end users, not developers\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the upload endpoint bug",
+    "brief": "Goal: fix the bug where the upload endpoint rejects files larger than 1 MB\nWhy: the documented limit is 25 MB and customers are blocked\nScope: in — the upload route, the body size configuration and a regression test; out — the documentation and the client UI\nDone when: a 20 MB file uploads successfully and the test covers it\nOutput wanted: the fix and the test\nDecisions already made: raise the limit in the route, not globally\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h04",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "api-endpoint vs logging",
+   "a": {
+    "title": "Add an endpoint for invoices",
+    "brief": "Goal: add GET /invoices/:id/pdf to the API\nWhy: the billing page needs a download link\nScope: in — the route, the PDF rendering call, auth checks and tests; out — changing the invoice layout\nDone when: the endpoint returns the PDF to the invoice owner only and its tests pass\nOutput wanted: the route and test files\nDecisions already made: reuse the existing PDF renderer\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Add logging to the invoices endpoint",
+    "brief": "Goal: add structured logging to the invoice endpoints of the API\nWhy: we can't debug customer reports about missing invoices\nScope: in — request id, invoice id, outcome and error in the invoice route handlers; out — other routes and the log pipeline\nDone when: each invoice request logs one line with the fields above and no personal data\nOutput wanted: the changed handlers and a short note on the log format\nDecisions already made: use the existing logger, info for success and error for failures\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h05",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "dependency-upgrade vs fix-tests",
+   "a": {
+    "title": "Upgrade the test runner",
+    "brief": "Goal: upgrade the test runner to the latest major version\nWhy: the old version doesn't support our Node version\nScope: in — package.json, the runner configuration and test setup files; out — changing any test's logic\nDone when: the whole suite runs on the new runner with the same results\nOutput wanted: a list of config changes needed\nDecisions already made: keep the existing test layout\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the failing tests",
+    "brief": "Goal: fix the eleven failing tests in the billing module\nWhy: they started failing after the tax rules change and block the merge\nScope: in — the tests and the billing code they cover; out — the test runner setup and other modules\nDone when: all billing tests pass and the intended tax behaviour is kept\nOutput wanted: what was wrong for each group of failures\nDecisions already made: fix the code when it's a real bug, the test when the expectation is outdated\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h06",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "rename-refactor vs docs",
+   "a": {
+    "title": "Rename the auth module",
+    "brief": "Goal: rename the auth module to identity and move its files\nWhy: it now covers more than login and the name misleads\nScope: in — directory, imports, exported names and comments; out — behaviour changes and the database tables\nDone when: no references to the old name remain and the full test suite passes\nOutput wanted: a summary of the renamed paths\nDecisions already made: no compatibility re-exports\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Write docs for the auth module",
+    "brief": "Goal: write developer documentation for the auth module\nWhy: newcomers can't tell how sessions and tokens fit together\nScope: in — the login flow, token refresh, and the middleware; out — changing the module or its names\nDone when: a docs page with a sequence diagram and the extension points\nOutput wanted: docs/auth.md\nDecisions already made: describe what the code does today, flag oddities instead of fixing them\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h07",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "translation vs settings-toggle",
+   "a": {
+    "title": "Translate the settings page",
+    "brief": "Goal: translate the Settings page into Italian\nWhy: the Italian beta group asked for it\nScope: in — the strings of the Settings page and the it locale file; out — other pages and new settings\nDone when: the Settings page shows no English text when the language is Italian\nOutput wanted: the locale entries\nDecisions already made: informal tone, keep technical terms in English\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Add a setting for the language",
+    "brief": "Goal: add a language selector to the Settings page\nWhy: users can't change the language without changing their system\nScope: in — the Settings page, the stored preference, and the code that reads the language; out — adding new translations\nDone when: choosing a language persists and the interface switches immediately\nOutput wanted: the changed components and a test\nDecisions already made: default to the system language\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h08",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "e2e-test vs bug-crash",
+   "a": {
+    "title": "Add an end-to-end test for signup",
+    "brief": "Goal: add a browser test for the signup flow\nWhy: signup broke twice last month without anyone noticing\nScope: in — the form, the confirmation email page and first login; out — other flows\nDone when: a spec that passes locally and in CI covering success and a duplicate email\nOutput wanted: the spec file\nDecisions already made: use the existing fixtures\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the crash on signup",
+    "brief": "Goal: fix the crash when signing up with a very long name\nWhy: the form throws and the user sees a blank page\nScope: in — the signup form validation, the API handler and a regression test; out — redesigning the form\nDone when: a 300 character name shows a validation message instead of crashing and a test covers it\nOutput wanted: the fix and the test\nDecisions already made: limit names to 100 characters\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h09",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "export vs import",
+   "a": {
+    "title": "Export users to CSV",
+    "brief": "Goal: write a script that exports all users to a CSV file\nWhy: finance needs them for an audit\nScope: in — a command-line script with streaming output; out — a UI for exports\nDone when: running it writes a valid CSV with every user\nOutput wanted: scripts/export-users.mjs\nDecisions already made: UTC dates in ISO format\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Import users from CSV",
+    "brief": "Goal: write a script that imports users from a CSV file and validates them\nWhy: a new customer is bringing their own member list\nScope: in — a command-line script, row validation, duplicate detection and an error report; out — a UI for imports and sending invitations\nDone when: valid rows create users, invalid rows are listed in a report and nothing is created twice\nOutput wanted: scripts/import-users.mjs and a sample file\nDecisions already made: all-or-nothing per file, dry-run mode by default\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h10",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "ci-fix vs docs",
+   "a": {
+    "title": "Fix the failing lint job",
+    "brief": "Goal: fix the failing lint job in the CI pipeline\nWhy: all pull requests are red\nScope: in — the workflow file and the lint configuration; out — changing the lint rules\nDone when: lint passes on a new pull request and on main\nOutput wanted: the cause and the fix\nDecisions already made: keep the existing job names\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Write the CI documentation",
+    "brief": "Goal: write documentation of the CI pipeline for contributors\nWhy: nobody knows which jobs are required and how to run them locally\nScope: in — the jobs, their purpose, required checks and how to reproduce them locally; out — changing the pipeline\nDone when: a docs page a new contributor can use to reproduce a failing job\nOutput wanted: docs/ci.md\nDecisions already made: describe current behaviour only\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h11",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "performance vs accessibility",
+   "a": {
+    "title": "Speed up the dashboard",
+    "brief": "Goal: make the dashboard load faster\nWhy: it takes about six seconds to show data\nScope: in — queries, bundle size and rendering of the dashboard page; out — other pages and redesigns\nDone when: time to useful content under two seconds on the reference machine\nOutput wanted: before and after numbers and the changes\nDecisions already made: measure first, fix the biggest cost first\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix accessibility on the dashboard",
+    "brief": "Goal: fix the accessibility problems of the dashboard\nWhy: an enterprise customer's audit failed it\nScope: in — labels, focus order, contrast and keyboard use on the dashboard page; out — other pages and redesigns\nDone when: the audit tool reports no serious issues and the page works with the keyboard only\nOutput wanted: the list of issues and fixes\nDecisions already made: no visual redesign, adjust colours only where contrast fails\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h12",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "dark-mode vs docs",
+   "a": {
+    "title": "Add dark mode",
+    "brief": "Goal: add a dark colour theme to the app\nWhy: users asked for it and it reduces eye strain\nScope: in — colour tokens, the theme switch and the screens that use hard-coded colours; out — new illustrations and the marketing site\nDone when: every screen is readable in dark mode and the choice persists\nOutput wanted: the changes and screenshots of main screens\nDecisions already made: default follows the system setting\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Update the screenshots in the docs",
+    "brief": "Goal: replace the outdated screenshots in the user documentation\nWhy: they show the old interface and confuse new users\nScope: in — every image in docs/ and the captions that describe them; out — rewriting the text of the docs\nDone when: all screenshots match the current interface and are in the same size and format\nOutput wanted: the new images and a list of the pages touched\nDecisions already made: light theme, 1440 px wide window\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h13",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "db-migration vs dependency-upgrade",
+   "a": {
+    "title": "Add a column to the orders table",
+    "brief": "Goal: add a nullable coupon_code column to the orders table\nWhy: marketing wants to attribute orders to coupons\nScope: in — the migration, the model and the order creation code; out — reporting screens\nDone when: the migration applies and rolls back and new orders store the code\nOutput wanted: the migration file and the changed code\nDecisions already made: no backfill of old orders\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Upgrade the database driver",
+    "brief": "Goal: upgrade the PostgreSQL driver to the new major version\nWhy: the old one doesn't support the connection pooler we're moving to\nScope: in — package.json, connection setup and code using changed APIs; out — schema changes and query rewrites\nDone when: the build and the full test suite pass against the new driver\nOutput wanted: the list of breaking changes handled\nDecisions already made: keep the current connection settings\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h14",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "release-notes vs release-automation",
+   "a": {
+    "title": "Write the release notes for 3.0",
+    "brief": "Goal: write the release notes for version 3.0\nWhy: it is the biggest release of the year\nScope: in — all pull requests merged since 2.9; out — internal refactors and dependency bumps\nDone when: a markdown file with highlights, improvements and fixes, each linked to its PR\nOutput wanted: docs/releases/3.0.md\nDecisions already made: friendly tone, at most 15 bullets\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the release script",
+    "brief": "Goal: fix the release script that tags the version and publishes the package\nWhy: the last two releases needed manual steps because it stops halfway\nScope: in — scripts/release.sh and the workflow that calls it; out — changing the versioning scheme\nDone when: a dry run tags, builds and publishes to the test registry without manual steps\nOutput wanted: what was broken and the fix\nDecisions already made: keep using the existing tag format\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h15",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "landing-copy vs performance",
+   "a": {
+    "title": "Rewrite the landing page copy",
+    "brief": "Goal: rewrite the headline and subheading of the landing page\nWhy: the page reads like a feature list and conversion is low\nScope: in — the hero text and the button label; out — the layout and the rest of the page\nDone when: three options for the hero text that lead with the customer benefit\nOutput wanted: the three options in a markdown file\nDecisions already made: no more than ten words in the headline\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Speed up the landing page",
+    "brief": "Goal: make the landing page load faster on mobile\nWhy: the page speed score is poor and hurts ad conversion\nScope: in — images, fonts, scripts and the critical rendering path; out — changing the copy or the layout\nDone when: the mobile performance score is above 90 in the audit tool\nOutput wanted: before and after scores and the changes\nDecisions already made: lazy-load anything below the fold\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h16",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "logging vs test",
+   "a": {
+    "title": "Add logging to the webhook",
+    "brief": "Goal: add structured logging to the payment webhook handler\nWhy: we can't tell why some webhooks fail\nScope: in — event id, outcome and error in the handler; out — other handlers and the log pipeline\nDone when: each webhook call logs one line with those fields and no card data\nOutput wanted: the changed handler and a note on the log format\nDecisions already made: use the existing logger\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Write a test for the webhook",
+    "brief": "Goal: write tests for the payment webhook handler\nWhy: it has no tests and broke after the last refactor\nScope: in — signature checking, duplicate events and failed payments; out — changing the handler\nDone when: the tests cover those three cases and pass in CI\nOutput wanted: the new test file\nDecisions already made: use recorded sample payloads, no calls to the real service\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h17",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "refactor vs bug-fix",
+   "a": {
+    "title": "Refactor the billing module",
+    "brief": "Goal: split the billing module into smaller files without changing behaviour\nWhy: it grew to 2,000 lines and is hard to change\nScope: in — moving code and fixing imports; out — any behaviour change\nDone when: the module is split into files under 300 lines and all tests pass unchanged\nOutput wanted: a summary of the new layout\nDecisions already made: one file per concern: invoices, taxes, payments\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the billing rounding bug",
+    "brief": "Goal: fix the rounding bug in invoice totals\nWhy: totals are off by one cent on some invoices\nScope: in — the total calculation and a regression test; out — restructuring the module\nDone when: the known failing invoices total correctly and a test covers them\nOutput wanted: the fix and the test\nDecisions already made: round per line item, half up\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h18",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "dependency-upgrade vs docs",
+   "a": {
+    "title": "Bump eslint",
+    "brief": "Goal: upgrade eslint to the latest major version\nWhy: plugins we need no longer support the old one\nScope: in — package.json and the eslint configuration; out — changing lint rules\nDone when: lint runs on the new version with the same results\nOutput wanted: the config changes\nDecisions already made: move to the flat config format\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Explain the eslint config in the docs",
+    "brief": "Goal: document why each eslint rule we enable is there\nWhy: people disable rules because they don't know the reason\nScope: in — a docs page describing the config and the custom rules; out — changing the configuration\nDone when: every non-default rule has a one-line reason on the docs page\nOutput wanted: docs/lint.md\nDecisions already made: describe the current config, don't change it\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h19",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "translation vs bug-fix",
+   "a": {
+    "title": "Add the Spanish translation",
+    "brief": "Goal: add a Spanish translation of the app\nWhy: we are launching in Mexico\nScope: in — hard-coded strings, the es locale file and language detection; out — marketing pages\nDone when: switching to Spanish shows no English text in the app\nOutput wanted: the locale file and the detection code\nDecisions already made: neutral Latin American Spanish\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the date format in the Spanish locale",
+    "brief": "Goal: fix dates showing as month/day in the Spanish locale\nWhy: Spanish users see dates in the American order\nScope: in — the date formatting helper and a test; out — adding translations\nDone when: dates show as day/month in Spanish and a test covers it\nOutput wanted: the fix and the test\nDecisions already made: use the platform's Intl formatting instead of manual patterns\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "h20",
+   "label": "hard-negative",
+   "same": false,
+   "kind": "email-design vs email-queue",
+   "a": {
+    "title": "Redesign the email templates",
+    "brief": "Goal: redesign the transactional email templates\nWhy: they look dated and break in Outlook\nScope: in — the HTML and text templates of the welcome, receipt and reset emails; out — the sending code\nDone when: the three emails render well in the main clients and match the brand\nOutput wanted: the templates and screenshots from the preview tool\nDecisions already made: table-based layout, inline styles\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   },
+   "b": {
+    "title": "Fix the email sending queue",
+    "brief": "Goal: fix the email queue that stops processing after a failed message\nWhy: one bad address blocks every email behind it\nScope: in — the queue worker, error handling and a test; out — the email templates\nDone when: a failing message is retried a few times then parked and the queue keeps going\nOutput wanted: the fix and the test\nDecisions already made: three retries with backoff, then a dead-letter table\nRun the project's checks before you finish.\nReport back with a short summary and the commit."
+   }
+  },
+  {
+   "id": "n01",
+   "label": "negative",
+   "same": false,
+   "kind": "release-notes vs architecture-question",
+   "a": {
+    "title": "Write the release notes for 2.4",
+    "brief": "Write the release notes for 2.4 from the merged pull requests. Highlights first, then fixes, with links."
+   },
+   "b": {
+    "title": "Explain how the sync engine works",
+    "brief": "I don't understand how the sync engine resolves conflicts between two devices. Read the code and explain it to me in plain words, with a small example."
+   }
+  },
+  {
+   "id": "n02",
+   "label": "negative",
+   "same": false,
+   "kind": "e2e-test vs data-export",
+   "a": {
+    "title": "Add a browser test for login",
+    "brief": "Write a Playwright test for the login page: valid credentials, wrong password. Put it with the other e2e specs."
+   },
+   "b": {
+    "title": "Dump all invoices into a spreadsheet",
+    "brief": "Finance wants every invoice of last year in one file they can open in Excel. A script is fine, the table is large so stream it."
+   }
+  },
+  {
+   "id": "n03",
+   "label": "negative",
+   "same": false,
+   "kind": "dependency-upgrade vs copy",
+   "a": {
+    "title": "Upgrade Vite",
+    "brief": "Move the project to Vite 7, fix the config and plugins that break, make sure the dev server and the production build both work."
+   },
+   "b": {
+    "title": "Rewrite the pricing page text",
+    "brief": "The pricing page copy is confusing. Rewrite the plan descriptions so the differences are obvious, and propose a better name for the middle plan."
+   }
+  },
+  {
+   "id": "n04",
+   "label": "negative",
+   "same": false,
+   "kind": "db-migration vs accessibility",
+   "a": {
+    "title": "Add an index on events.created_at",
+    "brief": "Queries on the events table by date are slow. Add an index on created_at with a migration that can be rolled back, and check the query plan afterwards."
+   },
+   "b": {
+    "title": "Make the modal dialogs keyboard accessible",
+    "brief": "The modals trap nothing: focus escapes, Escape doesn't close, and screen readers don't announce them. Fix the shared modal component."
+   }
+  },
+  {
+   "id": "n05",
+   "label": "negative",
+   "same": false,
+   "kind": "bug-crash vs translation",
+   "a": {
+    "title": "Fix the null error when a user has no avatar",
+    "brief": "Profile page throws 'cannot read properties of null' when the user has no avatar image. Reproduce, fix it with a sensible default, and add a test."
+   },
+   "b": {
+    "title": "Add Portuguese translations for the emails",
+    "brief": "The transactional emails exist in English and Spanish. Add Portuguese versions of the welcome and receipt emails."
+   }
+  },
+  {
+   "id": "n06",
+   "label": "negative",
+   "same": false,
+   "kind": "performance vs docs",
+   "a": {
+    "title": "Reduce the memory use of the importer",
+    "brief": "The CSV importer uses 3 GB for a 200 MB file. Find out why and make it stream. Report the peak memory before and after."
+   },
+   "b": {
+    "title": "Write an onboarding guide for contributors",
+    "brief": "Write a contributing guide: how we branch, how to run checks, how reviews work and what we expect in a pull request description."
+   }
+  },
+  {
+   "id": "n07",
+   "label": "negative",
+   "same": false,
+   "kind": "api-endpoint vs ci-fix",
+   "a": {
+    "title": "Add a health check endpoint",
+    "brief": "Add GET /healthz that returns 200 when the database and the queue are reachable and 503 otherwise. Tests please."
+   },
+   "b": {
+    "title": "Make the Docker build faster in CI",
+    "brief": "The CI image build takes 14 minutes. Add layer caching and reorder the Dockerfile so dependencies are cached, and show the new timing."
+   }
+  },
+  {
+   "id": "n08",
+   "label": "negative",
+   "same": false,
+   "kind": "rename-refactor vs landing-copy",
+   "a": {
+    "title": "Move the utils folder into packages/shared",
+    "brief": "Move src/utils into packages/shared, fix every import, and make sure both apps still build. No behaviour changes."
+   },
+   "b": {
+    "title": "Write the announcement post for the new editor",
+    "brief": "Write the blog post announcing the new editor: what it does, who it is for, three screenshots to request from design, and a call to action."
+   }
+  },
+  {
+   "id": "n09",
+   "label": "negative",
+   "same": false,
+   "kind": "logging vs settings-toggle",
+   "a": {
+    "title": "Add request tracing to the gateway",
+    "brief": "Add a request id to every log line in the gateway and pass it to downstream services, so a request can be followed across them."
+   },
+   "b": {
+    "title": "Add a compact view option to the list",
+    "brief": "Add a toggle that switches the item list between comfortable and compact row heights and remembers the choice."
+   }
+  },
+  {
+   "id": "n10",
+   "label": "negative",
+   "same": false,
+   "kind": "export-script vs flaky-test",
+   "a": {
+    "title": "Export the audit log to JSON",
+    "brief": "Write a command that exports the audit log between two dates to a JSON lines file. Stream it, the log is large."
+   },
+   "b": {
+    "title": "Stabilise the timing-dependent animation test",
+    "brief": "The test that checks the sidebar animation sometimes fails because it asserts too early. Make it wait for the real condition instead of a fixed delay."
+   }
+  }
+ ]
+}
