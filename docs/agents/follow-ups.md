@@ -468,3 +468,7 @@ Left out of the Fleet redesign (v8) until the box can track them deterministical
 - **"Taking much longer than usual"**: needs a durable per-agent duration history with enough runs.
 - **"Having trouble / retrying"**: needs a recorded retry/refusal signal per task.
 - **"Paused: usage limit reached · resumes automatically"**: usage limits only refuse new background work today; running tasks aren't paused or auto-resumed. Needs a real pause-and-resume on limits first.
+
+## Fleet: iterate on "Ended today"
+
+- The user isn't sure yet how the Ended today section should work (what it lists, for how long, what each row offers). The v9 mockup keeps a simple version (outcome badge, title, agent · project · when, one outcome sentence, Open session); revisit it in a dedicated design round before or after it ships (user, 2026-11-28).
