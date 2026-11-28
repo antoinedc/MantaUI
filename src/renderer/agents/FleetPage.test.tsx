@@ -8,7 +8,6 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act } from "react";
 import type { AgentInfo, DelegateJob, FleetEnded, FleetTask, FleetTasks, NeedsYou } from "../../shared/types";
 import { resetPackageAgentsForTest } from "../packageAgents";
-import { useStore } from "../store";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
 import type { AgentsRead } from "./useAgentsRead";
 import { FleetPage } from "./FleetPage";

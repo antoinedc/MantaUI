@@ -715,6 +715,23 @@ test("needs you (P1): only a decision the task is blocked on — Manta-handed, n
   }
 });
 
+test("needs you: a pending change carries the project of the task that proposed it (changeProjects); a chat-made or unknown one has none", async () => {
+  const f = await fixture();
+  try {
+    await f.engine.init();
+    f.w.jobs = [job({ id: "arch1", agent: "agent-architect", parentDirectory: "/repo/api" })];
+    await f.putChanges([
+      change({ id: "from-task", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 1000, createdAt: T0 - 1000, decidedAt: null, origin: { kind: "job", jobId: "arch1", rootJobId: "arch1", attempt: 1 } }),
+      change({ id: "from-chat", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 2000, createdAt: T0 - 2000, decidedAt: null, origin: { kind: "chat" } }),
+      change({ id: "gone-task", state: "pending", needsClick: true, reason: "ask", releasedAt: T0 - 3000, createdAt: T0 - 3000, decidedAt: null, origin: { kind: "job", jobId: "old", rootJobId: "old", attempt: 1 } }),
+    ]);
+    const ny = await f.engine.needsYou();
+    assert.deepEqual(ny.changeProjects, { "from-task": API, "from-chat": null, "gone-task": null });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("needs you (P1): a task's newest round decides; an old round's decision does not stay", async () => {
   const f = await fixture();
   try {

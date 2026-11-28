@@ -1,7 +1,7 @@
 // Pure logic of the agent screens' pages (agent screens spec §2.1, §2.2, §5.2).
 
 import { describe, expect, it } from "vitest";
-import type { AgentChange, AgentProfile, FleetCell, NeedsYouReview, UsageSnapshot } from "../../shared/types";
+import type { AgentChange, AgentProfile, FleetCell, NeedsYouReview } from "../../shared/types";
 import {
   canRestore,
   cellView,
@@ -17,15 +17,12 @@ import {
   isUnknownChannel,
   memoryLabel,
   nextTab,
-  planUsagePercent,
   PROFILE_TABS,
   profileTabs,
   researchHealth,
-  recapLead,
   reviewPart,
   seatFolder,
   seatNotesLabel,
-  weekPill,
 } from "./agentsView";
 
 const change = (over: Partial<AgentChange> = {}): AgentChange => ({
@@ -63,29 +60,6 @@ describe("isUnknownChannel / errText", () => {
   it("errText gives the message, else a fallback", () => {
     expect(errText(new Error(" boom "), "x")).toBe("boom");
     expect(errText(undefined, "Something went wrong.")).toBe("Something went wrong.");
-  });
-});
-
-describe("planUsagePercent", () => {
-  const snap = (windows: Array<{ pct: number; active?: boolean }>): UsageSnapshot =>
-    ({ provider: "claude", providerIDs: [], fetchedAt: 1, windows: windows.map((w, i) => ({ kind: i ? "weekly" : "session", label: "x", ...w })) }) as UsageSnapshot;
-  it("is the highest percentage of the current windows, rounded", () => {
-    expect(planUsagePercent([snap([{ pct: 12.4 }, { pct: 37.6 }]), snap([{ pct: 20 }])])).toBe(38);
-  });
-  it("ignores windows the provider says are not in force, and says nothing when unknown", () => {
-    expect(planUsagePercent([snap([{ pct: 90, active: false }, { pct: 10 }])])).toBe(10);
-    expect(planUsagePercent([])).toBeNull();
-    expect(planUsagePercent([snap([])])).toBeNull();
-    expect(planUsagePercent(null)).toBeNull();
-  });
-});
-
-describe("weekPill", () => {
-  it("says the tasks and, when known, the plan usage; never a dollar amount", () => {
-    expect(weekPill(41, 38)).toBe("This week: 41 tasks · plan usage 38%");
-    expect(weekPill(1, null)).toBe("This week: 1 task");
-    expect(weekPill(0, null)).toBe("This week: 0 tasks");
-    expect(weekPill(5, 38)).not.toMatch(/\$/);
   });
 });
 
@@ -280,16 +254,6 @@ describe("seats", () => {
   });
 });
 
-describe("recapLead", () => {
-  const at = (d: number, h: number, m: number) => new Date(2026, 10, d, h, m).getTime();
-  it("today, yesterday, an older day; and the last day when there is no earlier visit", () => {
-    const now = at(26, 12, 0);
-    expect(recapLead(at(26, 9, 5), now)).toBe("Since today 09:05:");
-    expect(recapLead(at(25, 18, 40), now)).toBe("Since yesterday 18:40:");
-    expect(recapLead(at(12, 7, 0), now)).toBe("Since 12 Nov 07:00:");
-    expect(recapLead(null, now)).toBe("In the last 24 hours:");
-  });
-});
 
 describe("seatFolder", () => {
   const seat = { project: "manta-aaaaaaaaaa", projectName: "Manta" };

@@ -95,7 +95,7 @@ export function FleetDetails({
     const e = item.task;
     const badge = endedBadge(e.outcome);
     return (
-      <aside aria-labelledby="fleet-details-title" data-testid="fleet-details" data-kind="ended" className="flex min-w-0 flex-col border-l border-border bg-bg-elev">
+      <aside aria-labelledby="fleet-details-title" data-testid="fleet-details" data-kind="ended" className="flex min-h-full min-w-0 flex-col border-l border-border bg-bg-elev">
         {header}
         <div className="px-4 pb-5 text-label leading-normal">
           <p className="m-0 text-text">
@@ -128,7 +128,7 @@ export function FleetDetails({
   const status = statusView(t, now);
   const paused = t.status === "paused-by-you";
   return (
-    <aside aria-labelledby="fleet-details-title" data-testid="fleet-details" data-kind="running" className="flex min-w-0 flex-col border-l border-border bg-bg-elev">
+    <aside aria-labelledby="fleet-details-title" data-testid="fleet-details" data-kind="running" className="flex min-h-full min-w-0 flex-col border-l border-border bg-bg-elev">
       {header}
       <div className="px-4 pb-5 text-label leading-normal">
         <div className="flex items-start gap-2">

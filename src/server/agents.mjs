@@ -5562,7 +5562,15 @@ export function createAgentsEngine({
       });
     }
     reviews.sort((a, b) => b.finishedAt - a.finishedAt);
-    return { questions, changes, reviews, count: questions.length + changes.length + reviews.length };
+    // the project each pending change belongs to: the one of the task that proposed it (a change made in a chat has none)
+    const allJobs = await readSpecialistJobs();
+    const changeProjects = {};
+    for (const c of changes) {
+      const origin = c.origin?.kind === "job" ? c.origin : null;
+      const job = origin ? allJobs.find((j) => j.id === origin.jobId || rootJobOf(j) === origin.rootJobId) : null;
+      changeProjects[c.id] = job ? await projectOf(job.parentDirectory) : null;
+    }
+    return { questions, changes, reviews, changeProjects, count: questions.length + changes.length + reviews.length };
   }
 
   async function reviewDone(jobId) {

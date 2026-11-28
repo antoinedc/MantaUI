@@ -4627,7 +4627,9 @@ export interface FleetTasks {
 }
 export interface NeedsYou {
   questions: TaskQuestion[];
-  changes: AgentChange[]; // pending, box-wide
+  /** Pending, box-wide. `changeProjects` (absent on an older box) names the registry project of the task that proposed each. */
+  changes: AgentChange[];
+  changeProjects?: Record<string, string | null>;
   reviews: NeedsYouReview[];
   count: number;
 }

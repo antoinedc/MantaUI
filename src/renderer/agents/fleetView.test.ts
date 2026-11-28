@@ -5,6 +5,7 @@ import {
   askedByText,
   askedByWho,
   changeRecommendation,
+  changeTodo,
   decisionReviews,
   endedBadge,
   fleetHeaderCounts,
@@ -200,13 +201,19 @@ describe("what a card says", () => {
     expect(changeRecommendation(change({ contentReview: { verdict: "error", reasons: [], carried: [], model: "m", at: 1 } }))).toBe("Manta recommends reading it first: an independent check couldn’t run.");
     expect(changeRecommendation(change({ trial: { id: "t", verdicts: [{ case: "a", pass: true, quote: "", note: "" }, { case: "b", pass: false, quote: "", note: "" }] } }))).toBe("Manta recommends reading it first: 1 of 2 test cases didn’t pass.");
   });
+  it("the title of a change item says what is being decided", () => {
+    expect(changeTodo(change({ kind: "update", agentName: "Dev" }))).toBe("Approve the change to Dev?");
+    expect(changeTodo(change({ kind: "create", agentName: "Scout" }))).toBe("Approve creating Scout?");
+    expect(changeTodo(change({ origin: { kind: "template-update", templateHash: "h" } as never, agentName: "Dev" }))).toBe("Approve the built-in update to Dev?");
+    expect(changeTodo(change({ origin: { kind: "learned" } as never, agentName: "Dev" }))).toBe("Approve what Dev learned?");
+  });
   it("items group under their project, decisions before questions, projects in first-seen order", () => {
     const g = groupNeedsByProject(
       [
-        { id: "q1", kind: "question", project: "site" },
-        { id: "d1", kind: "decision", project: "capo" },
-        { id: "d2", kind: "decision", project: "site" },
-        { id: "d3", kind: "decision", project: null },
+        { id: "q1", urgency: "question", project: "site" },
+        { id: "d1", urgency: "decision", project: "capo" },
+        { id: "d2", urgency: "decision", project: "site" },
+        { id: "d3", urgency: "decision", project: null },
       ],
       (slug) => (slug ? slug.toUpperCase() : "Other"),
     );

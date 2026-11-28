@@ -595,6 +595,14 @@ describe("httpApi background-run calls use the shared channel names", () => {
 
   const bodyOf = (init?: RequestInit) => JSON.parse(String(init?.body ?? "null"));
 
+  it("delegateResume → the shared IPC channel, returning the box's answer untouched", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ ok: false, error: "full", retriable: true }));
+    const res = await httpApi.delegateResume("job1");
+    expect(res).toEqual({ ok: false, error: "full", retriable: true });
+    expect(fetchMock.mock.calls[0][0]).toContain(`/rpc/${encodeURIComponent(IPC.delegateResume)}`);
+    expect(IPC.delegateResume).toBe("delegate:resume");
+  });
+
   it("delegateOpenSession → the shared IPC channel, returning the box's answer untouched", async () => {
     const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ ok: true, tmuxSession: "proj", windowIndex: 4 }));
     const res = await httpApi.delegateOpenSession({ jobId: "job1" });
@@ -894,6 +902,7 @@ describe("httpApi agent-screens channels", () => {
     },
     { name: "agentsQuestionDismiss", call: () => httpApi.agentsQuestionDismiss({ id: "tq_1" }), channel: "agents:question-dismiss", args: [{ id: "tq_1" }] },
     { name: "agentsNeedsYou", call: () => httpApi.agentsNeedsYou(), channel: "agents:needs-you", args: [] },
+    { name: "agentsTasks", call: () => httpApi.agentsTasks(), channel: "agents:tasks", args: [] },
     { name: "agentsReviewDone", call: () => httpApi.agentsReviewDone({ jobId: "j1" }), channel: "agents:review-done", args: [{ jobId: "j1" }] },
     { name: "agentsFleet", call: () => httpApi.agentsFleet(), channel: "agents:fleet", args: [] },
     { name: "agentsFleetSeen", call: () => httpApi.agentsFleetSeen(), channel: "agents:fleet-seen", args: [] },

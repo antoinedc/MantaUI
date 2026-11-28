@@ -49,10 +49,10 @@ describe("AgentsSection", () => {
     h = null;
   });
 
-  async function setup(extra: Record<string, unknown> = {}, props: { view?: AgentsView; needsCount?: number } = {}) {
+  async function setup(extra: Record<string, unknown> = {}, props: { view?: AgentsView; decisions?: number; questionDot?: boolean; fleetCount?: number } = {}) {
     const { api } = installMockApi({ agentsList: () => Promise.resolve([DEV, BAD]), ...extra });
     resetPackageAgentsForTest();
-    h = mount(<AgentsSection view={props.view ?? null} needsCount={props.needsCount ?? 0} onOpenView={onOpenView} />);
+    h = mount(<AgentsSection view={props.view ?? null} needs={{ decisions: props.decisions ?? 0, questionDot: props.questionDot ?? false }} fleetCount={props.fleetCount ?? 0} onOpenView={onOpenView} />);
     await h.flush();
     await h.flush();
     // Boxed: the mock api is a Proxy that answers `then`, so returning it directly hangs.
@@ -125,30 +125,46 @@ describe("AgentsSection", () => {
   });
 
   describe("Needs you and Fleet", () => {
-    it("two rows above the agents: Needs you with its count, then Fleet", async () => {
-      await setup({}, { needsCount: 3 });
+    it("two rows above the agents: Needs you with its red number, then Fleet", async () => {
+      await setup({}, { decisions: 3 });
       const section = h!.container.querySelector('[data-testid="agents-section"]')!;
       const order = [...section.querySelectorAll('[data-testid^="agents-nav-"], [data-testid="agent-row"]')].map((e) => e.getAttribute("data-testid"));
       expect(order).toEqual(["agents-nav-needs", "agents-nav-fleet", "agent-row", "agent-row"]);
       expect(nav("needs")?.textContent).toContain("Needs you");
       expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"]')?.textContent).toBe("3");
-      expect(nav("needs")?.getAttribute("aria-label")).toBe("Needs you, 3 waiting");
+      expect(nav("needs")?.getAttribute("aria-label")).toBe("Needs you, 3 decisions waiting");
     });
 
-    it("no badge at zero", async () => {
-      await setup({}, { needsCount: 0 });
-      expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"]')).toBeNull();
+    it("no number and no dot at zero", async () => {
+      await setup({}, { decisions: 0 });
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"], [data-testid="agents-needs-dot"]')).toBeNull();
       expect(nav("needs")?.getAttribute("aria-label")).toBe("Needs you");
     });
 
-    it("Needs you opens the Fleet page at its first section (a fresh request each press); Fleet opens it plain", async () => {
-      await setup({}, { needsCount: 1 });
+    it("only optional questions: a small blue dot, never a number; a decision beats the dot", async () => {
+      await setup({}, { questionDot: true });
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-dot"]')).toBeTruthy();
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"]')).toBeNull();
+      h!.unmount();
+      await setup({}, { decisions: 1, questionDot: true });
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-dot"]')).toBeNull();
+      expect(nav("needs")?.querySelector('[data-testid="agents-needs-badge"]')?.textContent).toBe("1");
+    });
+
+    it("Fleet carries the number in progress, and nothing at zero", async () => {
+      await setup({}, { fleetCount: 2 });
+      expect(nav("fleet")?.querySelector('[data-testid="agents-fleet-count"]')?.textContent).toBe("2");
+      expect(nav("fleet")?.getAttribute("aria-label")).toBe("Fleet, 2 in progress");
+      h!.unmount();
+      await setup({}, { fleetCount: 0 });
+      expect(nav("fleet")?.querySelector('[data-testid="agents-fleet-count"]')).toBeNull();
+      expect(nav("fleet")?.getAttribute("aria-label")).toBe("Fleet");
+    });
+
+    it("Needs you opens the Needs you page; Fleet opens the Fleet page", async () => {
+      await setup({}, { decisions: 1 });
       await click(nav("needs"));
-      await click(nav("needs"));
-      const calls = onOpenView.mock.calls.map((c) => c[0]);
-      expect(calls[0]).toMatchObject({ page: "fleet", focus: "needs" });
-      expect(calls[1]).toMatchObject({ page: "fleet", focus: "needs" });
-      expect((calls[0] as { nonce: number }).nonce).not.toBe((calls[1] as { nonce: number }).nonce);
+      expect(onOpenView).toHaveBeenLastCalledWith({ page: "needs" });
       await click(nav("fleet"));
       expect(onOpenView).toHaveBeenLastCalledWith({ page: "fleet" });
     });
@@ -158,7 +174,7 @@ describe("AgentsSection", () => {
       expect(nav("fleet")?.getAttribute("aria-current")).toBe("page");
       expect(nav("needs")?.getAttribute("aria-current")).toBeNull();
       h!.unmount();
-      await setup({}, { view: { page: "fleet", focus: "needs", nonce: 1 } });
+      await setup({}, { view: { page: "needs" } });
       expect(nav("needs")?.getAttribute("aria-current")).toBe("page");
       expect(nav("fleet")?.getAttribute("aria-current")).toBeNull();
     });

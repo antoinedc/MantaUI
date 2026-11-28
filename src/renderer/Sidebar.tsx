@@ -119,16 +119,18 @@ type Props = {
   /** The Routines pane is the visible view (selected-row state). */
   routinesOpen?: boolean;
   // Agent screens (spec §1.1): the Needs you / Fleet rows and the agent rows open the agent pages. `agentsView` is the page
-  // showing now (selected row), `needsYouCount` the Needs you badge, `onOpenAgents` opens a page (an agent row → its profile).
+  // showing now (selected row), `needsBadge` the Needs you row's red number / blue dot, `fleetCount` the Fleet row's number, `onOpenAgents` opens a page (an agent row → its profile).
   agentsView: AgentsView;
-  needsYouCount: number;
+  needsBadge: { decisions: number; questionDot: boolean };
+  /** Tasks in progress, box-wide (the Fleet row's number). */
+  fleetCount: number;
   onOpenAgents: (view: AgentsView) => void;
   /** ⌘B: the sidebar slides away but stays mounted (`inert`, so nothing in it is reachable). */
   hidden?: boolean;
 };
 
 export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
-  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, agentsView, needsYouCount, onOpenAgents, hidden = false },
+  { onOpenSettings, onNewProject, onNewSessionInProject, onOpenResumeModal, onOpenCto, ctoState, onOpenRoutines, routinesBadge, routinesOpen = false, agentsView, needsBadge, fleetCount, onOpenAgents, hidden = false },
   ref,
 ) {
   // BET-730: per-field selectors, never a bare useStore() — a no-selector
@@ -853,7 +855,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             )}
           </button>
         </div>
-        <AgentsSection view={agentsView} needsCount={needsYouCount} onOpenView={onOpenAgents} />
+        <AgentsSection view={agentsView} needs={needsBadge} fleetCount={fleetCount} onOpenView={onOpenAgents} />
         <RailCreateRow label="New workspace" shortcut={`${MOD_KEY}N`} onClick={onNewProject} />
         {/* New-session drafts whose mode is "new-project" live directly beneath
             the New workspace row that created them — they belong to no project.

@@ -123,8 +123,6 @@ export function sidebarNeeds(data: NeedsYou | null | undefined): { decisions: nu
   return { decisions, questionDot: decisions === 0 && questions > 0 };
 }
 
-const lowerFirst = (s: string): string => s.charAt(0).toLowerCase() + s.slice(1);
-
 /** The card at the top of Fleet: how many decisions wait and what the first one is. null: none (optional questions never show here). */
 export function needsTop(data: NeedsYou | null | undefined, agentName: (slug: string) => string): { heading: string; detail: string } | null {
   const { decisions } = needsCounts(data);
@@ -136,6 +134,13 @@ export function needsTop(data: NeedsYou | null | undefined, agentName: (slug: st
     heading: decisions === 1 ? "1 decision is waiting for you" : `${decisions} decisions are waiting for you`,
     detail: decisions === 1 ? first : `${first}, and ${decisions - 1} ${decisions === 2 ? "other" : "others"}`,
   };
+}
+
+/** The title of a change item: what the user is asked to approve. */
+export function changeTodo(change: Pick<AgentChange, "kind" | "agentName" | "origin">): string {
+  if (change.origin?.kind === "template-update") return `Approve the built-in update to ${change.agentName}?`;
+  if (change.origin?.kind === "learned") return `Approve what ${change.agentName} learned?`;
+  return change.kind === "create" ? `Approve creating ${change.agentName}?` : `Approve the change to ${change.agentName}?`;
 }
 
 /** The line under a question's options. Claimed only when there is a recommended single-select option to go with. */
@@ -157,10 +162,10 @@ export function changeRecommendation(change: Pick<AgentChange, "scriptReview" | 
   return "Manta recommends approving it.";
 }
 
-export type NeedsKind = "decision" | "question";
+export type NeedsUrgency = "decision" | "question";
 /** Items under their project heading: decisions first, then open questions; projects in the order they are first seen (decisions' first). */
-export function groupNeedsByProject<T extends { kind: NeedsKind; project: string | null }>(items: ReadonlyArray<T>, projectName: (slug: string | null) => string): Array<{ key: string; label: string; items: T[] }> {
-  const ordered = [...items.filter((i) => i.kind === "decision"), ...items.filter((i) => i.kind === "question")];
+export function groupNeedsByProject<T extends { urgency: NeedsUrgency; project: string | null }>(items: ReadonlyArray<T>, projectName: (slug: string | null) => string): Array<{ key: string; label: string; items: T[] }> {
+  const ordered = [...items.filter((i) => i.urgency === "decision"), ...items.filter((i) => i.urgency === "question")];
   const groups = new Map<string, { key: string; label: string; items: T[] }>();
   for (const i of ordered) {
     const key = i.project ?? "";
