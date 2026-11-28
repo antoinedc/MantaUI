@@ -4208,3 +4208,94 @@ test("setJobLabel: sets a running round's label; null clears only a label with t
   await finishPlain(w, id);
   assert.equal(await setJobLabel(id, "Trial running · case 2 of 2", {}, w.deps), false, "not on a finished round");
 });
+
+// ---- a task's model: named at the start, kept by every later round unless a round names another ----
+
+const APPROVED = [
+  { providerID: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
+  { providerID: "openai", id: "gpt-6-sol", name: "GPT-6 Sol" },
+  { providerID: "openai", id: "gpt-6-luna", name: "GPT-6 Luna" },
+];
+const SONNET = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+const SOL = { providerID: "openai", modelID: "gpt-6-sol" };
+
+/** A finished lead task that started on `model` (a "provider/model" string, or none), in a world whose approved models are APPROVED. */
+async function finishedOnModel(model) {
+  const w = liveWorld();
+  w.deps.autonomyPolicy = async () => MODES.balanced;
+  w.deps.listModels = async () => APPROVED;
+  w.deps.configGet = async () => ({});
+  const id = await start(w, { agent: "agent-dev", isolation: "worktree", requestedBy: "manta", allowPr: false, agentName: "Dev", request: "Fix login", specialist: true, autonomy: { load: async () => MODES.balanced, check: () => null }, ...(model ? { model } : {}) });
+  const child = w.job(id).childSessionID;
+  w.finish(child, "succeeded", T0 + 1);
+  await w.engine.observeRaw(raw("session.execution.succeeded", child));
+  assert.equal(w.job(id).completionDelivery, "delivered");
+  w.calls.send.length = 0;
+  return { w, id };
+}
+
+test("task model: a job's wire record says the model it ran on — the named one, else the one Auto sent it to, else none", async () => {
+  const named = await finishedOnModel("openai/gpt-6-sol");
+  assert.equal((await listJobs({}, { load: named.w.deps.load })).find((j) => j.id === named.id).modelUsed, "openai/gpt-6-sol");
+  const plain = await finishedOnModel(null);
+  assert.equal((await listJobs({}, { load: plain.w.deps.load })).find((j) => j.id === plain.id).modelUsed, null);
+  const routed = await finishedOnModel(null);
+  routed.w.jobs[0].launch = { ...routed.w.jobs[0].launch, model: SONNET }; // what Auto picked at the launch
+  assert.equal((await listJobs({}, { load: routed.w.deps.load })).find((j) => j.id === routed.id).modelUsed, "anthropic/claude-sonnet-5-5");
+});
+
+test("continueJob without a model: the next round runs on the model the task last ran on, and its record says so", async () => {
+  const { w, id } = await finishedOnModel("openai/gpt-6-sol");
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(w.calls.send.at(-1).model, SOL, "the prompt is sent on that model");
+  assert.deepEqual(res.job.launch.model, SOL);
+  assert.equal(res.job.requestedModel, "openai/gpt-6-sol");
+  assert.equal(res.job.modelUsed, "openai/gpt-6-sol");
+  // and a third round keeps it too
+  w.finish(res.job.childSessionID, "succeeded", T0 + 2);
+  await w.engine.observeRaw(raw("session.execution.succeeded", res.job.childSessionID));
+  w.calls.send.length = 0;
+  const third = await continueJob(res.job.id, { prompt: "round three", sessionID: PARENT }, w.deps);
+  assert.equal(third.ok, true, JSON.stringify(third));
+  assert.deepEqual(w.calls.send.at(-1).model, SOL);
+});
+
+test("continueJob without a model on a task that named none: nothing is pinned, as before", async () => {
+  const { w, id } = await finishedOnModel(null);
+  const res = await continueJob(id, { prompt: "round two", sessionID: PARENT }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal("model" in w.calls.send.at(-1), false);
+  assert.equal(res.job.launch.model, null);
+  assert.equal(res.job.modelUsed, null);
+});
+
+test("continueJob with a model: that round runs on the new model, the record says so, and later rounds keep it", async () => {
+  const { w, id } = await finishedOnModel("anthropic/claude-sonnet-5-5");
+  const res = await continueJob(id, { prompt: "review it", sessionID: PARENT, model: "openai/gpt-6-sol" }, w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(w.calls.send.at(-1).model, SOL);
+  assert.deepEqual(res.job.launch.model, SOL);
+  assert.equal(res.job.model, "openai/gpt-6-sol");
+  assert.equal(res.job.requestedModel, "openai/gpt-6-sol");
+  assert.equal(res.job.modelUsed, "openai/gpt-6-sol");
+  assert.equal(w.job(id).requestedModel, "anthropic/claude-sonnet-5-5", "the earlier round's record is not rewritten");
+  w.finish(res.job.childSessionID, "succeeded", T0 + 2);
+  await w.engine.observeRaw(raw("session.execution.succeeded", res.job.childSessionID));
+  w.calls.send.length = 0;
+  const third = await continueJob(res.job.id, { prompt: "once more", sessionID: PARENT }, w.deps);
+  assert.deepEqual(w.calls.send.at(-1).model, SOL);
+  assert.equal(third.job.modelUsed, "openai/gpt-6-sol");
+});
+
+test("continueJob with a model nobody approved: refused naming the closest approved ones, no round starts and nothing is sent", async () => {
+  const { w, id } = await finishedOnModel("anthropic/claude-sonnet-5-5");
+  const before = w.jobs.length;
+  const res = await continueJob(id, { prompt: "review it", sessionID: PARENT, model: "openai/gpt-7-sol" }, w.deps);
+  assert.equal(res.ok, false);
+  assert.match(res.error, /gpt-7-sol/);
+  assert.match(res.error, /openai\/gpt-6-sol/, "names a close approved model");
+  assert.equal(w.jobs.length, before, "no successor record");
+  assert.equal(w.job(id).supersededBy, undefined, "the old record is still the live one");
+  assert.equal(w.calls.send.length, 0);
+});

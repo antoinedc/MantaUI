@@ -307,9 +307,9 @@ describe("agent_handoff tool", () => {
   const CTX = { sessionID: "ses_t1", messageID: "msg_1", callID: "call_9", directory: "/work/proj" };
   const server = serveJson;
 
-  test("registered with the pinned input: agent, title, brief required; continueJob optional and LAST", () => {
+  test("registered with the pinned input: agent, title, brief required; continueJob and model optional and LAST", () => {
     assert.ok(tool);
-    assert.deepEqual(Object.keys(tool.input.properties), ["agent", "title", "brief", "continueJob"]);
+    assert.deepEqual(Object.keys(tool.input.properties), ["agent", "title", "brief", "continueJob", "model"]);
     assert.deepEqual([...tool.input.required].sort(), ["agent", "brief", "title"]);
     assert.equal(tool.input.additionalProperties, false);
     assert.match(tool.description, /Hand a piece of real work to one of your team's agents/);
@@ -330,6 +330,14 @@ describe("agent_handoff tool", () => {
     const calls = server(200, { ok: true, jobId: "x", agentName: "Dev" });
     await tool.execute({ agent: "dev", title: "t", brief: "b", continueJob: "abcd1234" }, CTX);
     assert.equal(calls[0].body.continueJob, "abcd1234");
+  });
+
+  test("model is forwarded only when given", async () => {
+    const calls = server(200, { ok: true, jobId: "x", agentName: "Dev" });
+    await tool.execute({ agent: "dev", title: "t", brief: "b", model: "openai/gpt-6-sol" }, CTX);
+    assert.equal(calls[0].body.model, "openai/gpt-6-sol");
+    await tool.execute({ agent: "dev", title: "t", brief: "b" }, CTX);
+    assert.equal("model" in calls[1].body, false);
   });
 
   test("a refusal is relayed as a sentence, never thrown; so is a transport / HTTP failure", async () => {

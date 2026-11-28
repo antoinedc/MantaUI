@@ -7,6 +7,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import type { AgentInfo, DelegateJob, FleetEnded, FleetTask, FleetTasks, NeedsYou } from "../../shared/types";
+import { refreshModelCatalog } from "../modelCatalog";
 import { resetPackageAgentsForTest } from "../packageAgents";
 import { installMockApi, mount, resetStore, type Harness, type MockApi } from "../testHarness";
 import type { AgentsRead } from "./useAgentsRead";
@@ -336,6 +337,27 @@ describe("FleetPage", () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(q('[data-testid="fleet-details"]')).toBeNull();
+  });
+
+  it("Details name the model the task ran on, in the catalog's words — a running task and an ended one; none recorded, no row", async () => {
+    const models = [{ id: "gpt-6-sol", providerID: "openai", name: "GPT-6 Sol" }];
+    const data = tasksData({
+      running: [task({ model: "openai/gpt-6-sol" }), task({ jobId: "j3", title: "Upgrade the file tree" })],
+      ended: [ended({ model: "openai/gpt-6-sol" }), ended({ jobId: "e2", title: "Write the release notes" })],
+    });
+    await open({ tasks: read(data) }, { opencodeModels: () => Promise.resolve(models) });
+    refreshModelCatalog();
+    await h!.flush();
+    await h!.flush();
+    const modelRow = () => q('[data-testid="fleet-details"] [data-testid="fleet-details-model"]')?.textContent ?? null;
+    await click(byLabel("Details: Let Manta hand work to agents more than once per request"));
+    expect(modelRow()).toBe("GPT-6 Sol");
+    await click(byLabel("Details: Upgrade the file tree"));
+    expect(modelRow()).toBeNull();
+    await click(byLabel("Details: Give skill trials more disk space"));
+    expect(modelRow()).toBe("GPT-6 Sol");
+    await click(byLabel("Details: Write the release notes"));
+    expect(modelRow()).toBeNull();
   });
 
   it("Details without a checklist says the agent hasn't written one", async () => {
