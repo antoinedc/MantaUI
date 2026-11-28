@@ -346,6 +346,7 @@ export const demoAgentsApi = {
   agentsSettingsSet: () => Promise.reject(new Error("Not available in the demo.")),
   agentsClearChat: () => Promise.reject(new Error("Not available in the demo.")),
   agentsChats: ok({}),
+  agentsApprovedModels: ok(["anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-6-sol"]),
   agentsQuestionAnswer: () => Promise.reject(new Error("Not available in the demo.")),
   agentsQuestionDismiss: () => Promise.reject(new Error("Not available in the demo.")),
   agentsChangeApply: () => Promise.reject(new Error("Not available in the demo.")),

@@ -5375,6 +5375,17 @@ export function createAgentsEngine({
     throw new AgentError(rec.error || "Couldn't save the change; try again");
   }
 
+  /** The models the profile's Model select offers: the ones the user approved for subagents. Unreadable → none (the select then offers only Auto and the current one). */
+  async function approvedModels() {
+    try {
+      const list = typeof listApprovedModels === "function" ? await listApprovedModels() : [];
+      return Array.isArray(list) ? [...list].sort() : [];
+    } catch (e) {
+      log.warn?.(`[agents] couldn't list the approved models: ${e?.message ?? e}`);
+      return [];
+    }
+  }
+
   // ---- reading the stores for the fleet, needs you and the profile ----
 
   const slugOfJob = (job) => (typeof job?.agent === "string" && job.agent.startsWith(AGENT_PACKAGE_PREFIX) ? job.agent.slice(AGENT_PACKAGE_PREFIX.length) : null);
@@ -6576,6 +6587,7 @@ export function createAgentsEngine({
     history,
     restore,
     settingsSet,
+    approvedModels,
     profile,
     seatAdd,
     seatSet,

@@ -2009,6 +2009,8 @@ export interface Api {
   agentsClearChat(input: { slug: string }): Promise<{ sessionId: string; windowIndex: number | null }>;
   /** Each agent's stored conversation, slug → session id (the sidebar's Team rows). */
   agentsChats(): Promise<Record<string, string>>;
+  /** The models an agent may be pinned to (the Model select), "provider/model" keys; empty when the box can't tell. */
+  agentsApprovedModels(): Promise<string[]>;
   // Agents, Phase 4: Manta's proposed / applied agent changes (the card). Errors are thrown sentences.
   agentsChangeFor(input: { sessionID: string; messageID: string; callID: string }): Promise<AgentChange | null>;
   agentsChangeApply(id: string): Promise<AgentChange>;

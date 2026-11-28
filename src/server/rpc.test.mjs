@@ -2802,11 +2802,13 @@ test("profile redesign: agents:settings-set, agents:clear-chat and agents:chats 
     settingsSet: async (i) => (seen.push(["settingsSet", i]), { outcome: "saved", change: { id: "ach_1" } }),
     clearChat: async (i) => (seen.push(["clearChat", i]), { sessionId: "ses_2", windowIndex: 3 }),
     chats: async () => (seen.push(["chats"]), { dev: "ses_1" }),
+    approvedModels: async () => ["a/b"],
   };
   const handlers = buildHandlers(deps);
   assert.deepEqual(await handlers["agents:settings-set"]({ slug: "dev", field: "name", value: "Developer" }), { outcome: "saved", change: { id: "ach_1" } });
   assert.deepEqual(await handlers["agents:clear-chat"]({ slug: "dev" }), { sessionId: "ses_2", windowIndex: 3 });
   assert.deepEqual(await handlers["agents:chats"](), { dev: "ses_1" });
+  assert.deepEqual(await handlers["agents:approved-models"](), ["a/b"]);
   assert.deepEqual(seen, [["settingsSet", { slug: "dev", field: "name", value: "Developer" }], ["clearChat", { slug: "dev" }], ["chats"]]);
   // a refusal is its sentence (400); anything else is a safe literal
   deps.agents.settingsSet = async () => {

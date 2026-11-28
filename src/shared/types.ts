@@ -2023,6 +2023,7 @@ export const IPC = {
   agentsSettingsSet: "agents:settings-set", // ({ slug, field, value }) → { outcome, change }; a refusal is a sentence
   agentsClearChat: "agents:clear-chat", // ({ slug }) → { sessionId, windowIndex | null }
   agentsChats: "agents:chats", // () → { [slug]: sessionId }
+  agentsApprovedModels: "agents:approved-models", // () → string[] ("provider/model" keys the Model select offers)
   // ---- Agents, Phase 3 (spec docs/superpowers/specs/2026-11-23-agents-phase3-autonomy.md) ----
   agentsAutonomyGet: "agents:autonomy-get", // () → AutonomySettings; an older box rejects "unknown rpc channel"
   agentsAutonomySet: "agents:autonomy-set", // (AgentAutonomy) → AutonomySettings; throws with a human message

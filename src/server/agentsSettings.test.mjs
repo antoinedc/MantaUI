@@ -206,3 +206,19 @@ test("the Architect and Manta keep their wording and works via Manta; the Archit
     await f.cleanup();
   }
 });
+
+test("approvedModels: the models the Model select offers (sorted); an unreadable catalogue is an empty list, never an error", async () => {
+  const f = await fixture();
+  try {
+    assert.deepEqual(await f.engine.approvedModels(), [...MODELS].sort());
+  } finally {
+    await f.cleanup();
+  }
+  const base = await mkdtemp(join(tmpdir(), "agents-settings-nomodels-"));
+  try {
+    const engine = createAgentsEngine({ root: join(base, "agents"), templatesDir: join(base, "t"), isGitRepo: async () => true, log: { warn: () => {} }, listApprovedModels: async () => { throw new Error("opencode down"); } });
+    assert.deepEqual(await engine.approvedModels(), []);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
