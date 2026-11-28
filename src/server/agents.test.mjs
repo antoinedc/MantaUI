@@ -108,7 +108,11 @@ test("buildAgentBlock: the pinned OpenCode block, model only when set", () => {
     mode: "all",
     description: "D",
     prompt: "{file:/h/.manta/agents/dev/.compiled.md}",
-    permission: { external_directory: { "/h/.manta/agents/dev/**": "allow" } },
+    permission: {
+      external_directory: { "/h/.manta/agents/dev/**": "allow" },
+      edit: { "/h/.manta/agents/dev/**": "deny", "/h/.manta/agents/dev/home/**": "allow", "/h/.manta/agents/dev/home/*..*": "deny" },
+      write: { "/h/.manta/agents/dev/**": "deny", "/h/.manta/agents/dev/home/**": "allow", "/h/.manta/agents/dev/home/*..*": "deny" },
+    },
   });
   assert.equal(buildAgentBlock({ dir, meta: { description: "D", model: "a/b" } }).model, "a/b");
 });

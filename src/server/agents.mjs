@@ -728,6 +728,13 @@ export function ARCHITECT_BLOCK_PERMISSION(dir, home = homedir()) {
   };
 }
 
+// Every other agent: its own folder is reachable (skills, briefs); it writes only inside its own `home/` workspace there —
+// its agent.md, compiled prompt and skills change only through proposals. The order of the rules is their meaning.
+export function AGENT_BLOCK_PERMISSION(dir) {
+  const ownHomeOnly = () => ({ [`${dir}/**`]: "deny", [`${dir}/home/**`]: "allow", [`${dir}/home/*..*`]: "deny" });
+  return { external_directory: { [`${dir}/**`]: "allow" }, edit: ownHomeOnly(), write: ownHomeOnly() };
+}
+
 /** The OpenCode agent block of an agent package. */
 export function buildAgentBlock({ dir, meta, home = homedir() }) {
   return {
@@ -735,7 +742,7 @@ export function buildAgentBlock({ dir, meta, home = homedir() }) {
     description: meta.description,
     prompt: `{file:${join(dir, COMPILED_FILE)}}`,
     ...(meta.model ? { model: meta.model } : {}),
-    permission: meta.role === "architect" ? ARCHITECT_BLOCK_PERMISSION(dir, home) : { external_directory: { [`${dir}/**`]: "allow" } },
+    permission: meta.role === "architect" ? ARCHITECT_BLOCK_PERMISSION(dir, home) : AGENT_BLOCK_PERMISSION(dir),
   };
 }
 
