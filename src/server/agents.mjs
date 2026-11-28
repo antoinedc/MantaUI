@@ -34,6 +34,7 @@ import { isMarkedInternal } from "./internalSessionMarker.mjs";
 import { WORKTREE_AGENT_GRANTS, CAP_ERROR, rootJobOf, countsTowardCap, MAX_RUNNING_JOBS } from "./delegate.mjs";
 import { shapeFleetTasks } from "./agentsFleetTasks.mjs";
 import { stepsOf } from "./jobProgressView.mjs";
+import { displayTitle } from "./jobTitle.mjs";
 import { readsCommons, modeOrPrivate } from "./knowledge/sharing.mjs";
 import { withResearchGuidance, THIN_SOURCE_MIN } from "./researchLibrary.mjs";
 import { DECISION_MARKER } from "./taskDecision.mjs";
@@ -234,7 +235,7 @@ export function fleetRecapEntries(jobs, changes, since, { level = null, learnLev
   for (const [agent, n] of count(finishedJobs.filter(byManta), agentOf)) add(`${agent} finished ${plural(n, "task")} Manta handed off`);
   const failedJobs = all.filter((j) => j.status === "failed" && (j.finishedAt ?? 0) >= since);
   for (const [agent, n] of count(failedJobs.filter(byManta), agentOf)) add(`${agent} failed ${plural(n, "task")}`);
-  for (const j of failedJobs.filter((x) => !byManta(x))) add(typeof j.name === "string" && j.name ? `${agentOf(j)} failed “${j.name}”` : `${agentOf(j)} failed a task`, j.id);
+  for (const j of failedJobs.filter((x) => !byManta(x))) add(`${agentOf(j)} failed “${displayTitle(j)}”`, j.id);
   if (unmergedHanded > 0) add(`${plural(unmergedHanded, "branch", "branches")} from ${unmergedHanded === 1 ? "a Manta-handed task" : "Manta-handed tasks"} still unmerged`);
   const changeLines = [];
   for (const r of changes ?? []) {
@@ -5379,7 +5380,7 @@ export function createAgentsEngine({
 
   function cellFor(job, attention) {
     const at = job.finishedAt ?? job.createdAt ?? 0;
-    const base = { jobId: job.id, title: typeof job.name === "string" ? job.name : "", at };
+    const base = { jobId: job.id, title: displayTitle(job), at };
     const questions = openCountOf(job);
     if (job.status === "running" || job.status === "paused") {
       const steps = stepsOf(job.jobProgress ?? {});
@@ -5552,7 +5553,7 @@ export function createAgentsEngine({
         jobId: job.id,
         agentSlug: slugOfJob(job),
         project: await projectOf(job.parentDirectory),
-        name: typeof job.name === "string" ? job.name : "",
+        name: displayTitle(job),
         finishedAt: job.finishedAt ?? job.createdAt ?? 0,
         filesChanged: Number(job.filesChanged) || 0,
         branch: typeof job.branch === "string" ? job.branch : null,
@@ -6288,7 +6289,7 @@ export function createAgentsEngine({
       if (!isFinished(job) || !hasBranchWork(job) || !slugOfJob(job) || !team.some((e) => e.slug === slugOfJob(job))) continue;
       if (typeof job.finishedAt !== "number" || t - job.finishedAt <= CHECKUP_DAY || checked++ >= SHEET_BRANCH_CHECKS_MAX) continue;
       if ((await branchVerdict(job)) !== "unmerged") continue;
-      unmergedBranches.push({ agent: slugOfJob(job), task: typeof job.name === "string" ? job.name : "", branch: job.branch, files: Number(job.filesChanged) || 0, hoursSinceFinished: Math.floor((t - job.finishedAt) / 3_600_000), project: await projectOf(job.parentDirectory) });
+      unmergedBranches.push({ agent: slugOfJob(job), task: displayTitle(job), branch: job.branch, files: Number(job.filesChanged) || 0, hoursSinceFinished: Math.floor((t - job.finishedAt) / 3_600_000), project: await projectOf(job.parentDirectory) });
     }
     unmergedBranches.sort((a, b) => b.hoursSinceFinished - a.hoursSinceFinished);
     return {

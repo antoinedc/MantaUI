@@ -175,6 +175,7 @@ import {
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
 import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, completionOwnerOf as delegateCompletionOwnerOf, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
+import { displayTitle } from "./jobTitle.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -6820,7 +6821,7 @@ const handleRequest = async (req, res) => {
           .map((j) => ({
             kind: "job",
             id: j.id,
-            name: j.name,
+            name: displayTitle(j),
             status: j.status,
             branch: j.branch ?? null,
             sessionID: j.childSessionID,
