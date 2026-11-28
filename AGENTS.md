@@ -4298,12 +4298,19 @@ Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `
   confirms it (`contentReview.carried`). The fact sheet probes only paths under the agent's folder and the registered projects. Finished branches unmerged
   for over a day are in the sheet and the report for Manta, not review items for the user.
 
-- **Nothing the Architect needs is gated by the background budget or counted when it didn't run.** A trial case is never refused by the background level (even
-  "off") or its dollar cap — it is part of the task the user asked for; `agentTrials.mjs` only books the spend. A trial in which no case started uses up neither
-  the 3-per-agent nor the 6-per-task limit. An Architect draft may take a skill already installed on the box by reference (`installed: {skill, taken, take?}`,
+- **Nothing the Architect needs is gated by the background budget, and trials are not counted.** A trial case is never refused by the background level (even
+  "off") or its dollar cap — it is part of the task the user asked for; `agentTrials.mjs` only books the spend. There is **no cap on the number of trials**
+  (the 3-per-agent and 6-per-task caps were removed 2026-11-28; the bounds are 3 cases per trial, 2 cases running at once box-wide and the 15-minute case ceiling).
+  An Architect draft may take a skill already installed on the box by reference (`installed: {skill, taken, take?}`,
   `readInstalledSkill` in `agents.mjs`, `adoptInstalled` in `agentSkills.mjs`): no fetched page, same path / link / size / licence protections and script
-  review, per-skill 20-file / 256 KiB caps lifted. When the lead makes the change itself after an Architect proposal for the same agent in the same chat didn't
+  review, per-skill 20-file / 256 KiB caps lifted. **A fitting skill is adopted whole, scripts included**: the independent script review decides (clean follows the user's
+  setting, flagged waits for the click), the Architect's template no longer tells it to drop scripts, and `taken: "part"` is only for files irrelevant to the job. When the lead makes the change itself after an Architect proposal for the same agent in the same chat didn't
   land, its record carries that proposal's research (`researchFrom`). Spec §3.3 / §4.1 / §7.
+
+- **Handoffs have no limits of the lead's own (2026-11-28).** No cap on handoffs per request, no "already changing code for this chat" refusal: every code task has its
+  own worktree and branch, so several run at once, also several of one agent. The only bound is the delegate's box-wide running-jobs cap (`MAX_RUNNING_JOBS`, protects the
+  box's memory). The lead's brief no longer says "give up after two failures": a handoff that failed for a since-fixed reason is sent again, and the lead stops and asks only when the
+  same failure repeats with no fix in sight. `agents.handoff` passes no `admit` hook and no `turnKey` (jobs no longer record one); `admit` stays in delegate as a generic hook.
 
 - **Slow git never runs through tmux's helper.** `tmux.run` kills anything after 10 s (and used to say "tmux timed out" for any command); a trial case's
   `git clone --local --no-hardlinks` of a real project is slower than that and failed every case. `src/server/gitExec.mjs` (`gitRun`: execFile, no shell,

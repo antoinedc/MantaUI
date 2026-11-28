@@ -182,17 +182,13 @@ removes the rest (so boot cleans leftovers). Trials never touch `.installed.json
   answered at once with "This is a test run with no user: continue on your best assumption and say what you assumed";
   recorded as "would ask". An agent whose work needs commands gets a **partial test** — what it couldn't run shows as a
   refusal in the case record — until a VM sandbox exists (follow-ups).
-- **Limits:** 15 min per case; ≤ 3 cases per trial; ≤ 3 trials per target agent (keyed by `agent` for an update, by
-  `slugForName(draft.name)` for a create — also stored as the trial's `agentSlug`, so the created agent's Tests tab shows
-  the trials that made it) and ≤ 6 per root task, **reserved as soon as the call is bound** (calls in flight count, a failed
-  call gives its slot back), so parallel calls can't overshoot; ≤ 2 cases
+- **Limits:** 15 min per case; ≤ 3 cases per trial; **no cap on the number of trials** (the first version had ≤ 3 per target agent and
+  ≤ 6 per root task; they stopped real work and were removed on 2026-11-28 — the trial's `agentSlug` is still stored, so the created agent's
+  Tests tab shows the trials that made it); ≤ 2 cases
   running box-wide (own FIFO, not the delegate cap). Model = the draft's `model`, else Auto. **A trial is part of a task the user asked
   for, not optional background work, so the background budget never refuses it** (its level, even "off", and its dollar cap don't apply):
   usage is only *counted* — booked with `budget.book` (work type `agent-trial`) — and the hard limits above are the bounds. (The first
   version asked `budget.canSpend` before each case; with the background level off every case was refused and the Architect could never propose.)
-  **A trial in which no case started** (every case was refused before the agent was given its task: a project that couldn't be copied, settings
-  or the project's command list that couldn't be read, an aborted round) **counts toward neither the per-agent nor the per-task limit**; a trial
-  that is still running counts, and so does one whose case started, whatever its end.
 - **Recorded per case:** end state (done / failed / timed out / aborted), final answer, tools used, files changed (diff
   stat), refused actions (permission denials), "would ask" questions, duration, transcript text (redacted with the
   knowledge `scanner.redact`; the final answer, "would ask", refused and error texts too — and if the scanner can't run, **all**
@@ -257,15 +253,15 @@ did not come from an Architect task; the Architect's own record is left as it wa
   is refused until the folder is given. The server reads the folder and copies the files, so **no fetched page is needed**: its provenance is the
   folder itself, its `SOURCE.md` (the ones we wrote when it was copied: origin, repo, ref, licence are carried forward) and its SKILL.md frontmatter
   (`license`, `version`, `repository`); `SOURCE.md` of the adopted skill reads `Origin: installed on this box: <name>`, `Source id: installed:<name>`,
-  repo / ref `unknown` when the skill names none, and, for a part, `Left out: scripts`. `taken: "part"` takes SKILL.md plus the paths in `take` (files or
-  folders, e.g. `["reference"]`), so the text guidance of a skill whose scripts the agent can't run can be taken without them. **Still applied:** the
+  repo / ref `unknown` when the skill names none, and, for a part, `Left out: <the paths not taken>`. `taken: "part"` takes SKILL.md plus the paths in `take` (files or
+  folders, e.g. `["reference"]`), to leave out files that are irrelevant to the job (not scripts to be safe: the independent review below decides about those). **Still applied:** the
   licence allowlist (the licence is read from the skill's SOURCE.md, then its frontmatter, else its licence file, and the two must agree; none stated or
   one not on the list refuses; a licence file found in the folder travels as `LICENSE`); path rules (relative, ≤ 4 folders, no `..`, no leading dot — hidden
   entries are skipped), no link in anything taken (a link in a part left out is not looked at), UTF-8 text only, ≤ 256 KiB a file, case-folded duplicate
   paths, the generated names, the name = the skill's own frontmatter name, ≤ 300-character description, and the agent-wide ≤ 250 files / ≤ 1 MiB / ≤ 15
   skills. **Relaxed:** the per-skill 20-file and 256 KiB caps bound what a *model* must type out and nothing is typed here (the installed `impeccable`
   has well over 20 reference files and ~350 KB of them), so they don't apply; the refusal for a skill over the agent-wide cap says to take part of it. A
-  script that comes along is flagged on the card and read by the independent review exactly like any other; a part without scripts has none to review.
+  script that comes along is flagged on the card and read by the independent review exactly like any other: clean follows the user's setting (installed at the user's level), flagged waits for the click.
   Adding one still needs `skillSearch` (the installed skill is a candidate; its name is accepted as seen in `skills_installed`).
 - **Facts checked** (sources and searches are looked up across every child session of the root task — all jobs
   sharing `rootJobOf` — usually one):
@@ -342,8 +338,9 @@ did not come from an Architect task; the Architect's own record is left as it wa
   Facts: each query is in `searchesOf` for this task; each candidate `ref` appeared in one of its results or in
   `skills_installed`. Ranking (installs, stars, recency, fit) is the Architect's judgement.
 - Template process text: search before writing; prefer a proven skill; take only the parts that fit; write your own
-  only when nothing suitable exists, and say why in `skillSearch`. A skill whose scripts the agent can't run is still worth adding when its text
-  guidance fits the job: drop the scripts (`taken: "part"`) or keep them and say in the instructions that they won't run. Adopt a fitting installed
+  only when nothing suitable exists, and say why in `skillSearch`. When a skill fits, adopt it whole, scripts included: the independent script
+  review decides (clean installs at the user's level, flagged waits), so the Architect never leaves scripts out to be safe, and uses `taken: "part"` only
+  for files irrelevant to the job. (An earlier version said to drop the scripts; removed 2026-11-28.) Adopt a fitting installed
   or proven skill rather than rewriting its ideas into the instructions. (First run on the box: "create a product designer agent" left the installed
   `impeccable` skill out because "it runs commands and edits code", although most of its value is its design reference text and it has a fallback for when
   its launcher can't run.)
@@ -499,7 +496,7 @@ Plugin tools (`docs/opencode-plugins-v2/manta/tools/agents.ts`): `agent_trial`, 
   script it brings; only the per-skill 20-file / 256 KiB caps (which bound what a model types) are lifted, the agent-wide caps stay. **The honest limit:** the
   skill's licence comes from what the skill says about itself (its own SOURCE.md, frontmatter or licence file), which a folder on the user's own box could
   misstate; the check is that it is on the allowlist and agrees with its licence file, not that it is true. Trials are not gated by the background budget, so
-  they spend what the user's task would anyway (bounded by the 15-minute ceiling, 3 cases a trial and 3 / 6 trials a task).
+  they spend what the user's task would anyway (bounded by the 15-minute ceiling and 3 cases a trial).
 - Skill files are text, never executed by Manta; an agent with bash could run a script it finds in its skills. So **every script, copied or
   written, is read by an independent, tool-less check on another model before it can be released automatically** (§4.1; flagged or failed
   checks wait for a click, Never still discards); every script is flagged on the card (`skillsDiff.scripts`) and every skill file can be
@@ -610,7 +607,7 @@ tasks; learning for the lead; upstream skill diffs before an update; usage-based
 - containment → always a private copy, no shell, symlink scan, `noSecrets`, network-write denies (§3.3, §7).
 - draft hash ambiguity → canonical preimage (§3.3).
 - budget + orphans → `book` only (no refusal; see §3.3), session deletion, abort on parent end (§3.3).
-- trial cap vs 3 proposals → per-agent 3, per-task 6, a trial in which no case started counts toward neither (§3.3).
+- trial cap vs 3 proposals → trials are uncapped since 2026-11-28 (the 3-per-agent / 6-per-task caps were removed); proposals stay at 3 per task (§3.3).
 - `getSource` needs ids / searches unrecorded → `sourceId` fields, `searchesOf` (§4.1, §4.2).
 - LICENSE echoed by the model → server writes it from `licenseSourceId` (§4.1).
 - blob snapshots broke the agent.md string contract → strings kept, bundle maps added (§4.1).
