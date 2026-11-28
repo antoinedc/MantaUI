@@ -4372,6 +4372,10 @@ page + profile line (slice 3) and the repeated-work suggestions (slice 4) are se
   existing ones. `SOURCES_MAX` is 20; `BASE_SOURCE_IDS` gained `packages` / `stackoverflow`; `LEGACY_BASE_SOURCE_IDS` is FROZEN at the old set.
   Channels `research:sources-list|save|test` (rpc.mjs; refusals are RETURNED `{ok:false, error, id?}`); hint `research.sources.updated`;
   every save recompiles the agents (`onChange` = `agents.sync()`, a config reload at most, never a restart) and clears the migration notices.
+  **A damaged or unreadable file never reads as "the defaults"** (that would turn the web and every removed source back on): `rows()` / `enabledRows()` /
+  `webEnabled()` throw a `SourcesError` (a ResearchError with a safe sentence: searches are refused with it, the outside check relays it, the compiled
+  prompts say the sources couldn't be read), `list()` returns `{sources: [], notices: [], error}`; a missing file is the defaults. The user's own save over a
+  CORRUPT file keeps it as `research-sources.json.corrupt-<ms>` (never over an earlier copy); a file that can't be read at all is never touched.
 - **Migration of the Architect's `sources:`** runs at every boot after `agents.init()` (`researchSources.migrate()`, idempotent, never fatal):
   RAW value read from the agent.md (`agents.readArchitectSources`; the parser no longer reads the key) → parsed against the OLD id set → ids that
   collide with a new built-in renamed `-mine` (`-mine-2`, … deterministic) → every source forced private → validated against the NEW rules →
@@ -4386,11 +4390,14 @@ page + profile line (slice 3) and the repeated-work suggestions (slice 4) are se
   6+ words copied from a private answer of that session. Refusal sentence is fixed; recorded as `{kind, tool}` only; FAILS CLOSED
   ("Couldn't check this query for private material; try again"). Decisions: an IP-literal DESTINATION host is exempt from the private-address test
   (nothing is sent to a resolver), an internal host NAME as destination is not; a `home|Users|Volumes/<a>/<b>` run in a URL path counts as a home
-  directory; Settings → Test is a person's own query and skips the check. Turning the `web` source off is answered by the same check for
+  directory. Every redirect hop of `research_fetch` runs the same check before its request (`fetchFollowing`'s `check` may be async). Settings →
+  Test on a user source or a built-in is a person's own query and skips the check; Test on the `web` row runs it (as `research_search`, so a
+  switched-off row can still be tried) and then OpenCode's own `POST /api/websearch` (`oc.webSearch`; the default provider; proven in the e2e). Turning the `web` source off is answered by the same check for
   `websearch` ("The source "web" is turned off in Settings → Research sources") — one mechanism for every session kind (Manta's own chat is not an
   agent block, so permission rules would have missed it); this replaces the spec's "`websearch: deny` in agent blocks" sentence.
 - **Built-in web tools are guarded by the plugin's blocking `execute.before` hook** (`docs/opencode-plugins-v2/manta/lib/webGuard.ts`, registered
-  in `index.ts`, NOT inside the fail-open block: once registered it fails closed). PROVEN on the pinned 2.0.30 binary by
+  in `index.ts`, FIRST, outside the fail-open block: once registered it fails closed; if it can't be registered the tool transform REPLACES
+  `websearch` / `webfetch` with tools that refuse every call (`refuseWebTool`), so an unguarded web tool is never left standing). PROVEN on the pinned 2.0.30 binary by
   `scripts/opencode-v2/web-guard.e2e.mjs` (a harness-only companion plugin gives `websearch` a provider that talks to a LOCAL recording server;
   a scripted model calls both tools with a secret in the query / only in the URL path, in a lead chat, an agent task, an agent conversation and a
   plain session; the recording server sees nothing; clean calls get through; web off and manta-server down refuse). **Re-run it on every
@@ -4409,7 +4416,9 @@ page + profile line (slice 3) and the repeated-work suggestions (slice 4) are se
 - **Adapters and cost controls** (`research.mjs`): `packages` (`<system>:<name>` → deps.dev v3 default version + licence + advisories +
   deprecation + newest versions; a bare word → npm registry search), `stackoverflow` (Stack Exchange 2.3: stops for the day at `quota_remaining` 0,
   honours `backoff` and `throttle_violation`); arXiv 1 request / 3 s and GitHub 10 / min through **p-throttle** (box-wide; a queue longer than 3 is
-  a refusal, not a wait); one 10-minute answer cache for identical built-in queries. Not built yet: the 30 search / 40 fetch per-turn caps (§10).
+  a refusal, not a wait); one 10-minute answer cache for identical built-in queries. **Per-turn caps** (§10): at most 30 `research_search` and 40
+  `research_fetch` calls (counted apart) per task round / chat turn; the binding names the turn (`turnKey` = session + job + the user message the call
+  answers for a task, session + user message for a chat; `scope` round|turn), counters live in memory, a binding without a turn isn't capped.
 - **Tests**: `outsideQuery.test.mjs`, `researchSources.test.mjs`, `research.test.mjs`, `researchBlock.test.mjs`, `agentsResearch.test.mjs`
   (bindings, base block, migration halves, first-boot convergence), `scripts/opencode-v2/web-guard.test.mjs` (the hook, pure) and the
   `web-guard.e2e.mjs` probe (binary).
