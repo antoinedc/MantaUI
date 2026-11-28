@@ -358,9 +358,12 @@ const MARKDOWN_MAX_CHARS = 50_000;
 export const MarkdownBody = memo(function MarkdownBody({
   text,
   fileContext,
+  headingIds = false,
 }: {
   text: string;
   fileContext?: MarkdownFileContext;
+  /** Give headings ids (rehype-slug, as the Explorer does), for a page that links to its own sections. Off for chat. */
+  headingIds?: boolean;
 }) {
   const owner = useContext(ExplorerOwnerContext);
   if (text.length > MARKDOWN_MAX_CHARS) {
@@ -374,7 +377,7 @@ export const MarkdownBody = memo(function MarkdownBody({
   const body = (
     <ReactMarkdown
       remarkPlugins={owner != null && !fileContext ? REMARK_PLUGINS_PATHS : REMARK_PLUGINS}
-      rehypePlugins={fileContext ? REHYPE_PLUGINS_FILE : undefined}
+      rehypePlugins={fileContext || headingIds ? REHYPE_PLUGINS_FILE : undefined}
       urlTransform={urlTransform}
       components={MD_COMPONENTS}
     >

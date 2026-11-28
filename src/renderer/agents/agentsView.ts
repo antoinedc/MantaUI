@@ -74,6 +74,13 @@ export function firstLine(text: string | null | undefined): string {
   return "";
 }
 
+/** The instructions without a first line that is just the agent's own name as a title (`# Product Designer`): the page already has it. */
+export function stripTitle(text: string, name: string): string {
+  const m = /^\s*#\s+(.+?)\s*(?:\r?\n|$)/.exec(text);
+  if (!m || m[1].trim().toLowerCase() !== name.trim().toLowerCase()) return text;
+  return text.slice(m[0].length).replace(/^\s*\n/, "");
+}
+
 /** "12 Nov". */
 export function dateLabel(ms: number): string {
   return new Date(ms).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
