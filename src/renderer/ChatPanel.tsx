@@ -3333,7 +3333,7 @@ export function ChatPanel({
   const clearBlock = useMemo(() => {
     if (!agentChat) return undefined;
     const starting = running
-      ? messages.flatMap((m) =>
+      ? (messages ?? []).flatMap((m) =>
           m.parts
             .filter((p) => isChatTaskStartPart(p) && ["pending", "running"].includes(String((p as { state?: { status?: string } }).state?.status ?? "")))
             .map((p) => {
