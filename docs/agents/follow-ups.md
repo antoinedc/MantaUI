@@ -486,3 +486,17 @@ Spec `docs/superpowers/specs/2026-11-28-fleet-redesign.md`; differences from the
 - **Checklist step times** in Details need durations in the progress view.
 - **Container-query layout was verified in a browser only through the demo state** (Chromium via a dev server, three widths, light and dark); the
   pixel baselines still need regenerating (`npm run visual:update`).
+
+## From the agent profile redesign (profile v5)
+
+Decided 2026-11-28 with the user; each is its own piece of work. Spec of what shipped: `docs/superpowers/specs/2026-11-28-agent-profile-redesign.md`.
+
+1. **The agent starting tasks in a project from its own chat.** This will be its own feature next. It needs two new tools for the agent — "list my projects" (its seats, with names and a one-line description, so it can match what the user said) and "start a task in project X" (the delegate path with a project argument; naming a project it has no seat in adds one, as today) — and loading that project's notes into its context once it picks one, and only that project's, so one project's memory never leaks into another. An ambiguous request asks with the ordinary question card (`question.asked`: the Team dot turns red, Needs you shows it). Until then the agent's own chat answers and plans, and work still goes through Manta; **task cards from the agent's chat are not built** (the v5 mockup sketches them, with a project chip and the branch).
+2. **Choosing the refresh day.** Each agent's refresh runs on a fixed day of the month (`refreshDay(slug)`), shown read-only in Settings. Letting the user pick it needs the routine's cron to be editable from the profile.
+3. **A learning setting per agent.** Learning has one team-wide setting (Settings → Sessions, "learn a preference"), shown read-only in each profile's Settings tab with a link. A per-agent level needs the autonomy policy to carry per-agent overrides.
+4. **Renaming the @handle.** The handle is the agent's folder name, its seats, its history and its mentions (`@dev` in old chats would stop working), so it is read-only for now. A rename has to move the folder, re-point seats, the stored chat, the refresh routine and the learned rules, and decide what an old mention does.
+
+Noted while building it:
+- **Auto-handoff can still move an agent's conversation to a successor session** (the engine knows nothing about agent chats), after which the stored chat record points at the old session. The profile hides the Hand off button; the engine should skip agent conversations the way it skips routine runs (a `manta.agentChat` marker on the session, set by `openChat` / `clearChat`).
+- **An isolation raise from Settings waits for a click in Needs you** (the change flow's rule for every caller). The user's own save could count as that click; today it does not, on purpose, because the raise gives an agent the power to edit files.
+- **An undone Settings change leaves History** (only applied changes are listed), so the reversal itself is not visible there.

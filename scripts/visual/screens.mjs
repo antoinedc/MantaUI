@@ -1319,7 +1319,7 @@ export const SCREENS = [
   },
   {
     id: "agents-profile",
-    title: "Agent profile — header, pending change, tabs (Overview, details pane)",
+    title: "Agent profile — header, Use it when / Not for, tabs (Overview: instructions and the Sections index)",
     url: "/app/index.html?demo&state=agents&desktop",
     ready: '[data-screen="session"]',
     final: ".manta-agents-profile",
@@ -1328,28 +1328,28 @@ export const SCREENS = [
       await page.locator('[data-testid="agent-row"][data-slug="seo"]').click();
       await page.waitForSelector('[data-testid="profile-header"]', { state: "visible" });
       await page.waitForSelector('[data-testid="profile-howto"]', { state: "visible" });
+      await page.waitForSelector('[data-testid="profile-instructions"]', { state: "visible" });
       await page.mouse.move(0, 0);
     },
-    mockup: "docs/screens/agents/mockup.html",
-    mockupActions: async (page) => {
-      await page.click('[data-tab="profile"]');
-    },
-    mockupReady: "section[data-screen].on",
-    mockupRegion: 'section[data-screen="profile"] .pane',
+    // Profile v5 (docs/screens/agents/profile-v5.html): the mockup draws Dev / Architect / Product Designer; the demo draws SEO.
+    mockup: "docs/screens/agents/profile-v5.html",
+    mockupReady: ".app .hero",
+    mockupRegion: ".app",
     viewport: AGENTS_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
-  // The profile's other tabs (proposal A: the same two columns on every tab), each against the approved tabs mockup.
+  // The profile's other tabs (profile v5: one column, no side pane), each against the v5 mockup.
   ...[
-    { tab: "research", title: "Agent profile — Research tab (entries with sources, library pane)", wait: '[data-testid="research-entries"]' },
-    { tab: "seats", title: "Agent profile — Seats tab (seats with access, add-a-seat pane)", wait: '[data-testid="seat-list"]' },
+    { tab: "research", title: "Agent profile — Research tab (entries with sources, the library note under them)", wait: '[data-testid="research-entries"]' },
+    { tab: "seats", title: "Agent profile — Seats tab (seats with access, add-a-seat)", wait: '[data-testid="seat-list"]' },
     {
       tab: "history",
-      title: "Agent profile — History tab (change log, the newest live change open)",
+      title: "Agent profile — History tab (applied changes, one line each, the newest open)",
       wait: '[data-testid="history-list"]',
       open: '[data-testid="history-row"][data-id="chg_3"] summary',
-      done: '[data-testid="history-row"][data-id="chg_3"] [data-testid="agent-change-card"]',
+      done: '[data-testid="history-row"][data-id="chg_3"] [data-testid="history-how"]',
     },
+    { tab: "settings", title: "Agent profile — Settings tab (fields that save when you leave them, read-only handle)", wait: '[data-testid="profile-settings"]' },
   ].map(({ tab, title, wait, open, done }) => ({
     id: `agents-profile-${tab}`,
     title,
@@ -1368,12 +1368,9 @@ export const SCREENS = [
       }
       await page.mouse.move(0, 0);
     },
-    mockup: "docs/screens/agents/profile-tabs-mockup.html",
-    mockupActions: async (page) => {
-      await page.evaluate((t) => window.__set("A", t, "light"), tab);
-    },
-    mockupReady: 'main[data-proposal="A"]',
-    mockupRegion: 'main[data-proposal="A"]',
+    mockup: "docs/screens/agents/profile-v5.html",
+    mockupReady: ".app .hero",
+    mockupRegion: ".app",
     viewport: AGENTS_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   })),
