@@ -305,6 +305,40 @@ test("with a project (the case's, else the agent's first seat) the case works in
   }
 });
 
+test("the clone runs with its own long timeout — not tmux's 10 s — bounded by the case's ceiling; other git calls keep the default", async () => {
+  const f = await rig({});
+  try {
+    const seen = [];
+    const t = f.make({ gitRun: async (args, opts) => { seen.push({ args, opts }); return { stdout: "" }; } });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    await settle(t, trialId);
+    const clone = seen.find((c) => c.args.includes("clone"));
+    assert.ok(clone.opts?.timeoutMs >= 120_000, `the clone may take minutes (got ${clone.opts?.timeoutMs})`);
+    assert.ok(clone.opts.timeoutMs <= 15 * 60_000, "never longer than a case may run");
+    assert.deepEqual(clone.args.slice(0, GIT_SAFE.length), GIT_SAFE, "still hook-safe");
+    const remote = seen.find((c) => c.args.includes("remote"));
+    assert.equal(remote.opts?.timeoutMs === undefined || remote.opts.timeoutMs >= 10_000, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a clone that takes longer than 10 s is not killed", async () => {
+  const f = await rig({});
+  try {
+    const t = f.make({ gitRun: async (args, opts) => {
+      if (args.includes("clone") && !(opts?.timeoutMs > 10_000)) throw new Error("tmux timed out after 10s");
+      return { stdout: "" };
+    } });
+    const { trialId } = await t.create(f.input({ cases: [f.caseOf("main", { project: "shop" })] }));
+    const r = await settle(t, trialId);
+    assert.notEqual(r.cases[0].error ?? "", "The copy of the project couldn't be made: tmux timed out after 10s");
+    assert.doesNotMatch(r.cases[0].error ?? "", /copy of the project/i);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("a failed clone fails the case without a session and leaves nothing behind", async () => {
   const f = await rig({ });
   try {

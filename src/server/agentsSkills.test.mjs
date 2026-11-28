@@ -8,7 +8,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, cp, readdir, access, symlink }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAgentsEngine, checkDraft } from "./agents.mjs";
+import { createAgentsEngine, checkDraft, compileAgentPrompt } from "./agents.mjs";
 import { draftHash } from "./agentTrials.mjs";
 import { parseSourceMd, renderSourceMd } from "./agentSkills.mjs";
 import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
@@ -1476,6 +1476,26 @@ test("installed: a whole installed skill is copied by the server — every file,
     assert.ok(plan.needsTrial, "a skill change needs a trial");
     // deterministic: the trial's hash equals the proposal's
     assert.equal(draftHash((await planFor(f, { skills: [adoptOp()] })).bundle), draftHash(plan.bundle));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("installed: a description over 300 characters isn't refused (the model wrote nothing) — the file is copied untouched and the compiled index clips it; a skill the model sends itself is still refused", async () => {
+  const f = await fixture();
+  try {
+    const long = `Design guidance for interfaces. ${"Use it for layouts, type, colour and motion. ".repeat(13)}`;
+    assert.ok(long.length > 500);
+    const md = DESIGN_MD.replace("Design guidance for interfaces.", long.trim());
+    await installDesign(f, { ...DESIGN_FILES, "SKILL.md": md });
+    const plan = await planFor(f, { skills: [adoptOp()] });
+    assert.equal(plan.error, undefined, plan.error);
+    assert.equal(plan.bundle["skills/design-ref/SKILL.md"], md, "the original file is kept as it is");
+    const line = compileAgentPrompt({ body: "Role", skills: [{ name: "design-ref", description: long.trim(), path: "skills/design-ref/SKILL.md" }] }).split("\n").find((l) => l.startsWith("- **design-ref**"));
+    assert.ok(line && line.length < 420, "the prompt index clips it");
+    // a file the model sends itself keeps the cap
+    const sent = SKILL_MD.replace("Audits a landing page for conversion problems.", "x".repeat(301));
+    assert.match((await planFor(f, { skills: [writtenOp({ files: [{ path: "SKILL.md", content: sent, origin: "written" }] })] })).error, /description.*300/i);
   } finally {
     await f.cleanup();
   }
