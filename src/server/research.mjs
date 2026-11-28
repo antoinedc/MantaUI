@@ -683,7 +683,7 @@ export function createResearchEngine({
   async function testSource(def, query) {
     if (def?.builtin === true) {
       if (def.id === "web") throw new ResearchError("Web search is run by OpenCode's websearch tool; ask an agent to search the web to try it");
-      if (!BASE_SEARCH_SOURCES.includes(def.id) && def.id !== "reddit" && def.id !== "x") throw new ResearchError(`Unknown source "${def.id}"`);
+      if (!BASE_SEARCH_SOURCES.includes(def.id)) throw new ResearchError(`Unknown source "${def.id}"`);
       const refused = queryRefusal(query);
       if (refused) throw new ResearchError(refused);
       const results = (await queryBuiltin(def.id, query)).results ?? [];
