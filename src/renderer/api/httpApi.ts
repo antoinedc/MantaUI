@@ -1362,6 +1362,10 @@ export const httpApi: Api = {
   agentsCreate: (input) => rpc(IPC.agentsCreate, input),
   agentsDispatch: (input) => rpc(IPC.agentsDispatch, input),
   agentsOpenChat: (input) => rpc(IPC.agentsOpenChat, input),
+  agentsSettingsSet: (input) => rpc(IPC.agentsSettingsSet, input),
+  agentsClearChat: (input) => rpc(IPC.agentsClearChat, input),
+  agentsChats: () => rpc(IPC.agentsChats),
+  agentsApprovedModels: () => rpc(IPC.agentsApprovedModels),
   agentsAutonomyGet: () => rpc(IPC.agentsAutonomyGet),
   agentsAutonomySet: (input) => rpc(IPC.agentsAutonomySet, input),
   // Agents Phase 4: Manta's proposed / applied agent changes (the chat card). A refusal is a thrown sentence.

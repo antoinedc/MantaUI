@@ -81,6 +81,28 @@ const SEO_RULES = {
   ccbot: "Block CCBot in robots.txt on every host.",
   llms: "Check that llms.txt is served at the site root and lists the key pages.",
 };
+/** The instructions the demo profile's Overview draws: three sections, so the Sections index shows. */
+const SEO_INSTRUCTIONS = [
+  "You are SEO. You audit marketing sites for visibility in AI search and report what you find.",
+  "",
+  "## How you work",
+  "",
+  `- ${SEO_RULES.audit}`,
+  `- ${SEO_RULES.hreflang}`,
+  `- ${SEO_RULES.crawl}`,
+  "",
+  "## Before you change anything",
+  "",
+  `- **${SEO_RULES.redirects}**`,
+  "- Say what you would change and why, with the page it affects.",
+  "",
+  "## What you never do",
+  "",
+  "- Publish, buy links or rewrite brand copy.",
+  "- Present a single \"rank\" as a measurement: visibility is measured over many runs.",
+  "",
+].join("\n");
+
 const SEO_V1 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang);
 const SEO_V2 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang, SEO_RULES.redirects);
 const SEO_V3 = seoMd(SEO_RULES.audit, SEO_RULES.hreflang, SEO_RULES.redirects, SEO_RULES.crawl, SEO_RULES.gptbot, SEO_RULES.ccbot);
@@ -231,7 +253,8 @@ export function demoProfile(slug: string): AgentProfile {
     ],
     lastChangedAt: at(12),
     builtBy: "architect",
-    refresh: { enabled: true, routineId: "rt_demo" },
+    refresh: { enabled: true, routineId: "rt_demo", day: 12 },
+    instructions: SEO_INSTRUCTIONS,
     research: [
       {
         id: "r1",
@@ -343,6 +366,10 @@ export const demoAgentsApi = {
   agentsTaskResearch: ok([]),
   agentsChangesForJob: ok([]),
   agentsOpenChat: () => Promise.reject(new Error("Not available in the demo.")),
+  agentsSettingsSet: () => Promise.reject(new Error("Not available in the demo.")),
+  agentsClearChat: () => Promise.reject(new Error("Not available in the demo.")),
+  agentsChats: ok({}),
+  agentsApprovedModels: ok(["anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-6-sol"]),
   agentsQuestionAnswer: () => Promise.reject(new Error("Not available in the demo.")),
   agentsQuestionDismiss: () => Promise.reject(new Error("Not available in the demo.")),
   agentsChangeApply: () => Promise.reject(new Error("Not available in the demo.")),

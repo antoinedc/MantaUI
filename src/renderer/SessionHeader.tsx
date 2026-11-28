@@ -125,6 +125,7 @@ export function SessionHeader({
   onCreatePr,
   onEnsureShipPreview,
   routineChrome,
+  agentConversation,
 }: {
   // The conversation this header belongs to — the context popover names its
   // seat (multi-account). Absent: no seat line.
@@ -233,6 +234,10 @@ export function SessionHeader({
   // the session menu and the stale-cache "Clear session" are not offered
   // (a run has no window to clear or delete).
   routineChrome?: { crumb: ReactNode; tag: ReactNode; lead: ReactNode };
+  // An AGENT's conversation (profile v5): the crumb reads "Team / <Name>"; there is no branch chip, forge item, Explorer toggle or
+  // hand-off (it runs from the agent's home folder, and one conversation is summarized in place); a Profile button goes back to the
+  // agent; the session menu holds only "Summarize earlier messages now" and "Clear conversation…".
+  agentConversation?: { name: string; onOpenProfile: () => void };
 }) {
   const { pct, hasLimit, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -255,14 +260,16 @@ export function SessionHeader({
   // The Explorer's Expanded mode folds this header away; its top bar then
   // carries the sidebar restore button instead, so exactly one copy shows.
   const explorerExpanded = useExplorerExpanded(sessionId ?? null) && hasOwnerWindow;
-  const crumb = breadcrumb
+  const crumb = agentConversation
+    ? `Team / ${agentConversation.name}`
+    : breadcrumb
     ? breadcrumb.window
       ? `${breadcrumb.project} / ${breadcrumb.window}`
       : breadcrumb.project
     : "";
   // BET-724 §D7: the confirm dialogs for Delete/Clear name the session — the
   // window name reads better than the full "project / window" breadcrumb.
-  const sessionName = breadcrumb?.window ?? breadcrumb?.project ?? "this session";
+  const sessionName = agentConversation?.name ?? breadcrumb?.window ?? breadcrumb?.project ?? "this session";
   // BET-968: the single confirm-dialog state. Clear has TWO triggers (the
   // context pill's stale-cache block and the ⋯ menu) and Delete has one — both
   // dialogs are hoisted here so SessionMenu stops owning dialog state and the
@@ -275,13 +282,13 @@ export function SessionHeader({
   // connecting GitHub adds no chrome by itself.
   // The chip itself is the box's (`view.checks.chip`); only its registry
   // priority — layout — lives here (red is pinned, green/yellow overflow first).
-  const boxChip = view?.checks.chip ?? null;
+  const boxChip = agentConversation ? null : view?.checks.chip ?? null;
   const checksDesc = boxChip
     ? { label: boxChip.label, tone: boxChip.tone as ChecksChipTone, priority: boxChip.tone === "danger" ? 90 : 40 }
     : null;
   // The one-line connect offer — only in a forge-origin session while the
   // forge is disconnected and the offer has not been permanently dismissed.
-  const offerConnect = shouldOfferForgeConnect({
+  const offerConnect = !agentConversation && shouldOfferForgeConnect({
     connected: forgeConnected ?? false,
     forgeKind: forgeKind ?? null,
     dismissed: forgeConnectOfferDismissed ?? false,
@@ -290,7 +297,7 @@ export function SessionHeader({
   // BET-867: the one decision driving the branch chip — plain non-interactive
   // Tag (no branch / no forge) vs. the interactive branch popover in its
   // no-PR or PR state.
-  const branchState = routineChrome ? "none" : view?.panel ?? "none";
+  const branchState = routineChrome || agentConversation ? "none" : view?.panel ?? "none";
 
   // ===== Status-item registry (BET-782) =====
   // The right group is a REGISTRY, not hand-ordered JSX. Each entry is a
@@ -369,7 +376,7 @@ export function SessionHeader({
           modelName={modelName}
           staleCache={staleCache}
           onRequestClear={routineChrome ? undefined : () => setConfirm("clear")}
-          onHandOff={readOnly || !handoff ? undefined : handoff.onHandOff}
+          onHandOff={readOnly || !handoff || agentConversation ? undefined : handoff.onHandOff}
         />
       ),
     });
@@ -378,7 +385,7 @@ export function SessionHeader({
   // keeps insertion order). Chat sessions only: it needs an owning window to
   // resolve the session folder from. 81 so it is never auto-hidden (≥ 80) and
   // is not id-tie-sorted behind "artifacts" (selectStatusItems).
-  if (artifactsToggle && sessionId && hasOwnerWindow) {
+  if (artifactsToggle && sessionId && hasOwnerWindow && !agentConversation) {
     registry.push({
       id: "explorer",
       priority: 81,
@@ -417,6 +424,7 @@ export function SessionHeader({
       priority: 100,
       render: () => (
         <SessionMenu
+          agentConversation={!!agentConversation}
           mode={mode}
           onModeChange={onModeChange}
           availableLaunchers={availableLaunchers}
@@ -494,7 +502,7 @@ export function SessionHeader({
           onOpenExternal={onOpenExternal}
           onReviewChanges={onReviewChanges}
         />
-      ) : branch && !routineChrome ? (
+      ) : branch && !routineChrome && !agentConversation ? (
         <Tag
           size="sm"
           icon={<GitBranch size={11} aria-hidden="true" className="shrink-0" />}
@@ -506,7 +514,7 @@ export function SessionHeader({
 
       {/* An older box sends no `view`: the branch stays a plain tag and this
             says why, only when GitHub is connected (nothing else to explain). */}
-      {forgeViewOutdated && forgeConnected && (
+      {forgeViewOutdated && forgeConnected && !agentConversation && (
         <span className="shrink-0 text-[11px] text-text-quiet" data-testid="forge-view-outdated">
           Update your box to see pull requests and checks here.
         </span>
@@ -522,6 +530,11 @@ export function SessionHeader({
         style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
       >
         {routineChrome?.lead}
+        {agentConversation && (
+          <Button tone="ghost" onClick={agentConversation.onOpenProfile} title={`Open ${agentConversation.name}'s profile`}>
+            Profile
+          </Button>
+        )}
         {visible.map((it) => (
           <Fragment key={it.id}>{it.render()}</Fragment>
         ))}
@@ -549,9 +562,13 @@ export function SessionHeader({
       />
       <ConfirmModal
         open={confirm === "clear"}
-        title="Clear this conversation?"
-        body="The session keeps running but its context is gone."
-        confirmLabel="Clear"
+        title={agentConversation ? `Clear your conversation with ${agentConversation.name}?` : "Clear this conversation?"}
+        body={
+          agentConversation
+            ? `Starts a new conversation with ${agentConversation.name}. What it learned from your corrections and each project's notes are kept.`
+            : "The session keeps running but its context is gone."
+        }
+        confirmLabel={agentConversation ? "Clear conversation" : "Clear"}
         onConfirm={() => {
           setConfirm(null);
           onClear();
@@ -955,6 +972,7 @@ const GROUP_LABEL =
   "px-2 pb-2 text-micro font-semibold uppercase text-text-faint select-none";
 
 function SessionMenu({
+  agentConversation = false,
   mode,
   onModeChange,
   availableLaunchers,
@@ -965,6 +983,8 @@ function SessionMenu({
   previous,
   onOpenPrevious,
 }: {
+  /** An agent's conversation: only Summarize and Clear (there is one conversation per agent: nothing to fork, delete, move or switch). */
+  agentConversation?: boolean;
   mode?: SessionMode;
   onModeChange?: (m: SessionMode) => void;
   availableLaunchers?: AvailableLauncher[];
@@ -1127,6 +1147,13 @@ function SessionMenu({
         panelRef={panelRef}
         onKeyDown={onMenuKeyDown}
       >
+        {agentConversation ? (
+          <>
+            {item(<Minimize2 size={14} aria-hidden="true" />, "Summarize earlier messages now", onCompact)}
+            {item(<Eraser size={14} aria-hidden="true" />, "Clear conversation…", onRequestClear)}
+          </>
+        ) : (
+        <>
         {hasMode && (
           <>
             <div className={`${GROUP_LABEL} pt-1`} role="presentation">
@@ -1186,6 +1213,8 @@ function SessionMenu({
           "Delete session",
           onRequestDelete,
           true,
+        )}
+        </>
         )}
       </Dropdown>
     </>

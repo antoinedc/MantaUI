@@ -4319,6 +4319,15 @@ Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `
   ignores it and `file://` would drop the history a trial agent may read). An installed skill taken by reference is NOT refused for a description over 300
   characters (the model wrote nothing; the file is copied untouched and the compiled index clips it) — the cap still holds for a SKILL.md the model sends.
 
+## Agent profile, Team section and the agent conversation (profile v5)
+
+Spec `docs/superpowers/specs/2026-11-28-agent-profile-redesign.md`; mockup `docs/screens/agents/profile-v5.html`.
+
+- **Settings save through the change flow.** `agents:settings-set {slug, field, value}` (`settingsSet` in `agents.mjs`) validates with `planChange`, writes an `update` record with `origin: {kind:"settings"}`, and applies it as the user's own click (so at Ask too); Undo is the ordinary `agents:change-undo`. The one exception is an isolation RAISE, which waits as a `pending` record (reason `isolation`) in Needs you like any raise. Manta and the Architect refuse every field but the Architect's model.
+- **The agent conversation.** `agents:open-chat` (one session per agent, `.chat.json`) is unchanged; `agents:clear-chat` makes a NEW session with the agent's own key and re-points the chat record and the open window (the generic `/clear` would drop the agent); `agents:chats` (slug → session id) is how the sidebar and `ChatPanel` know which window is whose — never by window name, which Settings can change. `ChatPanel` hides the branch chip, Explorer, fork, delete, plan chip, trust toggle and schedules / secrets / webhooks for such a window (`useAgentConversation`, `SessionHeader`'s `agentConversation`, `InputArea`'s `agentChat`) and KEEPS the model picker, which starts on the agent's own model.
+- **Team section** (`TeamBlock` in `Sidebar.tsx`): one session row per valid agent except the Architect; the dot is `dotFor` of the conversation's window, which already rolls up its running tasks.
+- Profile History lists applied changes only; pending ones are in Needs you.
+
 ## Open work (as of 2026-05-18)
 
 - **Open subagent as its own chat-mode window.** Phase 1 ships read-only

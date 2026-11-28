@@ -249,6 +249,7 @@ describe("changeAuthor", () => {
   it("names who made the change: the Architect, you, a shipped built-in version, else Manta", () => {
     expect(changeAuthor({ origin: { kind: "job", jobId: "j", rootJobId: "j", attempt: 1 } })).toBe("Architect");
     expect(changeAuthor({ origin: { kind: "restore", fromChangeId: "x" } })).toBe("You");
+    expect(changeAuthor({ origin: { kind: "settings", field: "isolation" } })).toBe("You"); // a raise from the profile waits in Needs you
     expect(changeAuthor({ origin: { kind: "template-update", templateHash: "h" } })).toBe("Built-in update");
     expect(changeAuthor({ origin: { kind: "chat" } })).toBe("Manta");
   });

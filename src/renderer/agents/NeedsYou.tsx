@@ -165,7 +165,7 @@ function ChangeItem({ item, agents, offline, busyOpen, onOpen, onSettled }: { it
   const who =
     origin === "job"
       ? { name: "Architect", info: architect, slug: "architect" }
-      : origin === "restore"
+      : origin === "restore" || origin === "settings"
         ? { name: "You", info: undefined, slug: change.slug ?? "you" }
         : { name: lead?.name || "Manta", info: lead ?? undefined, slug: lead?.slug ?? "manta" };
   const pending = change.state === "pending";

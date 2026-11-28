@@ -7,9 +7,8 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, cp, symlink, lstat } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODES } from "../shared/autonomyShared.mjs";
 import { createAgentsEngine, pruneChangeRecords, fleetRecap, refreshDay, AgentError, CHANGE_KEEP_MS, CHANGE_MAX, AGENT_CHANGE_OFF, AGENTS_TMUX_SESSION } from "./agents.mjs";
-import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
+import { baseEngineDeps } from "./fixtures/agentEngineDeps.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const DAY = 24 * 60 * 60 * 1000;
@@ -56,18 +55,8 @@ async function fixture({ extra = {}, level = "auto", templates = ["dev", "manta"
   const config = { cfg: { agent: {} }, edits: [], reloads: 0 };
   const make = (over = {}) =>
     createAgentsEngine({
-      root,
-      templatesDir,
-      home: "/h",
-      now: () => w.clock,
-      isGitRepo: async () => true,
+      ...baseEngineDeps({ root, templatesDir, config, w }),
       branchState: async (i) => (w.branchCalls.push(i), w.branches[i.branch] ?? "unmerged"),
-      editConfig: fakeConfigWriter(config),
-      reload: async () => ({ ok: true, reloaded: true }),
-      log: { warn: () => {} },
-      retryDelayMs: 0,
-      autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: w.level }),
-      publish: (p) => w.pubs.push(p),
       oc: { listMessages: async () => [], readSession: async () => ({ state: "found", session: { id: "ses", directory: "/repo/site" } }) },
       delegate: {
         startJob: async (i) => (w.startJobs.push(i), w.startResult),
@@ -1064,9 +1053,9 @@ test("refresh provisioning: every team agent gets one monthly routine on sync; t
     f.w.routines.delete("rt3"); // (rt2 is the team check-up)
     await f.engine.sync();
     assert.equal(f.w.routineCalls.filter((c) => c[0] === "create" && c[1].kind === "agent-refresh").length, 2, "nothing recreated");
-    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1" });
-    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt3" });
-    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null });
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: false, routineId: "rt1", day: refreshDay("dev") });
+    assert.deepEqual((await f.engine.profile("scout")).refresh, { enabled: false, routineId: "rt3", day: refreshDay("scout") });
+    assert.deepEqual((await f.engine.profile("manta")).refresh, { enabled: false, routineId: null, day: null }, "the lead has no refresh, so no day");
   } finally {
     await f.cleanup();
   }
@@ -1076,7 +1065,7 @@ test("refresh toggle: Off disables the routine, On enables it, a missing routine
   const f = await fixture();
   try {
     await f.engine.init();
-    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1" });
+    assert.deepEqual((await f.engine.profile("dev")).refresh, { enabled: true, routineId: "rt1", day: refreshDay("dev") });
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: false }), { enabled: false, routineId: "rt1" });
     assert.deepEqual(f.w.routineCalls.at(-1), ["update", "rt1", { enabled: false }]);
     assert.deepEqual(await f.engine.refreshSet({ slug: "dev", enabled: true }), { enabled: true, routineId: "rt1" });

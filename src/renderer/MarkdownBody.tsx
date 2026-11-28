@@ -48,29 +48,34 @@ export function renderMarkdown(text: string): React.ReactNode {
 type MdNode = { type: string; value?: string; url?: string; children?: MdNode[] };
 const NO_LINKIFY = new Set(["link", "linkReference", "inlineCode", "code", "html", "definition"]);
 
-function linkifyTextNodes(node: MdNode): void {
+/** Replace every plain-text node (outside NO_LINKIFY nodes) that `split` turns into pieces: `[{ start, end, link }]` becomes text / link nodes. */
+type TextSplit = { start: number; end: number; url: string; text: string };
+function rewriteTextNodes(node: MdNode, find: (text: string) => TextSplit[]): void {
   const kids = node.children;
   if (!kids || NO_LINKIFY.has(node.type)) return;
   for (let i = 0; i < kids.length; i++) {
     const kid = kids[i];
     if (kid.type !== "text" || !kid.value) {
-      linkifyTextNodes(kid);
+      rewriteTextNodes(kid, find);
       continue;
     }
-    const links = findLinks(kid.value);
-    if (links.length === 0) continue;
+    const found = find(kid.value);
+    if (found.length === 0) continue;
     const parts: MdNode[] = [];
     let at = 0;
-    for (const l of links) {
-      if (l.start > at) parts.push({ type: "text", value: kid.value.slice(at, l.start) });
-      parts.push({ type: "link", url: l.href, children: [{ type: "text", value: l.text }] });
-      at = l.end;
+    for (const m of found) {
+      if (m.start > at) parts.push({ type: "text", value: kid.value.slice(at, m.start) });
+      parts.push({ type: "link", url: m.url, children: [{ type: "text", value: m.text }] });
+      at = m.end;
     }
     if (at < kid.value.length) parts.push({ type: "text", value: kid.value.slice(at) });
     kids.splice(i, 1, ...parts);
     i += parts.length - 1;
   }
 }
+
+const linkifyTextNodes = (node: MdNode): void =>
+  rewriteTextNodes(node, (text) => findLinks(text).map((l) => ({ start: l.start, end: l.end, url: l.href, text: l.text })));
 
 function remarkLinkifySchemeless() {
   return (tree: MdNode) => linkifyTextNodes(tree);
@@ -82,33 +87,8 @@ function remarkLinkifySchemeless() {
 // same plain text as before. Same skip rules as the URL pass (NO_LINKIFY).
 const FILE_SCHEME = "manta-file:";
 
-function linkPathTextNodes(node: MdNode): void {
-  const kids = node.children;
-  if (!kids || NO_LINKIFY.has(node.type)) return;
-  for (let i = 0; i < kids.length; i++) {
-    const kid = kids[i];
-    if (kid.type !== "text" || !kid.value) {
-      linkPathTextNodes(kid);
-      continue;
-    }
-    const found = findPaths(kid.value);
-    if (found.length === 0) continue;
-    const parts: MdNode[] = [];
-    let at = 0;
-    for (const m of found) {
-      if (m.start > at) parts.push({ type: "text", value: kid.value.slice(at, m.start) });
-      parts.push({
-        type: "link",
-        url: `${FILE_SCHEME}${encodeURIComponent(m.raw)}`,
-        children: [{ type: "text", value: m.raw }],
-      });
-      at = m.end;
-    }
-    if (at < kid.value.length) parts.push({ type: "text", value: kid.value.slice(at) });
-    kids.splice(i, 1, ...parts);
-    i += parts.length - 1;
-  }
-}
+const linkPathTextNodes = (node: MdNode): void =>
+  rewriteTextNodes(node, (text) => findPaths(text).map((m) => ({ start: m.start, end: m.end, url: `${FILE_SCHEME}${encodeURIComponent(m.raw)}`, text: m.raw })));
 
 function remarkLinkPaths() {
   return (tree: MdNode) => linkPathTextNodes(tree);
@@ -358,9 +338,12 @@ const MARKDOWN_MAX_CHARS = 50_000;
 export const MarkdownBody = memo(function MarkdownBody({
   text,
   fileContext,
+  headingIds = false,
 }: {
   text: string;
   fileContext?: MarkdownFileContext;
+  /** Give headings ids (rehype-slug, as the Explorer does), for a page that links to its own sections. Off for chat. */
+  headingIds?: boolean;
 }) {
   const owner = useContext(ExplorerOwnerContext);
   if (text.length > MARKDOWN_MAX_CHARS) {
@@ -374,7 +357,7 @@ export const MarkdownBody = memo(function MarkdownBody({
   const body = (
     <ReactMarkdown
       remarkPlugins={owner != null && !fileContext ? REMARK_PLUGINS_PATHS : REMARK_PLUGINS}
-      rehypePlugins={fileContext ? REHYPE_PLUGINS_FILE : undefined}
+      rehypePlugins={fileContext || headingIds ? REHYPE_PLUGINS_FILE : undefined}
       urlTransform={urlTransform}
       components={MD_COMPONENTS}
     >

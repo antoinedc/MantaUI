@@ -2794,3 +2794,29 @@ test("sessions:close with nothing named is a refusal, not a silent success", asy
     assert.equal(res.message, "No window was named.");
   }
 });
+
+test("profile redesign: agents:settings-set, agents:clear-chat and agents:chats call the engine with their one object", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  deps.agents = {
+    settingsSet: async (i) => (seen.push(["settingsSet", i]), { outcome: "saved", change: { id: "ach_1" } }),
+    clearChat: async (i) => (seen.push(["clearChat", i]), { sessionId: "ses_2", windowIndex: 3 }),
+    chats: async () => (seen.push(["chats"]), { dev: "ses_1" }),
+    approvedModels: async () => ["a/b"],
+  };
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["agents:settings-set"]({ slug: "dev", field: "name", value: "Developer" }), { outcome: "saved", change: { id: "ach_1" } });
+  assert.deepEqual(await handlers["agents:clear-chat"]({ slug: "dev" }), { sessionId: "ses_2", windowIndex: 3 });
+  assert.deepEqual(await handlers["agents:chats"](), { dev: "ses_1" });
+  assert.deepEqual(await handlers["agents:approved-models"](), ["a/b"]);
+  assert.deepEqual(seen, [["settingsSet", { slug: "dev", field: "name", value: "Developer" }], ["clearChat", { slug: "dev" }], ["chats"]]);
+  // a refusal is its sentence (400); anything else is a safe literal
+  deps.agents.settingsSet = async () => {
+    throw Object.assign(new Error("The description can be at most 200 characters"), { rpcStatus: 400 });
+  };
+  await assert.rejects(handlers["agents:settings-set"]({ slug: "dev", field: "description", value: "x" }), /at most 200/);
+  deps.agents.clearChat = async () => {
+    throw new Error("EACCES: /home/dev/.manta/agents/dev/.chat.json");
+  };
+  await assert.rejects(handlers["agents:clear-chat"]({ slug: "dev" }), (e) => e.rpcStatus === 500 && !/EACCES|\.chat\.json/.test(e.message));
+});

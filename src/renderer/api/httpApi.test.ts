@@ -908,6 +908,10 @@ describe("httpApi agent-screens channels", () => {
     { name: "agentsFleetSeen", call: () => httpApi.agentsFleetSeen(), channel: "agents:fleet-seen", args: [] },
     { name: "agentsProfile", call: () => httpApi.agentsProfile({ slug: "seo" }), channel: "agents:profile", args: [{ slug: "seo" }] },
     { name: "agentsHistory", call: () => httpApi.agentsHistory({ slug: "seo" }), channel: "agents:history", args: [{ slug: "seo" }] },
+    { name: "agentsSettingsSet", call: () => httpApi.agentsSettingsSet({ slug: "seo", field: "name", value: "SEO" }), channel: "agents:settings-set", args: [{ slug: "seo", field: "name", value: "SEO" }] },
+    { name: "agentsClearChat", call: () => httpApi.agentsClearChat({ slug: "seo" }), channel: "agents:clear-chat", args: [{ slug: "seo" }] },
+    { name: "agentsApprovedModels", call: () => httpApi.agentsApprovedModels(), channel: "agents:approved-models", args: [] },
+    { name: "agentsChats", call: () => httpApi.agentsChats(), channel: "agents:chats", args: [] },
     { name: "agentsChangeRestore", call: () => httpApi.agentsChangeRestore({ id: "ach_1" }), channel: "agents:change-restore", args: [{ id: "ach_1" }] },
     {
       name: "agentsSeatAdd",

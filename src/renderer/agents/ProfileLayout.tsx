@@ -1,32 +1,26 @@
-// The profile's two-column page body, the same on every tab (proposal A): the tab's content on the left, one tinted pane on the
-// right holding that tab's facts and actions. Below ~720px of the page's OWN width (a container query, not the window's) the pane
-// stacks under the content. Titles inside the pane are one step quieter than the content's; groups are separated by hairlines.
+// Tab bodies of the profile (profile v5: no side column). A tab's content, then — when it has one — a quiet block under it holding that
+// tab's facts and actions (what a seat is, how the library is kept, how rules are learned). Titles inside the block are one step
+// quieter than the content's; groups are separated by hairlines. The component keeps its old names so the tabs' own code is untouched.
 
 import type { ReactNode } from "react";
 import { PaneTitle } from "./AgentsParts";
 
-/** The content column and its pane. Every panel is in the page at once (the others `hidden`), so tests and callers scope by panel. */
+/** The content and, under it, the tab's own block. Every panel is in the page at once (the others `hidden`), so tests and callers scope by panel. */
 export function TwoColumn({ main, pane }: { main: ReactNode; pane: ReactNode }) {
   return (
-    <div className="[container-type:inline-size]">
-      <div data-testid="profile-grid" className="grid grid-cols-1 items-start gap-8 [@container(min-width:720px)]:grid-cols-[minmax(0,1fr)_18rem]">
-        <div data-testid="profile-main" className="flex min-w-0 flex-col gap-8">
-          {main}
-        </div>
-        {pane}
+    <div className="flex flex-col gap-8">
+      <div data-testid="profile-main" className="flex min-w-0 flex-col gap-8">
+        {main}
       </div>
+      {pane}
     </div>
   );
 }
 
-/** The tinted pane: one region, `sticky` while the two columns sit side by side; dark adds an inset hairline (the surface step is subtle). */
+/** The tab's own block: one region under the content, set off by a hairline (never a side column, never tinted). */
 export function Pane({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <aside
-      aria-label={label}
-      data-testid="profile-pane"
-      className="manta-agents-details min-w-0 rounded-lg bg-bg-elev p-4 top-4 [@container(min-width:720px)]:sticky [[data-theme=dark]_&]:shadow-[inset_0_0_0_1px_var(--border-subtle)]"
-    >
+    <aside aria-label={label} data-testid="profile-pane" className="manta-agents-details min-w-0 border-t border-border-subtle pt-4">
       {children}
     </aside>
   );

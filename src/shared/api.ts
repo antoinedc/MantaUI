@@ -45,6 +45,7 @@ import type {
   AgentInfo,
   AgentCreateInput,
   AgentChange,
+  AgentSettingsField,
   AgentChangeEvent,
   AgentFleet,
   FleetTasks,
@@ -2002,6 +2003,14 @@ export interface Api {
   agentsCreate(input: AgentCreateInput): Promise<AgentInfo>;
   agentsDispatch(input: AgentDispatchInput): Promise<{ jobId: string }>;
   agentsOpenChat(input: { slug: string }): Promise<{ tmuxSession: string; windowIndex: number }>;
+  /** One field of an agent saved from its profile, through the change flow. `waiting`: an isolation raise, which waits for a click in Needs you. */
+  agentsSettingsSet(input: { slug: string; field: AgentSettingsField; value: string | null }): Promise<{ outcome: "saved" | "waiting" | "unchanged"; change: AgentChange | null }>;
+  /** Clear conversation: a new session for the agent; `windowIndex` is the open window that now carries it (null when none is open). */
+  agentsClearChat(input: { slug: string }): Promise<{ sessionId: string; windowIndex: number | null }>;
+  /** Each agent's stored conversation, slug → session id (the sidebar's Team rows). */
+  agentsChats(): Promise<Record<string, string>>;
+  /** The models an agent may be pinned to (the Model select), "provider/model" keys; empty when the box can't tell. */
+  agentsApprovedModels(): Promise<string[]>;
   // Agents, Phase 4: Manta's proposed / applied agent changes (the card). Errors are thrown sentences.
   agentsChangeFor(input: { sessionID: string; messageID: string; callID: string }): Promise<AgentChange | null>;
   agentsChangeApply(id: string): Promise<AgentChange>;

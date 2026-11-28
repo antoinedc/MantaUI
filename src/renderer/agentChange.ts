@@ -231,7 +231,7 @@ export function changedLineCount(change: Pick<AgentChange, "kind" | "before" | "
 export function changeAuthor(change: Pick<AgentChange, "origin">): string {
   if (change.origin.kind === "template-update") return "Built-in update";
   if (change.origin.kind === "learned") return "Manta";
-  return change.origin.kind === "job" ? "Architect" : change.origin.kind === "restore" ? "You" : "Manta";
+  return change.origin.kind === "job" ? "Architect" : change.origin.kind === "restore" || change.origin.kind === "settings" ? "You" : "Manta";
 }
 
 // ---------------------------------------------------------------------------
