@@ -1532,8 +1532,9 @@ const delegateEngine = createDelegateEngine({
   moveSession: (sid, directory) => oc.moveSession(sid, directory),
   sendChildPrompt: (input) => oc.sendPrompt(input),
   // Shared knowledge: a job's project is its worktree's, known only once it has been moved there.
-  // (a switched-off layer answers `{disabled:true}`: a task that must be pinned to its project then has no notes to serve, which is not a failed pin)
-  pinKnowledgeSession: async (args) => ((await knowledgeEngine.isEnabled()) ? knowledgeEngine.pinSession(args) : { disabled: true }),
+  // A task that must be pinned to its project (an agent's conversation task) gets the boundary closed: `{disabled:true}` only when the layer is
+  // explicitly off; "couldn't check" throws (the launch is refused, nothing is sent) — see knowledge `pinForTask`.
+  pinKnowledgeSession: (args) => knowledgeEngine.pinForTask(args),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   // N7 result to the parent: an admission like any other (§6.1) — a replaced

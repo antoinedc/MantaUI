@@ -5,12 +5,12 @@
 // kept, starting on the agent's own model and free to be changed for this conversation. Clear conversation starts a new session for
 // the agent through its own channel (the generic /clear would drop the agent).
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { resetPackageAgentsForTest } from "./packageAgents";
 import { resetAgentSessionsForTest } from "./useAgentChats";
-import { emitStreamAndFlush, installMockApi, mount, resetStore, type Harness, type MockApi, type MockEventBus } from "./testHarness";
+import { emitStreamAndFlush, installDialogPolyfill, installMockApi, mount, resetStore, type Harness, type MockApi, type MockEventBus } from "./testHarness";
 import { useStore } from "./store";
 
 const DEV = { slug: "dev", name: "Dev", description: "Writes code.", isolation: "worktree", model: "openai/gpt-6-sol", color: null, builtIn: true, role: "specialist", useWhen: null, notFor: null, notice: null };
@@ -20,6 +20,7 @@ const MODELS = [
 ];
 
 describe("ChatPanel — an agent's conversation", () => {
+  beforeAll(installDialogPolyfill);
   let h: Harness | null = null;
   let api: MockApi;
   let bus: MockEventBus;
@@ -173,7 +174,10 @@ describe("ChatPanel — an agent's conversation", () => {
     expect(alertText()).toBe("Dev has 2 tasks running from this conversation; wait for them or stop them first.");
     expect(byText("Close")).toBeTruthy();
     expect(byText("Open Fleet")).toBeTruthy();
-    expect(h!.container.textContent).not.toContain("running from this conversation");
+    // the box's sentence is in the dialog only: no stray banner in the panel itself
+    const panel = h!.container.cloneNode(true) as HTMLElement;
+    panel.querySelectorAll("dialog").forEach((d) => d.remove());
+    expect(panel.textContent).not.toContain("running from this conversation");
     await act(async () => byText("Close")!.click());
     await h!.flush();
     await openClear();

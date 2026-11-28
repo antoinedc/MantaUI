@@ -558,3 +558,22 @@ export function sessionHeaderElement(
     />
   );
 }
+
+/**
+ * jsdom has no `HTMLDialogElement.showModal` / `close`: install what the browser does (the open attribute, focus on the autofocus
+ * control, returnValue, a `close` event) so a native <dialog> component's own wiring is what a test exercises.
+ */
+export function installDialogPolyfill(): void {
+  const proto = HTMLDialogElement.prototype as unknown as Record<string, unknown>;
+  proto.showModal = function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+    this.dataset.modal = "true";
+    (this.querySelector("[autofocus]") as HTMLElement | null)?.focus();
+  };
+  proto.close = function (this: HTMLDialogElement, value?: string) {
+    if (!this.hasAttribute("open")) return;
+    this.removeAttribute("open");
+    if (value !== undefined) this.returnValue = value;
+    this.dispatchEvent(new Event("close"));
+  };
+}

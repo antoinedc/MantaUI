@@ -4482,3 +4482,80 @@ test("AC-2.2 the result the parent receives names the task's project, where it s
   const plain = buildResultSynthetic({ id: "x", name: "n", status: "done", childSessionID: "c", completionMessageId: "m" });
   for (const k of ["project", "startedFrom", "branch", "isolation"]) assert.equal(k in plain.metadata.manta, false, `${k} only for a chat task`);
 });
+
+// ---------------------------------------------------------------------------
+// The knowledge boundary fails CLOSED: "couldn't check" is not "off". The real knowledge engine is wired the way index.mjs wires it
+// (`pinKnowledgeSession: engine.pinForTask`); only its settings read is made to fail.
+// ---------------------------------------------------------------------------
+
+async function knowledgeWorld({ stored, readable = () => true, clock = { t: 1_000 } } = {}) {
+  const { createKnowledgeEngine } = await import("./knowledge/engine.mjs");
+  const { execGitRunner, fakeBackgroundBudget, tmpDir } = await import("./knowledge/testHelpers.mjs");
+  const dir = await tmpDir("knowledge-pin-");
+  const engine = createKnowledgeEngine({
+    backgroundBudget: fakeBackgroundBudget(),
+    dir,
+    git: execGitRunner(dir),
+    config: { get: async () => { if (!readable()) throw new Error("config unreadable"); return { knowledge: stored }; }, update: async () => {} },
+    now: () => clock.t,
+    isCtoSession: async () => false,
+    loadLint: async () => ({ preset: { meta: { id: "p" } }, lintSource: async () => ({ messages: [] }) }),
+    secretValues: () => [],
+    fireNotify: async () => {},
+    maintenanceMs: 3_600_000,
+    log: () => {},
+    listSessionsPage: async () => [],
+  });
+  await engine.start();
+  const w = world();
+  w.deps.pinKnowledgeSession = (a) => engine.pinForTask(a);
+  return { w, engine, clock };
+}
+
+test("AC-5.3b the knowledge SETTINGS can't be read: the launch is refused like any failed pin — no prompt, record, child, window and worktree removed", async () => {
+  let readable = true;
+  const { w, clock, engine } = await knowledgeWorld({ readable: () => readable });
+  readable = false;
+  clock.t += 60_000; // the memo of the last good read has expired: the box really can't tell
+  const res = await startJob(chatTask(), w.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, PIN_REFUSED);
+  nothingLeft(w);
+  assert.equal(w.calls.send.length, 0, "nothing was sent to the task");
+  assert.deepEqual(w.calls.del, [w.calls.create[0].id]);
+  assert.equal(w.calls.kill.length, 1, "the window was closed");
+  assert.equal(w.records.size, 0);
+  await engine.stop();
+});
+
+test("AC-5.3b the knowledge layer failed to start (not 'off'): the launch is refused the same way", async () => {
+  const { createKnowledgeEngine } = await import("./knowledge/engine.mjs");
+  const { execGitRunner, fakeBackgroundBudget, tmpDir } = await import("./knowledge/testHelpers.mjs");
+  const dir = await tmpDir("knowledge-pin-broken-");
+  const engine = createKnowledgeEngine({
+    backgroundBudget: fakeBackgroundBudget(),
+    dir,
+    git: { run: async () => { throw new Error("git is broken"); } },
+    config: { get: async () => ({}), update: async () => {} },
+    log: () => {},
+    listSessionsPage: async () => [],
+    secretValues: () => [],
+    loadLint: async () => ({ preset: { meta: { id: "p" } }, lintSource: async () => ({ messages: [] }) }),
+  });
+  const w = world();
+  w.deps.pinKnowledgeSession = (a) => engine.pinForTask(a);
+  const res = await startJob(chatTask(), w.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, PIN_REFUSED);
+  nothingLeft(w);
+  assert.equal(w.calls.send.length, 0);
+});
+
+test("AC-5.3c an EXPLICITLY disabled knowledge layer still lets the launch go on (there are no notes to serve)", async () => {
+  const { w, engine } = await knowledgeWorld({ stored: { enabled: false } });
+  const res = await startJob(chatTask(), w.deps);
+  assert.equal(res.ok, true);
+  assert.equal(w.calls.send.length, 1);
+  assert.equal(w.jobs.length, 1);
+  await engine.stop();
+});

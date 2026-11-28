@@ -349,19 +349,43 @@ export function createKnowledgeEngine(deps = {}) {
   }
 
   /**
+   * Is the knowledge layer on? `"on"`, `"off"` (explicitly turned off, or this runtime can't run it: there are no notes to serve), or
+   * `"unknown"` — the settings can't be read, or the layer failed to start for another reason. "Couldn't check" is NEVER "off": a caller
+   * that must not proceed without the boundary (a named-project task's pin) treats unknown as a failure.
+   */
+  async function enablement() {
+    try {
+      await ready();
+    } catch {
+      return "unknown";
+    }
+    if (!c) return initError?.code === "unsupported" ? "off" : "unknown";
+    try {
+      return (await enabledState()).enabled === true ? "on" : "off";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /** Is the layer switched on (the answer to `enablement()` is "on")? */
+  const isEnabled = async () => (await enablement()) === "on";
+
+  /**
+   * The pin a launching task needs, with the boundary kept closed: the mapping when the layer is on, `{ disabled: true }` ONLY when it is
+   * explicitly off, and a throw when that can't be told (the caller refuses the launch). A null from the pin itself is the caller's to judge.
+   */
+  async function pinForTask(args) {
+    const state = await enablement();
+    if (state === "off") return { disabled: true };
+    if (state !== "on") throw new Error("couldn't check whether shared knowledge is on");
+    return pinSession(args);
+  }
+
+  /**
    * Pin a session to its project from an explicit directory — the hook for the prompt chokepoint
    * (first user message) when the caller already knows the directory. Same rules as the event
    * path (excluded sessions are never mapped; a move re-pins only while nothing is captured).
    */
-  /** Is the knowledge layer started and switched on? (A pin that returns null is "failed" while this is true, "nothing to serve" when it is false.) */
-  async function isEnabled() {
-    try {
-      return !!c && (await enabledState()).enabled === true;
-    } catch {
-      return false;
-    }
-  }
-
   async function pinSession({ sessionID, directory, force = false } = {}) {
     if (!c || !(await enabledState()).enabled || typeof sessionID !== "string" || !sessionID) return null;
     return c.sessionMap.pin({ sessionID, directory, source: "prompt", force: force === true });
@@ -530,6 +554,8 @@ export function createKnowledgeEngine(deps = {}) {
     observeRaw,
     observeEvent: observeRaw,
     pinSession,
+    pinForTask,
+    enablement,
     isEnabled,
     enqueueNote,
     search,

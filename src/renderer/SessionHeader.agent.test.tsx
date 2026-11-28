@@ -3,12 +3,13 @@
 // The session header of an AGENT's conversation (profile v5): "Team / Dev", no branch chip or Explorer, a Profile button, and a
 // menu that holds only "Summarize earlier messages now" and "Clear conversation…" (with a confirmation that says what is kept).
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
-import { installMockApi, mountSessionHeader, resetStore, sessionHeaderElement, type Harness } from "./testHarness";
+import { installDialogPolyfill, installMockApi, mountSessionHeader, resetStore, sessionHeaderElement, type Harness } from "./testHarness";
 import { useStore } from "./store";
 import * as store from "./explorer/explorerStore";
 
+beforeAll(installDialogPolyfill);
 let h: Harness | null = null;
 beforeEach(() => {
   localStorage.clear();

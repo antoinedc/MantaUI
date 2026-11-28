@@ -362,12 +362,42 @@ test("createKnowledgeEngine requires a config", () => {
   assert.throws(() => createKnowledgeEngine({}), /config/);
 });
 
-test("isEnabled: false before start and while the layer is off, true when it is on (a failed pin and an off layer are told apart)", async () => {
-  const { engine } = await rig();
-  assert.equal(await engine.isEnabled(), false, "not started");
-  await engine.start();
-  assert.equal(await engine.isEnabled(), true);
+test("enablement tells 'explicitly off' from 'couldn't check': on, off, off when the runtime can't run it, unknown when the settings can't be read or the layer failed to start", async () => {
+  const on = await rig();
+  assert.equal(await on.engine.enablement(), "on");
+  await on.engine.start();
+  assert.equal(await on.engine.enablement(), "on");
   const off = await rig({ stored: { enabled: false } });
-  await off.engine.start();
-  assert.equal(await off.engine.isEnabled(), false);
+  assert.equal(await off.engine.enablement(), "off", "explicitly turned off");
+  const noSqlite = await rig({ over: { importSqlite: async () => { throw new Error("no sqlite"); } } });
+  assert.equal(await noSqlite.engine.enablement(), "off", "unsupported runtime: there are no notes to serve");
+  // the settings can't be read (the memo of the last read has expired): we can't tell
+  const clock = { t: 1_000 };
+  let broken = false;
+  const flaky = await rig({ over: { now: () => clock.t, config: { get: async () => { if (broken) throw new Error("config unreadable"); return {}; }, update: async () => {} } } });
+  assert.equal(await flaky.engine.enablement(), "on");
+  broken = true;
+  clock.t += 60_000;
+  assert.equal(await flaky.engine.enablement(), "unknown");
+  // the layer failed to start for another reason than the runtime: unknown, never "off"
+  const brokenStore = await rig({ over: { git: { run: async () => { throw new Error("git is broken"); } } } });
+  assert.equal(await brokenStore.engine.enablement(), "unknown");
+});
+
+test("pinForTask: a pin when the layer is on, {disabled:true} only when it is explicitly off, and a THROW when it can't be checked (never a silent 'off')", async () => {
+  const on = await rig();
+  await on.engine.start();
+  const m = await on.engine.pinForTask({ sessionID: "ses_task1", directory: on.repo, force: true });
+  assert.match(m.slug, /^widget-/);
+  const off = await rig({ stored: { enabled: false } });
+  assert.deepEqual(await off.engine.pinForTask({ sessionID: "ses_task2", directory: off.repo, force: true }), { disabled: true });
+  const clock = { t: 1_000 };
+  let broken = false;
+  const flaky = await rig({ over: { now: () => clock.t, config: { get: async () => { if (broken) throw new Error("config unreadable"); return {}; }, update: async () => {} } } });
+  await flaky.engine.start();
+  broken = true;
+  clock.t += 60_000;
+  await assert.rejects(flaky.engine.pinForTask({ sessionID: "ses_task3", directory: flaky.repo, force: true }), /couldn't check/i);
+  const brokenStore = await rig({ over: { git: { run: async () => { throw new Error("git is broken"); } } } });
+  await assert.rejects(brokenStore.engine.pinForTask({ sessionID: "ses_task4", directory: brokenStore.repo, force: true }), /couldn't check/i);
 });
