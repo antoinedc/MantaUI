@@ -27,6 +27,8 @@ export type BackgroundResultPart = OpencodePart & {
   state: string;
   name?: string;
   agent?: string;
+  /** The model the task ran on ("provider/model"), as the result recorded it. Absent on an older result: the job store then answers. */
+  model?: string;
   text: string;
   /** The job ended while its model state was "blocked": shown as "Needs a decision" (spec 2026-11-14 A5). */
   endedBlocked?: boolean;

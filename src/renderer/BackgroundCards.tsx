@@ -405,7 +405,8 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   // Parts the box didn't stamp with a jobId (V2-native children, background
   // `task` subagents) are still tracked as job rows, keyed by their child id.
   const jobId = useStore((s) => part.jobId || s.jobs[part.childSessionId]?.id || null);
-  const ranOn = useStore((s) => (isAgentTask({ agent: part.agent }) ? (findJobById(s.jobs, jobId)?.modelUsed ?? null) : null));
+  // the result's own record of the model first (it stays in the transcript); the job store answers for an older result
+  const ranOn = useStore((s) => (isAgentTask({ agent: part.agent }) ? (part.model ?? findJobById(s.jobs, jobId)?.modelUsed ?? null) : null));
   const modelLabel = useTaskModelLabel(ranOn);
   const { agents: packageAgents } = usePackageAgents();
   const agentTitle = packageAgentDisplayName(part.agent, packageAgents);

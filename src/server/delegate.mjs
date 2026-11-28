@@ -3440,6 +3440,8 @@ export function buildResultSynthetic(job) {
       manta: {
         jobId: job.id,
         name: displayTitle(job),
+        // the model the task ran on: the transcript keeps it after the job record is pruned
+        ...(jobModelOf(job) ? { model: jobModelOf(job) } : {}),
         ...(job.status === "done" && job.endedBlocked === true ? { endedBlocked: true } : {}),
         ...(job.status === "done" && job.endedBlocked === true && job.decision ? { decision: { questions: job.decision.questions } } : {}),
         ...(Array.isArray(job.toldActions) && job.toldActions.length > 0 ? { toldActions: job.toldActions } : {}),
