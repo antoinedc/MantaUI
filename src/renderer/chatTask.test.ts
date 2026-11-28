@@ -11,7 +11,6 @@ import {
   friendlyRefusal,
   isChatTask,
   isChatTaskStartPart,
-  modelLine,
   refusalOf,
   taskBranchLine,
   withStop,
@@ -68,19 +67,12 @@ describe("chatTaskStatus: Fleet's words", () => {
   });
 });
 
-describe("branch and model lines", () => {
+describe("branch line", () => {
   it("the branch, or 'read-only' when the task has none / isolation is none", () => {
     expect(taskBranchLine(job({ branch: "agent/dev/fix", isolation: "worktree" }))).toEqual({ kind: "branch", text: "agent/dev/fix" });
     expect(taskBranchLine(job({ branch: null, isolation: "none" }))).toEqual({ kind: "read-only", text: "read-only" });
     expect(taskBranchLine(job({ branch: "agent/dev/x", isolation: "none" }))).toEqual({ kind: "read-only", text: "read-only" });
     expect(taskBranchLine(job({ branch: null }))).toEqual({ kind: "read-only", text: "read-only" });
-  });
-
-  it("the model only once the task carries one (modelUsed, else the model it asked for)", () => {
-    expect(modelLine(job())).toBeNull();
-    expect(modelLine(job({ model: null }))).toBeNull();
-    expect(modelLine(job({ model: "anthropic/claude-sonnet-5-5" }))).toBe("claude-sonnet-5-5");
-    expect(modelLine(job({ model: "anthropic/claude-sonnet-5-5", modelUsed: "openai/gpt-6-sol" }))).toBe("gpt-6-sol");
   });
 });
 

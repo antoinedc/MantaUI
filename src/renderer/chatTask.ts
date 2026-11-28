@@ -7,7 +7,6 @@
 import type { DelegateJob, OpencodePart } from "../shared/types";
 import { outcomeOfJob } from "../shared/fleetOutcome.mjs";
 import { endedBadge, type BadgeTone } from "./agents/fleetView";
-import { shortModelId } from "./chatUtils";
 import { NEEDS_DECISION_LABEL } from "./backgroundRun";
 
 /** Is this job a task an agent started from its own conversation (spec §6.8 `startedFrom`)? */
@@ -55,12 +54,6 @@ export function chatTaskStatus(input: StatusInput): ChatTaskStatus {
 export function taskBranchLine(job: Pick<DelegateJob, "branch"> & { isolation?: string }): { kind: "branch" | "read-only"; text: string } {
   if (job.isolation === "none" || !job.branch) return { kind: "read-only", text: "read-only" };
   return { kind: "branch", text: job.branch };
-}
-
-/** The model line, shown only once the task carries one (`modelUsed`, else the model it asked for): the way a person says it. */
-export function modelLine(job: { model?: string | null; modelUsed?: string | null } | null | undefined): string | null {
-  const m = job?.modelUsed || job?.model;
-  return m ? shortModelId(m) || null : null;
 }
 
 /** The result text without the header lines the server writes (`[background job …]`, `Project: …`): the card's chip already says it. */

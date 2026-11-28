@@ -18,7 +18,6 @@ import {
   chatTaskStatus,
   cleanResultText,
   friendlyRefusal,
-  modelLine,
   projectWords,
   refusalOf,
   startInputOf,
@@ -28,6 +27,7 @@ import {
 } from "./chatTask";
 import type { BackgroundCard, BackgroundResultPart } from "./backgroundRun";
 import type { RunCardView } from "./jobProgress";
+import { useTaskModelLabel } from "./taskModel";
 
 /** Is a delegate approval card waiting in this conversation? (ChatPanel provides it; the "starting" card then says so.) */
 export const PendingApprovalContext = createContext<boolean>(false);
@@ -197,6 +197,8 @@ export function ChatTaskRunCard({
   const status = chatTaskStatus(card.kind === "running" ? { kind: "running", paused: card.paused } : { kind: card.kind });
   const title = job.title?.trim() || card.name;
   const failed = card.kind === "failed";
+  // the model once the task carries one: the catalog's own name (the way Fleet's Details and the other cards name it)
+  const modelLabel = useTaskModelLabel(job.modelUsed ?? job.model);
   return (
     <ChatTaskCard
       kind={card.kind}
@@ -208,7 +210,7 @@ export function ChatTaskRunCard({
       steps={content ? [content.chip, content.elapsed].filter(Boolean).join(" · ") || null : null}
       questions={questions}
       branch={card.kind === "uncertain" || failed ? null : taskBranchLine(job)}
-      model={modelLine(job)}
+      model={modelLabel}
       headline={content ? headline : ""}
       headlineWarn={content?.needsDecision}
       bar={content?.bar ?? null}
@@ -243,6 +245,8 @@ export function ChatTaskResultCard({
   const status = chatTaskStatus({ kind: "ended", job: job ?? undefined, state: part.state, endedBlocked: part.endedBlocked === true });
   const text = cleanResultText(part.text).trim();
   const branch = taskBranchLine({ branch: job?.branch ?? part.branch ?? null, isolation: job?.isolation ?? part.isolation });
+  // the result's own record of the model first (it stays in the transcript); the job store answers for an older result
+  const modelLabel = useTaskModelLabel(part.model ?? job?.modelUsed ?? job?.model);
   return (
     <ChatTaskCard
       kind="ended"
@@ -251,7 +255,7 @@ export function ChatTaskResultCard({
       project={job?.project?.name ?? part.project?.name ?? null}
       status={status}
       branch={branch}
-      model={modelLine(job)}
+      model={modelLabel}
       seat={job ? seatLine(job) : null}
       onDetails={jobId && sessionId ? () => openTaskPanel(sessionId, jobId) : undefined}
       onOpen={jobId ? open : undefined}

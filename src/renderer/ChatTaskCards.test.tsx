@@ -254,6 +254,10 @@ describe("the result card of a task started from an agent's conversation", () =>
     showResult(part({ isolation: "none", branch: undefined }), chatJob({ status: "done", isolation: "none", branch: null, model: "openai/gpt-6-sol" }));
     expect(text('[data-testid="chat-task-branch"]')).toBe("read-only");
     expect(text('[data-testid="chat-task-model"]')).toBe("gpt-6-sol");
+    h!.unmount();
+    // the result's own record of the model wins (it stays in the transcript after the job store prunes the record)
+    showResult(part({ model: "anthropic/claude-sonnet-5-5" }), null);
+    expect(text('[data-testid="chat-task-model"]')).toBe("claude-sonnet-5-5");
   });
 
   it("another background result keeps the existing card", () => {
