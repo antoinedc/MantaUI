@@ -223,7 +223,7 @@ describe("plugin entry: one composed context hook", () => {
     return {
       hooks,
       location: { directory: "/work/proj" },
-      tool: { transform: async (cb) => cb({ add() {} }) },
+      tool: { transform: async (cb) => cb({ add() {}, update() {} }) },
       session: { hook: async (kind, fn, opts) => void (hooks[kind] = { fn, opts }) },
       event: { subscribe: () => (async function* () { for (const e of events) yield e; })() },
     };

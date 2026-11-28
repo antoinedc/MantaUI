@@ -66,6 +66,16 @@ export function createWebGuard(deps: WebGuardDeps) {
   return { beforeExecute };
 }
 
+/**
+ * For a tool editor's `update(name, …)`: turn the built-in tool into one that refuses every call. Used ONLY when the guard hook could not
+ * be registered — an unguarded `websearch` / `webfetch` must not stay available (fail closed).
+ */
+export function refuseWebTool(tool: { execute: (...args: any[]) => Promise<unknown> }): void {
+  tool.execute = async () => {
+    throw new Error(CHECK_UNAVAILABLE);
+  };
+}
+
 /** The production guard: this box's manta-server, with the box token. */
 export function createDefaultWebGuard() {
   return createWebGuard({ fetch: (url, init) => fetch(url, init as any) as any, base: serverUrl, headers: authHeaders });

@@ -18,6 +18,7 @@
 //   - both tool parts end in an error carrying the refusal sentence, and the recording server received NO request;
 //   - the same calls with clean input reach the recording server;
 //   - with the `web` source turned off, websearch is refused with the Settings sentence and sends nothing (webfetch is unaffected);
+//   - the guard hook cannot be registered (a patched plugin copy): the plugin loads but websearch / webfetch refuse every call, nothing is sent;
 //   - fail closed: with the stand-in manta-server down, both calls are refused with the "couldn't check" sentence and
 //     nothing reaches the recording server.
 //
@@ -25,7 +26,8 @@
 // (:8787) are never contacted; the stand-in server and the recorder bind ephemeral loopback ports.
 
 import { createServer } from "node:http";
-import { mkdir } from "node:fs/promises";
+import { mkdir, cp, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureBinary } from "./fetch-binary.mjs";
@@ -102,26 +104,33 @@ const decideFn = (body) => {
 const mock = await startMockAnthropic({ decideFn });
 const oc = await import("../../src/server/opencode.mjs");
 let sb;
-try {
+let cwd;
+const binary = await ensureBinary({ log: (m) => console.log(`[binary] ${m}`) });
+/** A fresh sandbox running the real pinned binary with `pluginDir` as the manta plugin. */
+async function boot(pluginDir) {
   const sbConfig = {
     provider: { anthropic: { options: { baseURL: `${mock.url}/v1`, apiKey: "mock" } } },
     permission: { websearch: "allow", webfetch: "allow" },
     agent: {},
   };
   sb = await startSandbox({
-    binary: await ensureBinary({ log: (m) => console.log(`[binary] ${m}`) }),
+    binary,
     config: sbConfig,
     onRoot: (root) => {
       const real = buildAgentBlock({ dir: join(root, "home", ".manta/agents/dev"), meta: { description: "Dev probe", model: null, role: "specialist" }, home: join(root, "home") });
       sbConfig.agent["agent-dev"] = { ...real, prompt: "You are the Dev probe." };
     },
-    plugins: [PLUGIN_DIR, { src: RECORDER_PLUGIN, name: "zz-web-guard-recorder.ts" }],
+    plugins: [{ src: pluginDir, name: "manta" }, { src: RECORDER_PLUGIN, name: "zz-web-guard-recorder.ts" }],
     env: { ANTHROPIC_API_KEY: "mock", MANTA_SERVER_URL: standInUrl, MANTA_BOX_TOKEN: "ef12".repeat(8), WEB_GUARD_RECORDER_URL: recorderUrl },
   });
   process.env.MANTA_OPENCODE_PASSWORD = sb.password;
   oc._setApiBase(sb.url);
-  const cwd = sb.projectDir;
+  cwd = sb.projectDir;
   await mkdir(join(cwd, "x"), { recursive: true });
+}
+let brokenCopy = null;
+try {
+  await boot(PLUGIN_DIR);
 
   const api = async (method, path, body) => {
     const res = await fetch(sb.url + path, { method, headers: { authorization: sb.auth, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -188,7 +197,32 @@ try {
   check("manta-server unreachable: websearch is refused with the 'couldn't check' sentence", errorOf(down.find((p) => p.tool === "websearch")).includes(UNAVAILABLE), JSON.stringify(down.find((p) => p.tool === "websearch")?.state));
   check("manta-server unreachable: webfetch is refused with the 'couldn't check' sentence", errorOf(down.find((p) => p.tool === "webfetch")).includes(UNAVAILABLE), JSON.stringify(down.find((p) => p.tool === "webfetch")?.state));
   check("manta-server unreachable: nothing reached the recording server", recorded.length === 0, recorded.join(" | "));
+
+  // 5. the guard hook cannot be registered (a copy of the plugin whose registration throws, standing in for an instance without the
+  // hook): the plugin still loads, but websearch and webfetch are REPLACED by tools that refuse — with the check server UP, so the
+  // refusal can only come from the missing guard, never from a verdict
+  await sb.stop().catch(() => {});
+  brokenCopy = await mkdtemp(join(tmpdir(), "manta-web-guard-broken-"));
+  await cp(PLUGIN_DIR, join(brokenCopy, "manta"), { recursive: true });
+  const indexFile = join(brokenCopy, "manta", "index.ts");
+  const original = await readFile(indexFile, "utf8");
+  const hookCall = 'await ctx.tool.hook("execute.before", (event: any) => guard.beforeExecute(event));';
+  check("the broken copy really replaces the hook registration", original.includes(hookCall));
+  await writeFile(indexFile, original.replace(hookCall, 'throw new Error("hook registration unavailable");'));
+  checkUp = true;
+  checkCalls.length = 0;
+  await boot(join(brokenCopy, "manta"));
+  for (const kind of ["lead chat", "agent task", "agent conversation", "plain session"]) {
+    recorded.length = 0;
+    const out = await run(kind, [search("postgres job queue library for node"), fetchUrl(`${recorderUrl}/docs/pricing`)]);
+    const [s5, f5] = [out.find((p) => p.tool === "websearch"), out.find((p) => p.tool === "webfetch")];
+    check(`${kind}: hook registration failed — websearch is refused (fail closed), not left unguarded`, errorOf(s5).includes(UNAVAILABLE), JSON.stringify(s5?.state));
+    check(`${kind}: hook registration failed — webfetch is refused (fail closed), not left unguarded`, errorOf(f5).includes(UNAVAILABLE), JSON.stringify(f5?.state));
+    check(`${kind}: hook registration failed — nothing reached the recording server`, recorded.length === 0, recorded.join(" | "));
+  }
+  check("hook registration failed — the refusals did not come from the check server (it was never asked)", checkCalls.length === 0, JSON.stringify(checkCalls));
 } finally {
+  if (brokenCopy) await rm(brokenCopy, { recursive: true, force: true }).catch(() => {});
   await sb?.stop().catch(() => {});
   await mock.close().catch(() => {});
   await new Promise((r) => standIn.close(r));

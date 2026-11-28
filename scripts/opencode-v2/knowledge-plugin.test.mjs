@@ -362,7 +362,7 @@ describe("installBriefing / plugin entry wiring", () => {
     return {
       hooks,
       location: { directory: "/work/proj" },
-      tool: { transform: async (cb) => cb({ add() {} }) },
+      tool: { transform: async (cb) => cb({ add() {}, update() {} }) },
       session: { hook: async (kind, fn, opts) => void (hooks[kind] = { fn, opts }) },
       event: {
         subscribe: () =>
@@ -382,7 +382,7 @@ describe("installBriefing / plugin entry wiring", () => {
 
   test("a plugin context without session hooks still registers the tools", async () => {
     const added = [];
-    await pluginDef.setup({ tool: { transform: async (cb) => cb({ add: (t) => added.push(t) }) } });
+    await pluginDef.setup({ tool: { transform: async (cb) => cb({ add: (t) => added.push(t), update() {} }) } });
     assert.ok(added.some((t) => t.name === "knowledge_search"));
   });
 

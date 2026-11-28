@@ -104,7 +104,7 @@ describe("webGuard: the verdict (AC-2.8) and failing closed (AC-2.9b)", () => {
 });
 
 describe("plugin entry: the execute.before hook", () => {
-  const ctxWith = (toolHook) => ({ location: { directory: "/work/proj" }, tool: { transform: async (cb) => cb({ add() {} }), ...(toolHook ? { hook: toolHook } : {}) } });
+  const ctxWith = (toolHook) => ({ location: { directory: "/work/proj" }, tool: { transform: async (cb) => cb({ add() {}, update() {} }), ...(toolHook ? { hook: toolHook } : {}) } });
 
   test("registers ONE blocking `execute.before` hook; the default guard asks this box's manta-server and throws a refusal", async () => {
     const registered = [];
@@ -123,10 +123,25 @@ describe("plugin entry: the execute.before hook", () => {
     assert.equal(seen.length, 1);
   });
 
-  test("an instance without a tool hook registers nothing and still sets up; a hook that refuses to register doesn't break the plugin", async () => {
-    await pluginDef.setup(ctxWith(null));
-    await pluginDef.setup(ctxWith(async () => {
-      throw new Error("no such hook");
-    }));
+  // a tool editor that records what the plugin does to the built-in web tools
+  function editorCtx(toolHook) {
+    const updates = {};
+    const editor = { add() {}, update: (id, fn) => { const t = { execute: async () => "ran" }; fn(t); updates[id] = t; }, remove() {} };
+    return { updates, ctx: { location: { directory: "/work/proj" }, tool: { transform: async (cb) => cb(editor), ...(toolHook ? { hook: toolHook } : {}) } } };
+  }
+
+  test("FAIL CLOSED: an instance without a tool hook, or one whose registration throws, still sets up — but websearch and webfetch are replaced by tools that refuse with the 'couldn't check' sentence", async () => {
+    for (const toolHook of [null, async () => { throw new Error("no such hook"); }]) {
+      const { ctx, updates } = editorCtx(toolHook);
+      await pluginDef.setup(ctx);
+      assert.deepEqual(Object.keys(updates).sort(), ["webfetch", "websearch"]);
+      for (const id of ["websearch", "webfetch"]) await assert.rejects(updates[id].execute({ query: "x", url: "https://example.com/" }, {}), { message: CHECK_UNAVAILABLE }, id);
+    }
+  });
+
+  test("with the hook registered the built-in web tools are left exactly as OpenCode ships them (the hook is the guard)", async () => {
+    const { ctx, updates } = editorCtx(async () => undefined);
+    await pluginDef.setup(ctx);
+    assert.deepEqual(updates, {});
   });
 });
