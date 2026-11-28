@@ -42,7 +42,7 @@ export function tmuxSpawnEnv(env = process.env, platform = process.platform) {
   return { ...env, LC_ALL: platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8" };
 }
 
-function spawnRun(cmd, args) {
+export function spawnRun(cmd, args, timeoutMs = SPAWN_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const p = cpSpawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env: tmuxSpawnEnv() });
     let stdout = "", stderr = "";
@@ -50,8 +50,8 @@ function spawnRun(cmd, args) {
     const timeout = setTimeout(() => {
       try { p.kill("SIGKILL"); } catch { /* already gone */ }
       settled = true;
-      reject(new Error("tmux timed out after 10s"));
-    }, SPAWN_TIMEOUT_MS);
+      reject(new Error(`${cmd} timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
     timeout.unref();
     const finish = () => { if (!settled) { settled = true; clearTimeout(timeout); } };
     p.stdout.on("data", (b) => (stdout += b.toString()));

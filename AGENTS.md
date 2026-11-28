@@ -4305,6 +4305,13 @@ Spec `docs/superpowers/specs/2026-11-27-architect-v2.md` §5; deferred bits in `
   review, per-skill 20-file / 256 KiB caps lifted. When the lead makes the change itself after an Architect proposal for the same agent in the same chat didn't
   land, its record carries that proposal's research (`researchFrom`). Spec §3.3 / §4.1 / §7.
 
+- **Slow git never runs through tmux's helper.** `tmux.run` kills anything after 10 s (and used to say "tmux timed out" for any command); a trial case's
+  `git clone --local --no-hardlinks` of a real project is slower than that and failed every case. `src/server/gitExec.mjs` (`gitRun`: execFile, no shell,
+  60 s default, `{ timeoutMs }` per call, errors "git <sub> timed out after Ns" / "git exited N: …") is what `index.mjs` wires for the trials (clone: 5 min, never
+  more than the case ceiling), delegate, routines, the worktree list and the learning module's commit reader. Full clone kept (not `--depth 1`: a local-path clone
+  ignores it and `file://` would drop the history a trial agent may read). An installed skill taken by reference is NOT refused for a description over 300
+  characters (the model wrote nothing; the file is copied untouched and the compiled index clips it) — the cap still holds for a SKILL.md the model sends.
+
 ## Open work (as of 2026-05-18)
 
 - **Open subagent as its own chat-mode window.** Phase 1 ships read-only

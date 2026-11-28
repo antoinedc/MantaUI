@@ -357,7 +357,8 @@ function adoptInstalled(o, got, { header, frontmatter }) {
   if (!h) return fail(`The SKILL.md of the installed skill ${o.name} has no frontmatter with name and description`);
   if (h.name !== o.name) return fail(`The installed skill's own name is ${JSON.stringify(h.name ?? "")}: name the skill ${h.name || "after its folder"} (${who} says ${o.name})`);
   if (!h.description) return fail(`The SKILL.md of the installed skill ${o.name} needs a description in its frontmatter`);
-  if (h.description.length > SKILL_DESCRIPTION_MAX) return fail(`The description of the installed skill ${o.name} is ${h.description.length} characters; at most ${SKILL_DESCRIPTION_MAX}`);
+  // no length cap here: the model wrote nothing of an installed skill, the file is copied as it is, and the compiled prompt index
+  // clips every description (compileAgentPrompt). The cap holds only for a SKILL.md the model sends itself (checkSkillOps).
   const size = files.reduce((n, f) => n + bytes(f.content), 0);
   if (size > AGENT_SKILLS_BYTES_MAX) return fail(`${who} is ${(size / 1024 / 1024).toFixed(1)} MiB; an agent's skills can total at most 1 MiB.${hint}`);
   if (files.length > AGENT_SKILL_FILES_MAX) return fail(`${who} has ${files.length} files; an agent's skills can hold at most ${AGENT_SKILL_FILES_MAX}.${hint}`);

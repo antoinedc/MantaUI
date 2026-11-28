@@ -67,6 +67,8 @@ export const TRIAL_DATA_LINE =
 // git run by the server in a folder an agent could have written to: no repository setting or hook runs on its behalf
 const GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
 const END_EVENTS = new Set(["succeeded", "failed", "interrupted"]); // `started` and the like never end a case
+// a no-hardlinks copy of a real project takes more than the 10 s of tmux's helper; it is bounded by the case's own ceiling
+const CLONE_TIMEOUT_MS = 5 * 60_000;
 const RESULT_FILE = "result.json";
 const STATE_FILE = "state.json";
 const PROJECT_RE = /^[a-z0-9-]+$/;
@@ -220,7 +222,7 @@ export function readCase(messages) {
  *   scratchRoot     the private base (0700, the box user's own) where each case's folder is made with mkdtemp (default: in the OS temp folder)
  *   agents()        the agents engine, read at call time: { bindArchitect(b, tool), trialPlan(input, {dir}) }
  *   oc              { createSession, sendPrompt, abortSession, deleteSessionRaw, listMessages, replyQuestion }
- *   gitRun(args)    git through the box's own runner → { stdout }
+ *   gitRun(args, {timeoutMs?})  git through the box's own runner (src/server/gitExec.mjs; not tmux's 10 s helper) → { stdout }
  *   editConfig      the opencode config writer (an agent block per trial)
  *   budget          { book({workType, model, usage, usd, inLedger}) } — what a case spent is counted; nothing is ever refused (a trial is part of the task the user asked for)
  *   policy()        the user's autonomy policy (read strictly; a throw fails the case)
@@ -344,7 +346,7 @@ export function createAgentTrials({
     await writeState(t);
     if (checkout) {
       try {
-        await gitRun([...GIT_SAFE, "clone", "--local", "--no-hardlinks", checkout, dir]);
+        await gitRun([...GIT_SAFE, "clone", "--local", "--no-hardlinks", checkout, dir], { timeoutMs: Math.min(CLONE_TIMEOUT_MS, caseTimeoutMs) });
         await gitRun([...GIT_SAFE, "-C", dir, "remote", "remove", "origin"]);
       } catch (e) {
         return { error: `The copy of the project couldn't be made: ${String(e?.message ?? e).slice(0, 160)}` };
