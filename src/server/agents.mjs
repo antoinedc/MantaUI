@@ -3222,6 +3222,40 @@ export function createAgentsEngine({
     };
   }
 
+  // The states of an Architect proposal whose draft did NOT become the agent: the lead may then make the change itself (the user insisted, the
+  // Architect could not finish), and that change keeps the research the task did.
+  const UNLANDED_STATES = new Set(["held", "pending", "discarded", "expired", "failed", "conflict"]);
+  const slugOfName = (name) => {
+    try {
+      return slugForName(String(name ?? ""), new Set());
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * The research of the newest Architect proposal of THIS chat for the very agent the lead is now creating or changing, when that proposal
+   * did not land: `{ basis, basisThin, evidence, problem, fitCheck, researchFrom }`, or `{}`. The proposal itself is left exactly as it was.
+   * A create matches by the agent's name, an update by its slug. Nothing is copied from another chat, another agent, a draft that already landed
+   * or a change that did not come from an Architect task.
+   */
+  async function architectResearchFor(sessionID, plan) {
+    const wanted = plan.kind === "create" ? slugOfName(plan.agentName) : plan.slug;
+    if (!wanted) return {};
+    const hit = (await readChanges())
+      .filter((r) => r.origin?.kind === "job" && r.sessionID === sessionID && r.kind === plan.kind && UNLANDED_STATES.has(r.state) && (plan.kind === "create" ? slugOfName(r.agentName) : r.slug) === wanted)
+      .sort((a, c) => (c.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+    if (!hit) return {};
+    return {
+      basis: structuredClone(hit.basis ?? []),
+      basisThin: hit.basisThin === true,
+      evidence: structuredClone(hit.evidence ?? []),
+      ...(hit.problem ? { problem: structuredClone(hit.problem) } : {}),
+      fitCheck: hit.fitCheck ? structuredClone(hit.fitCheck) : null,
+      researchFrom: hit.id,
+    };
+  }
+
   /**
    * `agent_change` (spec §2.4): the lead creates or edits an agent. Returns `{ ok:true, change }` (applied or waiting for
    * the user's click) or `{ ok:false, error, change? }` — a refusal is a sentence for the tool to relay; only unexpected
@@ -3272,6 +3306,7 @@ export function createAgentsEngine({
         const plan = await planChange({ action, agent: raw.agent, draft: raw.draft, approved, via: "change" });
         if (plan.error) return { error: plan.error };
         const reason = plan.lead ? "lead" : plan.core ? "core" : plan.raisesIsolation ? "isolation" : level === "ask" ? "ask" : null;
+        const researched = await architectResearchFor(b.sessionID, plan);
         const made = normalizeRecord({
           id: `ach_${randomBytes(8).toString("hex")}`,
           kind: plan.kind,
@@ -3288,6 +3323,7 @@ export function createAgentsEngine({
           createdAt: now(),
           decidedAt: null,
           error: null,
+          ...researched,
         });
         if (made.kind === "update") await attachBundles(made);
         if (!made.needsClick) await applyLocked(made, "auto");
