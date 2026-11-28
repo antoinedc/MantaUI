@@ -27,7 +27,6 @@ import { questionFromForm } from "../shared/opencodeV2.mjs";
 import { withInternalMarker } from "./internalSessionMarker.mjs";
 import { jobRules, DENIAL_TEXT_RE, isInsideMantaFolders } from "./autonomy.mjs";
 import { buildReadOnlyAgentRuleset, buildWorktreeAgentRuleset, normalizeJobRuleset, withResearchToolAllows } from "./delegate.mjs";
-import { withResearchGuidance } from "./researchLibrary.mjs";
 
 /**
  * The hash of a draft's complete resulting file set: `{ "agent.md": <text>, "skills/<name>/<path>": <text>, … }`. ONE function,
@@ -514,7 +513,7 @@ export function createAgentTrials({
           permission: buildTrialRuleset({ isolation: t.plan.meta?.isolation === "worktree" ? "worktree" : "none", dir: agentDirOf(t.id), home, policy: policyNow, sessionID: sessionId, projectPatterns: patterns }),
           metadata: withInternalMarker({ manta: { agentTrial: t.id, agentTrialCase: c.name } }),
         });
-        await oc.sendPrompt({ sessionId, text: withResearchGuidance(c.task), agent: keyOf(t.id), ...(model ? { model } : {}) });
+        await oc.sendPrompt({ sessionId, text: c.task, agent: keyOf(t.id), ...(model ? { model } : {}) });
       } catch (e) {
         return await finish("failed", { error: `The test run couldn't start: ${String(e?.message ?? e).slice(0, 160)}` });
       }
