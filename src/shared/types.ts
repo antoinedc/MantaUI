@@ -2950,6 +2950,14 @@ export type DelegateJob = {
   rootJobId?: string;
   // Set when this launch placed the agent in a project it had no seat in.
   seatAdded?: { project: string; projectName: string };
+  // Agent chat tasks (docs/superpowers/specs/2026-11-28-agent-chat-tasks.md §6.8): a task an agent started from its OWN conversation
+  // carries the project it runs in and where it started (`project` is the card's chip; Fleet shows it in that project). `seatOwed`
+  // is the seat a launch not yet confirmed will get (never on the wire for long: it is settled into `seatAdded`).
+  project?: { slug: string; name: string };
+  startedFrom?: "agent-chat";
+  seatOwed?: { project: string; projectName: string };
+  // Whether the job runs on its own branch ("worktree") or read-only in the folder ("none").
+  isolation?: "worktree" | "none";
   // Never post this job's result (refresh tasks); inherited by continuations.
   deliverResult?: false;
   // The agent the job's session runs (shown in its result).
@@ -4528,7 +4536,7 @@ export interface AgentSeat {
   projectName: string;
   brief: string;
   addedAt: number;
-  addedBy: "user" | "mention" | "handoff";
+  addedBy: "user" | "mention" | "handoff" | "chat";
   notes: number | null; // knowledge pages of that project, null when unknown
   memory: { label: string; access: "read" | "read-write" | "none"; note: string }[];
 }
@@ -4599,7 +4607,12 @@ export interface NeedsYouReview {
   endedBlocked?: boolean; // the decision case (absent on an older box)
 }
 // Fleet redesign (docs/superpowers/specs/2026-11-28-fleet-redesign.md §2.2): the Fleet page's read.
-export type FleetAskedBy = { by: "you" } | { by: "manta"; sessionId: string | null } | { by: "routine" };
+export type FleetAskedBy =
+  | { by: "you" }
+  | { by: "manta"; sessionId: string | null }
+  | { by: "routine" }
+  // an agent's own conversation asked for the task (agent chat tasks)
+  | { by: "agent-chat"; agentSlug: string; sessionId: string | null };
 export type FleetOutcome = "done" | "didnt-finish" | "interrupted" | "stopped";
 // Rows are working sessions (spec §5b): what runs beneath a row (a subagent, a helper job) is listed in its Details, never a row.
 export interface FleetSub {
@@ -4665,8 +4678,21 @@ export interface FleetTasks {
   cap: number;
   full: boolean;
 }
+/** A question an agent asked in its own conversation (the `question` tool): nothing starts until the user answers it there. */
+export interface ChatQuestion {
+  id: string;
+  slug: string;
+  agentName: string;
+  sessionId: string;
+  question: string;
+  /** The option labels of the first question ("(Recommended)" still on the recommended one). */
+  options: string[];
+  askedAt: number;
+}
 export interface NeedsYou {
   questions: TaskQuestion[];
+  /** Open questions asked in an agent's own conversation (absent on an older box). */
+  chatQuestions?: ChatQuestion[];
   /** Pending, box-wide. `changeProjects` (absent on an older box) names the registry project of the task that proposed each. */
   changes: AgentChange[];
   changeProjects?: Record<string, string | null>;

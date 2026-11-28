@@ -529,3 +529,18 @@ test("mapTimeline: background-result tolerates a missing/odd envelope and missin
   assert.equal(part({ metadata: { source: "other" }, text: "x" }), undefined);
   assert.equal(part({ text: "x" }), undefined);
 });
+
+test("mapTimeline: a task an agent started from its conversation carries its project, branch and where it started onto the result part (so the card needs no job record); malformed values are dropped", () => {
+  const part = (manta) =>
+    mapTimeline(
+      [{ id: "msg_c", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", manta }, text: '[background job "x" done]\nProject: Ronda\n\nok' }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  const p = part({ jobId: "j1", name: "Fix it", startedFrom: "agent-chat", project: { slug: "ronda-0f9e8d7c6b", name: "Ronda" }, branch: "agent/dev/fix", isolation: "worktree" });
+  assert.equal(p.startedFrom, "agent-chat");
+  assert.deepEqual(p.project, { slug: "ronda-0f9e8d7c6b", name: "Ronda" });
+  assert.equal(p.branch, "agent/dev/fix");
+  assert.equal(p.isolation, "worktree");
+  const bad = part({ jobId: "j1", startedFrom: "mention", project: { slug: 3 }, branch: 7, isolation: "weird" });
+  for (const k of ["startedFrom", "project", "branch", "isolation"]) assert.equal(k in bad, false, k);
+});

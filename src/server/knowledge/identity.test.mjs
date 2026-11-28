@@ -267,3 +267,21 @@ test("N7: a plain resolve (and a repeat identify of a known project) never runs 
   await reg.identify(root);
   assert.equal(calls.includes("rev-list"), false, "a known project with a recorded root commit never recomputes it");
 });
+
+test("registry.lookup: a READ-ONLY identify — a registered folder answers with its project, an unknown one with null, and nothing is ever registered or saved", async () => {
+  const saved = [];
+  const reg = registry(saved);
+  const known = await makeRepo({ remote: "https://github.com/acme/widget.git" });
+  const stranger = await makeRepo({ remote: "https://github.com/acme/other.git" });
+  const first = await reg.identify(known);
+  const savesBefore = saved.length;
+  assert.equal((await reg.lookup(known)).slug, first.slug);
+  const wt = join(await tmpDir("knowledge-lookup-wt-"), "wt");
+  await git.run(["worktree", "add", "-q", wt, "-b", "g"], { cwd: known });
+  assert.equal((await reg.lookup(wt)).slug, first.slug, "a worktree is the same project");
+  assert.equal(await reg.lookup(stranger), null, "an unregistered repository is not registered by looking at it");
+  assert.equal(await reg.lookup("/does/not/exist"), null);
+  assert.equal(await reg.lookup(""), null);
+  assert.equal((await reg.list()).length, 1);
+  assert.equal(saved.length, savesBefore, "no save, no commit");
+});

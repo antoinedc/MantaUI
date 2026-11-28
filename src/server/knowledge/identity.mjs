@@ -244,6 +244,16 @@ export function createProjectRegistry({ resolver, load, save, now = Date.now } =
       return p ? { ...p } : null;
     },
     /**
+     * A READ-ONLY identify: the registered project whose canonical id or alias `directory` resolves to, else null. Unlike
+     * `identify` it never registers a project, records a path or saves anything — it only answers "is this folder that project?".
+     */
+    async lookup(directory) {
+      const r = await resolver.resolve(directory);
+      if (!r) return null;
+      const p = byId(await ensure(), r.canonicalId);
+      return p ? { slug: p.slug, canonicalId: p.canonicalId, displayName: p.displayName } : null;
+    },
+    /**
      * Resolve `directory` to its registered project, registering it on first
      * sight. `movedFrom` (an old directory) lets a caller that knows a
      * directory moved carry the project across the move. Returns

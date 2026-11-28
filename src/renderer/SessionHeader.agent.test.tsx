@@ -3,12 +3,13 @@
 // The session header of an AGENT's conversation (profile v5): "Team / Dev", no branch chip or Explorer, a Profile button, and a
 // menu that holds only "Summarize earlier messages now" and "Clear conversation…" (with a confirmation that says what is kept).
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
-import { installMockApi, mountSessionHeader, resetStore, type Harness } from "./testHarness";
+import { installDialogPolyfill, installMockApi, mountSessionHeader, resetStore, sessionHeaderElement, type Harness } from "./testHarness";
 import { useStore } from "./store";
 import * as store from "./explorer/explorerStore";
 
+beforeAll(installDialogPolyfill);
 let h: Harness | null = null;
 beforeEach(() => {
   localStorage.clear();
@@ -126,5 +127,68 @@ describe("SessionHeader — an agent's conversation", () => {
     const items = [...document.body.querySelectorAll('[role="menuitem"]')].map((e) => (e.textContent ?? "").trim());
     expect(items).toContain("Fork session");
     expect(items).toContain("Delete session");
+  });
+  // ---- Clear is refused while tasks started from this conversation run (agent chat tasks FR-012, design §5) ----
+
+  const onOpenFleet = vi.fn();
+  const blocked = (over: Record<string, unknown> = {}) => ({ ...agent, clearBlock: { tasks: [{ key: "j1", title: "Fix the flaky upload test", project: "Ronda", status: "In progress" }], refusal: null, onOpenFleet }, ...over });
+  const dialog = () => document.body.querySelector<HTMLElement>('[role="dialog"]');
+
+  it("with a task running from this conversation the dialog opens already refused: the warning, the task, the reason, Open Fleet and Close — no Clear button", async () => {
+    onOpenFleet.mockClear();
+    mountAgent({ agentConversation: blocked() });
+    await openMenu();
+    await act(async () => byText("Clear conversation…")!.click());
+    expect(document.body.textContent).toContain("Clear your conversation with Dev?");
+    const alert = document.body.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toBe("Dev has 1 task running from this conversation; wait for it or stop it first.");
+    expect(document.body.textContent).toContain("Fix the flaky upload test · Ronda · In progress");
+    expect(document.body.textContent).toContain("Its result comes back to this conversation, so clearing now would lose it. Stop a task from Fleet.");
+    expect(byText("Clear conversation")).toBeUndefined();
+    expect(byText("Open Fleet")).toBeTruthy();
+    expect(byText("Close")).toBeTruthy();
+    expect(document.activeElement?.textContent?.trim()).toBe("Close");
+    await act(async () => byText("Open Fleet")!.click());
+    expect(onOpenFleet).toHaveBeenCalledTimes(1);
+    expect(onClear).not.toHaveBeenCalled();
+  });
+
+  it("two tasks read in the plural; a start still waiting reads 'Starting…'", async () => {
+    const tasks = [
+      { key: "j1", title: "Fix the flaky upload test", project: "Ronda", status: "In progress" },
+      { key: "start:call_1", title: "Fix the billing page totals", project: "Ronda", status: "Starting…" },
+    ];
+    mountAgent({ agentConversation: blocked({ clearBlock: { tasks, refusal: null, onOpenFleet } }) });
+    await openMenu();
+    await act(async () => byText("Clear conversation…")!.click());
+    expect(document.body.querySelector('[role="alert"]')!.textContent).toBe("Dev has 2 tasks running from this conversation; wait for them or stop them first.");
+    expect(document.body.textContent).toContain("Fix the billing page totals · Ronda · Starting…");
+  });
+
+  it("Close leaves the conversation alone", async () => {
+    mountAgent({ agentConversation: blocked() });
+    await openMenu();
+    await act(async () => byText("Clear conversation…")!.click());
+    await act(async () => byText("Close")!.click());
+    expect(onClear).not.toHaveBeenCalled();
+  });
+
+  it("with no task running the dialog is the allowed one, unchanged", async () => {
+    mountAgent({ agentConversation: blocked({ clearBlock: { tasks: [], refusal: null, onOpenFleet } }) });
+    await openMenu();
+    await act(async () => byText("Clear conversation…")!.click());
+    expect(document.body.querySelector('[role="alert"]')).toBeNull();
+    expect(byText("Clear conversation")).toBeTruthy();
+    expect(byText("Cancel")).toBeTruthy();
+  });
+
+  it("a refusal from the box after Clear was pressed (a race) opens the same refused dialog with the box's sentence", async () => {
+    const props = (clearBlock: unknown) => ({ sessionId: "ses_dev", breadcrumb: { project: "manta-agents", window: "Dev" }, agentConversation: { ...agent, clearBlock }, onClear, onFork, onDelete, onCompact } as never);
+    mountAgent({ agentConversation: blocked({ clearBlock: { tasks: [], refusal: null, onOpenFleet } }) });
+    expect(dialog()).toBeNull();
+    h!.rerender(sessionHeaderElement(props({ tasks: [], refusal: "Dev has 1 task running from this conversation; wait for it or stop it first", onOpenFleet })));
+    await act(async () => {});
+    expect(document.body.querySelector('[role="alert"]')!.textContent).toBe("Dev has 1 task running from this conversation; wait for it or stop it first.");
+    expect(byText("Clear conversation")).toBeUndefined();
   });
 });

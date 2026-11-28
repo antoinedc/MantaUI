@@ -46,6 +46,8 @@ import { RoutineToolCard } from "./RoutineRunParts";
 import { routineToolKind } from "./routineToolParts";
 import { AgentChangeCard } from "./AgentChangeCard";
 import { isAgentChangePart } from "./agentChange";
+import { ChatTaskToolPart } from "./ChatTaskCards";
+import { isChatTaskStartPart } from "./chatTask";
 
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
 // right-hand meta (`.tool-h .r`). `+N` in ok, `−N` in danger, each omitted
@@ -247,6 +249,8 @@ export const ToolCall = memo(function ToolCall({
   defaultExpanded?: boolean;
 }) {
   if (isAgentChangePart(part)) return <AgentChangeCard part={part} />;
+  // an agent's `agent_start_task` call: the starting card while it runs, the refusal in plain words, nothing once its task's card exists
+  if (isChatTaskStartPart(part)) return <ChatTaskToolPart part={part} />;
   return <StandardToolCall part={part} verbose={verbose} defaultExpanded={defaultExpanded} />;
 });
 

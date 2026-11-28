@@ -37,6 +37,11 @@ export type BackgroundResultPart = OpencodePart & {
   blockedActions?: AutonomyAction[];
   /** Agents Phase 3c: Ask/Never actions the task reported doing, or whose command ran. */
   exceededActions?: AutonomyAction[];
+  /** Agent chat tasks: the task was started from an agent's own conversation; where it ran and how (the result carries them itself). */
+  startedFrom?: "agent-chat";
+  project?: { slug: string; name: string };
+  branch?: string;
+  isolation?: "worktree" | "none";
 };
 
 const usableActions = (actions: readonly AutonomyAction[] | undefined): AutonomyAction[] =>

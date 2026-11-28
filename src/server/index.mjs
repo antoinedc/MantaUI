@@ -1532,7 +1532,9 @@ const delegateEngine = createDelegateEngine({
   moveSession: (sid, directory) => oc.moveSession(sid, directory),
   sendChildPrompt: (input) => oc.sendPrompt(input),
   // Shared knowledge: a job's project is its worktree's, known only once it has been moved there.
-  pinKnowledgeSession: (args) => knowledgeEngine.pinSession(args),
+  // A task that must be pinned to its project (an agent's conversation task) gets the boundary closed: `{disabled:true}` only when the layer is
+  // explicitly off; "couldn't check" throws (the launch is refused, nothing is sent) — see knowledge `pinForTask`.
+  pinKnowledgeSession: (args) => knowledgeEngine.pinForTask(args),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   // N7 result to the parent: an admission like any other (§6.1) — a replaced
@@ -2721,6 +2723,9 @@ const agentsEngine = createAgentsEngine({
     identify: async (directory) => (await knowledgeEngine.registry?.identify(directory)) ?? null,
     // the registry's projects, for a seat's project name and the "Add a seat" list
     list: async () => (await knowledgeEngine.registry?.list?.()) ?? [],
+    // agent chat tasks: one project by id (its folders), and a READ-ONLY "which project is this folder?" that never registers anything
+    get: async (slug) => (await knowledgeEngine.registry?.get?.(slug)) ?? null,
+    lookup: async (directory) => (await knowledgeEngine.registry?.lookup?.(directory)) ?? null,
   },
   taskQuestions,
   routines: routinesEngine, // the monthly refresh routines (agent screens §5.4)
@@ -5217,6 +5222,25 @@ const handleRequest = async (req, res) => {
       respondJson(res, 200, await (path === "/api/agents/change" ? agentsEngine.change(body) : agentsEngine.handoff(body)));
     } catch (e) {
       // class-2 (BET-1460): the manta plugin (lead brief hook, agent_handoff / agent_change tools) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Agent chat tasks (docs/superpowers/specs/2026-11-28-agent-chat-tasks.md §6.2) ----------
+  // POST /api/agents/chat-projects body {sessionID, messageID, callID, offset?} → {ok:true, agent, projects, total, offset, nextOffset} | {ok:false, error}
+  // POST /api/agents/chat-start    body {sessionID, messageID, callID, project, title, brief, continueJob?} → {ok:true, jobId, project, seatAdded, branch, isolation} | {ok:false, error}
+  // A refusal is HTTP 200 (the tool relays the sentence). Consumer is the `manta` plugin (agent_projects / agent_start_task).
+  if (path === "/api/agents/chat-projects" || path === "/api/agents/chat-start") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      const body = (await readJsonBody(req)) ?? {};
+      respondJson(res, 200, await (path === "/api/agents/chat-projects" ? agentsEngine.chatProjects(body) : agentsEngine.chatStart(body)));
+    } catch (e) {
+      // class-2 (BET-1460): the manta plugin (agent_projects / agent_start_task tools) — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

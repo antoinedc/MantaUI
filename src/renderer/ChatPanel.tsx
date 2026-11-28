@@ -129,6 +129,8 @@ import { rememberAgentSession, useAgentConversation } from "./useAgentChats";
 import { agentModelSelection } from "./teamView";
 import { isTaskQuestionId, openQuestionCounts, taskQuestionRequest } from "./agentDispatch";
 import { OpenQuestionsByJobContext } from "./BackgroundCards";
+import { PendingApprovalContext, useProjectNameOf } from "./ChatTaskCards";
+import { blockingChatTasks, isChatTaskStartPart, startInputOf } from "./chatTask";
 import { useTaskQuestions } from "./hooks/useTaskQuestions";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
@@ -2424,7 +2426,10 @@ export function ChatPanel({
         setSessionChoice(cleared.sessionId, sessionChoice);
         await refresh();
       } catch (e) {
-        setSendError(String((e as Error)?.message ?? e));
+        const message = String((e as Error)?.message ?? e);
+        // tasks started from this conversation are still running (one started since the dialog opened): the header's dialog says so
+        if (/running from this conversation; wait for/.test(message)) setClearRefusal(message);
+        else setSendError(message);
       }
       return;
     }
@@ -3321,6 +3326,30 @@ export function ChatPanel({
     return next;
   }, [jobs, sessionId, messages, jobOwnership, pendingAgentTasks]);
 
+  // Clear conversation of an agent's conversation is refused while tasks started from it run (agent chat tasks FR-012): the tasks that
+  // stop it (the job store, plus a start whose call is still running), and the box's own refusal when a Clear lost a race.
+  const [clearRefusal, setClearRefusal] = useState<string | null>(null);
+  const projectNameOf = useProjectNameOf();
+  const clearBlock = useMemo(() => {
+    if (!agentChat) return undefined;
+    const starting = running
+      ? (messages ?? []).flatMap((m) =>
+          m.parts
+            .filter((p) => isChatTaskStartPart(p) && ["pending", "running"].includes(String((p as { state?: { status?: string } }).state?.status ?? "")))
+            .map((p) => {
+              const input = startInputOf(p);
+              return { key: `start:${String((p as { callID?: string }).callID ?? p.id)}`, title: input.title || "Starting a task", project: projectNameOf(input.project) };
+            }),
+        )
+      : [];
+    return {
+      tasks: blockingChatTasks(jobs, sessionId, starting),
+      refusal: clearRefusal,
+      onOpenFleet: () => window.dispatchEvent(new CustomEvent("manta-open-agents-page", { detail: { page: "fleet" } })),
+      onDismiss: () => setClearRefusal(null),
+    };
+  }, [agentChat, running, messages, jobs, sessionId, clearRefusal, projectNameOf]);
+
   // Server-path handoff cards live in the transcript tail (after the todos), not
   // the pinned stack; memoized on the records so streaming never re-renders them.
   const handoffCardsNode = useMemo(
@@ -3631,7 +3660,7 @@ export function ChatPanel({
         breadcrumb={projectName ? { project: projectName, window: winName } : null}
         agentConversation={
           agentChat
-            ? { name: agentChat.name, onOpenProfile: () => window.dispatchEvent(new CustomEvent("manta-open-agent-profile", { detail: { slug: agentChat.slug } })) }
+            ? { name: agentChat.name, onOpenProfile: () => window.dispatchEvent(new CustomEvent("manta-open-agent-profile", { detail: { slug: agentChat.slug } })), clearBlock }
             : undefined
         }
         mode={mode}
@@ -3684,6 +3713,7 @@ export function ChatPanel({
         <VoicePlaybackProvider active={isActive}>
           <ExplorerOwnerProvider owner={explorerOwner}>
           <OpenQuestionsByJobContext.Provider value={openQuestionsByJob}>
+          <PendingApprovalContext.Provider value={!!pendingApproval}>
           <Transcript
             messages={shownMessages ?? messages}
             virtuosoRef={virtuosoRef}
@@ -3721,6 +3751,7 @@ export function ChatPanel({
             motionStateRef={motionStateRef}
             rowLocatorRef={rowLocatorRef}
           />
+          </PendingApprovalContext.Provider>
           </OpenQuestionsByJobContext.Provider>
           </ExplorerOwnerProvider>
         </VoicePlaybackProvider>

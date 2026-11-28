@@ -117,16 +117,18 @@ export function resumeBlockedReason(full: boolean, cap: number): string | null {
 }
 
 /** "asked by you" / "asked by Manta in <chat>" / "a routine" — Details only, never on a row. */
-export function askedByText(by: FleetAskedBy, chatName: string | null): string {
+export function askedByText(by: FleetAskedBy, chatName: string | null, agentName?: string): string {
   if (by.by === "you") return "asked by you";
   if (by.by === "routine") return "a routine";
+  if (by.by === "agent-chat") return `asked by ${agentName || "your agent"} in your conversation`;
   return chatName ? `asked by Manta in ${chatName}` : "asked by Manta";
 }
 
 /** The Details row's value: "You" / "Manta in <chat>" / "A routine". */
-export function askedByWho(by: FleetAskedBy, chatName: string | null): string {
+export function askedByWho(by: FleetAskedBy, chatName: string | null, agentName?: string): string {
   if (by.by === "you") return "You";
   if (by.by === "routine") return "A routine";
+  if (by.by === "agent-chat") return `${agentName || "Your agent"}, in your conversation`;
   return chatName ? `Manta in ${chatName}` : "Manta";
 }
 
@@ -135,10 +137,10 @@ export function askedByWho(by: FleetAskedBy, chatName: string | null): string {
 /** The finished tasks that ended on a decision. An older box still sends "branch ready to merge" reviews: they are not items. */
 export const decisionReviews = (data: Pick<NeedsYou, "reviews"> | null | undefined): NeedsYouReview[] => (data?.reviews ?? []).filter((r) => r.endedBlocked === true);
 
-/** Decisions block (a change waiting for a click, a task that ended on a decision); open questions never do. */
+/** Decisions block (a change waiting for a click, a task that ended on a decision, an agent asking in its own conversation before it starts anything); a task's open questions never do. */
 export function needsCounts(data: NeedsYou | null | undefined): { decisions: number; questions: number } {
   if (!data) return { decisions: 0, questions: 0 };
-  return { decisions: data.changes.length + decisionReviews(data).length, questions: data.questions.length };
+  return { decisions: data.changes.length + decisionReviews(data).length + (data.chatQuestions?.length ?? 0), questions: data.questions.length };
 }
 
 /** The sidebar's Needs you row: one red number (decisions only), or a small blue dot when only questions are open. */
@@ -153,7 +155,8 @@ export function needsTop(data: NeedsYou | null | undefined, agentName: (slug: st
   if (!data || decisions === 0) return null;
   const change = data.changes[0];
   const review = decisionReviews(data)[0];
-  const first = change ? `Approve the change to ${change.agentName || agentName(change.slug ?? "")}` : `${review.name} needs your decision`;
+  const asking = data.chatQuestions?.[0];
+  const first = change ? `Approve the change to ${change.agentName || agentName(change.slug ?? "")}` : review ? `${review.name} needs your decision` : `${asking?.agentName || agentName(asking?.slug ?? "")} is waiting for your answer`;
   return {
     heading: decisions === 1 ? "1 decision is waiting for you" : `${decisions} decisions are waiting for you`,
     detail: decisions === 1 ? first : `${first}, and ${decisions - 1} ${decisions === 2 ? "other" : "others"}`,

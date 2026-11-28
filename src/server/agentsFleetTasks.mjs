@@ -3,6 +3,7 @@
 // caller's (agents.mjs `fleetTasks`). Nothing here invents a status: a task is running, paused by the user, or ended one of four ways.
 
 import { LEAD_SLUG } from "../shared/agentsShared.mjs";
+import { AGENT_PACKAGE_PREFIX } from "../shared/subagentSync.mjs";
 import { displayTitle } from "./jobTitle.mjs";
 import { jobModelOf } from "./jobModel.mjs";
 
@@ -18,9 +19,16 @@ export function localMidnight(ms) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
-/** Who asked: a refresh / check-up task is a routine, a handoff is Manta (with its chat), anything else is the user. */
+/** A task an agent started from its own conversation (agent chat tasks): it is its own row, in its own project. */
+const isChatTask = (job) => job?.startedFrom === "agent-chat";
+
+/** Who asked: a refresh / check-up task is a routine, an agent's own conversation asked for its task, a handoff is Manta (with its chat), anything else is the user. */
 export function askedByOf(job) {
   if (job?.deliverResult === false) return { by: "routine" };
+  if (isChatTask(job)) {
+    const agent = typeof job.agent === "string" && job.agent.startsWith(AGENT_PACKAGE_PREFIX) ? job.agent.slice(AGENT_PACKAGE_PREFIX.length) : "";
+    return { by: "agent-chat", agentSlug: agent, sessionId: typeof job.parentSessionID === "string" && job.parentSessionID ? job.parentSessionID : null };
+  }
   if (job?.requestedBy === "manta") return { by: "manta", sessionId: typeof job.parentSessionID === "string" && job.parentSessionID ? job.parentSessionID : null };
   return { by: "you" };
 }
@@ -77,11 +85,12 @@ const startedOf = (job) => job.startedAt ?? job.createdAt ?? 0;
 const UNTITLED_SESSION = "Untitled session";
 const isEnded = (j) => j.status === "done" || j.status === "failed" || j.status === "stopped";
 
-/** A tree node's descendants, pre-order. */
-function descendantsOf(node) {
+/** A tree node's descendants, pre-order; a node `skip` names is left out with everything beneath it. */
+function descendantsOf(node, skip = () => false) {
   const out = [];
   const walk = (n) => {
     for (const c of n.children ?? []) {
+      if (skip(c)) continue;
       out.push(c);
       walk(c);
     }
@@ -116,6 +125,17 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
   rounds = rounds.filter((j) => j?.specialist === true);
   const jobById = new Map(rounds.map((j) => [j.id, j]));
   const statusOf = (sid) => (sid ? (sessions?.statusOf?.(sid) ?? {}) : {});
+  // a task an agent started from its own conversation: its own row, so the conversation's row never lists it (nor anything beneath it)
+  const isChatNode = (n) => !!n?.job && isChatTask(jobById.get(n.job.id));
+  const chatNodes = new Map(); // chat task job id → its tree node (its subagents are that row's subs)
+  const collectChatNodes = (n) => {
+    for (const c of n.children ?? []) {
+      if (isChatNode(c)) chatNodes.set(c.job.id, c);
+      collectChatNodes(c);
+    }
+  };
+  /** The project a row shows: the task's own (an agent-chat task names it), else the one owning its folder. */
+  const projectFor = (j) => (isChatTask(j) && j.project?.slug && j.project?.name ? { slug: j.project.slug, name: j.project.name } : projectOf(j));
 
   // ---- the session tree: every root with what is beneath it ----
   const entries = []; // { key, project, root, subs: [{node|job}], jobIds }
@@ -123,7 +143,8 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
   for (const p of sessions?.projects ?? []) {
     for (const root of p.tree ?? []) {
       if (!root?.sessionId) continue; // a terminal window has no session: never a row
-      const below = descendantsOf(root);
+      collectChatNodes(root);
+      const below = descendantsOf(root, isChatNode);
       const entry = { key: root.sessionId, project: p, root, below, extra: [], jobIds: new Set(root.job ? [root.job.id] : []) };
       for (const n of [root, ...below]) {
         if (n.sessionId) rootOf.set(n.sessionId, entry);
@@ -133,10 +154,11 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
     }
   }
   const entryOfJob = (j) => (sessions ? (rootOf.get(j.childSessionID) ?? rootOf.get(j.parentSessionID) ?? null) : null);
+  const ownRootJobIds = new Set(entries.map((e) => e.root.job?.id).filter(Boolean));
 
   const askedFor = (j) => askedByOf(j);
   const jobBase = (job) => {
-    const project = projectOf(job);
+    const project = projectFor(job);
     return {
       jobId: job.id,
       rootJobId: job.rootJobId ?? job.id,
@@ -178,6 +200,11 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
   const orphans = [];
   const live = rounds.filter((j) => j.status === "running" || j.status === "paused");
   for (const j of live) {
+    // an agent-chat task is never folded under its conversation: its own tree root is its row, else it is a row of its own
+    if (isChatTask(j)) {
+      if (!ownRootJobIds.has(j.id)) orphans.push(j);
+      continue;
+    }
     const entry = entryOfJob(j);
     if (entry && entry.root.job?.id !== j.id) {
       if (!entry.jobIds.has(j.id)) {
@@ -202,7 +229,7 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
     const paused = !anyRunning;
     const isTask = root.job != null;
     const dir = rootDirectory(p, root, rootJob);
-    const proj = (rootJob ? projectOf(rootJob) : null) ?? sessions.projectOfDir?.(dir) ?? null;
+    const proj = (rootJob ? projectFor(rootJob) : null) ?? sessions.projectOfDir?.(dir) ?? null;
     // when it was paused: the row's own job, else the newest pause among the jobs beneath it
     const pausedBeneath = [...entry.extra, ...entry.below.map((n) => (n.job ? jobById.get(n.job.id) : null))].filter((j) => j?.status === "paused");
     const pausedAt = paused ? (rootJob?.pausedAt ?? pausedBeneath.map((j) => j.pausedAt ?? 0).sort((a, b) => b - a)[0] ?? null) : null;
@@ -237,7 +264,7 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
       oneLiner: lineOf({ sessionId: j.childSessionID ?? null, jobProgress: j.jobProgress ?? null, job: j }) || "",
       status: j.status === "paused" ? "paused-by-you" : "in-progress",
       pausedAt: j.status === "paused" ? (j.pausedAt ?? null) : null,
-      subs: [],
+      subs: chatNodes.has(j.id) ? descendantsOf(chatNodes.get(j.id)).map(subOfNode) : [],
     });
   }
   running.sort((a, b) => (a.status === b.status ? b.startedAt - a.startedAt : a.status === "in-progress" ? -1 : 1));
@@ -248,7 +275,7 @@ export function shapeFleetTasks({ rounds, now, slugOfJob, projectOf, verdictOf, 
   const groups = new Map(); // group key → { entry|null, jobs: newest first }
   for (const j of endedJobs) {
     const entry = entryOfJob(j);
-    const own = entry && entry.root.job?.id !== j.id ? entry : null;
+    const own = entry && !isChatTask(j) && entry.root.job?.id !== j.id ? entry : null;
     const key = own ? `s:${own.key}` : `j:${j.id}`;
     const g = groups.get(key) ?? { entry: own, jobs: [] };
     g.jobs.push(j);

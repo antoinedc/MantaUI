@@ -5,6 +5,8 @@
 //    decision. A change shows "Manta recommends …" with Apply / Discard; a finished task shows its result card and Done.
 //  - OPEN QUESTIONS don't — "Open question · keeps working", blue: the task carries on, and if no one answers it goes with the
 //    recommended option.
+// A question an agent asked in its OWN conversation is a decision too (nothing starts until it is answered); it is answered there:
+// the item opens that conversation (it lists under "Team", since it has no project yet).
 // A finished branch nobody merged is NOT an item (it is a sentence in Fleet's Ended today). Each item is the EXISTING card it
 // belongs to (QuestionCard, AgentChangeView, BackgroundResultCard) under a title and who-line — the only new markup here.
 // Every press ends visibly: a refusal is a role="alert" line in the item, a success is a status line that stays until the page is
@@ -12,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, HelpCircle } from "lucide-react";
-import type { AgentChange, AgentInfo, FleetTasks, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
+import type { AgentChange, AgentInfo, ChatQuestion, FleetTasks, NeedsYou, NeedsYouReview, TaskQuestion } from "../../shared/types";
 import { AgentBadge } from "../AgentBadge";
 import { AgentChangeView } from "../AgentChangeCard";
 import { leadAgent, taskQuestionRequest } from "../agentDispatch";
@@ -26,7 +28,7 @@ import { ReadBannerView, Skeleton, useBoxOffline } from "./FleetPage";
 import { errText, reviewPart } from "./agentsView";
 import { changeRecommendation, changeTodo, decisionReviews, groupNeedsByProject, needsCounts, questionAssumption, readBanner, UNREACHABLE_TITLE, type NeedsUrgency } from "./fleetView";
 import { useAfter, type AgentsRead } from "./useAgentsRead";
-import { useOpenTask } from "./useOpenTask";
+import { openChatWindow, useOpenTask } from "./useOpenTask";
 
 const SKELETON_DELAY_MS = 150;
 
@@ -35,6 +37,7 @@ type Item =
   | (Base & { kind: "change"; change: AgentChange })
   | (Base & { kind: "review"; review: NeedsYouReview })
   | (Base & { kind: "question"; q: TaskQuestion })
+  | (Base & { kind: "chat-question"; cq: ChatQuestion })
   | (Base & { kind: "done"; text: string; was: "change" | "review" | "question" });
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -157,6 +160,58 @@ function QuestionItem({ item, info, offline, busyOpen, onOpen, onDone, onChanged
   );
 }
 
+/** "Ronda (Recommended)" → "Ronda (recommended)": the options as one sentence reads them. */
+const sayOption = (label: string) => label.replace(/\(Recommended\)\s*$/i, "(recommended)");
+
+/** A question an agent asked in its own conversation: not answered here (one answer surface), the button opens the conversation. */
+function ChatQuestionItem({ item, info, offline }: { item: Base & { kind: "chat-question"; cq: ChatQuestion }; info: AgentInfo | undefined; offline: boolean }) {
+  const cq = item.cq;
+  const name = cq.agentName || info?.name || cq.slug;
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const open = async () => {
+    if (busy) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      const r = await window.api.agentsOpenChat({ slug: cq.slug });
+      await openChatWindow(r.tmuxSession, r.windowIndex);
+    } catch (e) {
+      console.warn("[agents] couldn't open the conversation:", e);
+      setFailed(true);
+    }
+    setBusy(false);
+  };
+  const options = cq.options.map(sayOption).filter(Boolean);
+  return (
+    <ItemShell
+      item={item}
+      title={cq.question}
+      titleId={`todo-${cq.id}`}
+      agentBadge={<AgentBadge size="sm" agent={badgeFor(info, name, cq.slug)} />}
+      agentName={name}
+      aside="in your conversation"
+      lead={`${name} is waiting for your answer before it starts anything.${options.length > 0 ? ` Options: ${options.join(", ")}.` : ""}`}
+      error={null}
+    >
+      <button
+        type="button"
+        onClick={() => void open()}
+        disabled={offline || busy}
+        title={offline ? UNREACHABLE_TITLE : undefined}
+        className="inline-flex h-[30px] items-center rounded-sm border border-border bg-bg-soft px-3 text-label font-medium text-text shadow-sm hover:bg-fill-hover focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {busy ? "Opening…" : "Open conversation"}
+      </button>
+      {failed && (
+        <div role="alert" data-testid="needs-you-chat-open-error" className="mt-2 break-words text-meta text-danger">
+          {`Couldn’t open ${name}’s conversation; try again`}
+        </div>
+      )}
+    </ItemShell>
+  );
+}
+
 function ChangeItem({ item, agents, offline, busyOpen, onOpen, onSettled }: { item: Base & { kind: "change"; change: AgentChange }; agents: ReadonlyArray<AgentInfo> | null; offline: boolean; busyOpen: boolean; onOpen: (jobId: string) => void; onSettled: (next: AgentChange) => void }) {
   const change = item.change;
   const architect = agents?.find((a) => a.role === "architect");
@@ -270,13 +325,14 @@ export function NeedsYouPage({ needs, tasks, onOpenFleet }: { needs: AgentsRead<
     // a change the user dealt with stays, in its new state, after the next read stops listing it
     for (const s of settled.values()) if (!live.has(s.id)) list.push({ id: s.id, kind: "change", urgency: "decision", project: data.changeProjects?.[s.id] ?? null, at: s.createdAt, change: s });
     for (const r of decisionReviews(data)) list.push({ id: r.jobId, kind: "review", urgency: "decision", project: r.project, at: r.finishedAt, review: r });
+    for (const c of data.chatQuestions ?? []) list.push({ id: `chat:${c.sessionId}:${c.id}`, kind: "chat-question", urgency: "decision", project: null, at: c.askedAt, cq: c });
     for (const q of data.questions) list.push({ id: q.id, kind: "question", urgency: "question", project: q.project, at: q.askedAt, q });
     const out = list.map((i) => dealt.get(i.id) ?? i);
     for (const d of dealt.values()) if (!out.some((i) => i.id === d.id)) out.push(d);
     return out.sort((a, b) => a.at - b.at); // longest waiting first
   }, [data, settled, dealt]);
 
-  const groups = groupNeedsByProject(items, projectName).map((g) => ({ ...g, label: g.key === "" && g.items.every((i) => i.kind === "change" || (i.kind === "done" && i.was === "change")) ? "Team" : g.label }));
+  const groups = groupNeedsByProject(items, projectName).map((g) => ({ ...g, label: g.key === "" && g.items.every((i) => i.kind === "change" || i.kind === "chat-question" || (i.kind === "done" && i.was === "change")) ? "Team" : g.label }));
   const counts = needsCounts(data);
   const headerCounts = [counts.decisions ? plural(counts.decisions, "decision", "decisions") : "", counts.questions ? plural(counts.questions, "optional question", "optional questions") : ""].filter(Boolean).join(" · ");
 
@@ -301,6 +357,7 @@ export function NeedsYouPage({ needs, tasks, onOpenFleet }: { needs: AgentsRead<
   const render = (i: Item) => {
     if (i.kind === "done") return <DoneRow key={i.id} text={i.text} />;
     if (i.kind === "change") return <ChangeItem key={i.id} item={i} agents={agents} offline={offline} busyOpen={i.change.origin.kind === "job" && busyId === i.change.origin.jobId} onOpen={(id) => void openSession(id)} onSettled={settle} />;
+    if (i.kind === "chat-question") return <ChatQuestionItem key={i.id} item={i} info={infoOf(i.cq.slug)} offline={offline} />;
     if (i.kind === "review") return <ReviewItem key={i.id} item={i} info={infoOf(i.review.agentSlug)} offline={offline} onDone={deal} onChanged={() => void needs.reload()} />;
     return <QuestionItem key={i.id} item={i} info={infoOf(i.q.agentSlug)} offline={offline} busyOpen={busyId === i.q.jobId} onOpen={(id) => void openSession(id)} onDone={deal} onChanged={() => void needs.reload()} />;
   };

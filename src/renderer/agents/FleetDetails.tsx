@@ -142,7 +142,7 @@ export function FleetDetails({
         </span>
       </Row>
       <Row k="Project">{task.projectName ?? "No project"}</Row>
-      <Row k="Asked by">{askedByWho(task.askedBy, chatName)}</Row>
+      <Row k="Asked by">{askedByWho(task.askedBy, chatName, agentName)}</Row>
       {modelLabel && (
         <Row k="Model">
           <span data-testid="fleet-details-model">{modelLabel}</span>

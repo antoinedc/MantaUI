@@ -278,3 +278,19 @@ describe("banners: a stale read says so, with the last update's time", () => {
     });
   });
 });
+
+describe("an agent's own conversation asked for the task (agent chat tasks)", () => {
+  const by = { by: "agent-chat" as const, agentSlug: "dev", sessionId: "ses_conv" };
+  it("Details' Asked by reads '<Agent>, in your conversation'", () => {
+    expect(askedByWho(by, null, "Dev")).toBe("Dev, in your conversation");
+    expect(askedByText(by, null, "Dev")).toBe("asked by Dev in your conversation");
+    expect(askedByWho(by, null)).toBe("Your agent, in your conversation");
+  });
+  it("a question in a conversation is a decision: it counts, and tops Fleet's card", () => {
+    const data = { questions: [], changes: [], reviews: [], count: 1, chatQuestions: [{ id: "f", slug: "dev", agentName: "Dev", sessionId: "s", question: "Which project?", options: [], askedAt: 1 }] } as never;
+    expect(needsCounts(data)).toEqual({ decisions: 1, questions: 0 });
+    expect(sidebarNeeds(data)).toEqual({ decisions: 1, questionDot: false });
+    expect(needsTop(data, (s) => s)).toEqual({ heading: "1 decision is waiting for you", detail: "Dev is waiting for your answer" });
+    expect(needsCounts({ questions: [], changes: [], reviews: [], count: 0 } as never)).toEqual({ decisions: 0, questions: 0 });
+  });
+});
