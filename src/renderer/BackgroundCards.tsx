@@ -25,6 +25,8 @@ import { ARCHITECT_AGENT_KEY, agentSlugOf, isAgentTask, leadDisplayName, package
 import { openTaskPanel } from "./explorer/explorerStore";
 import { useTaskModelLabel } from "./taskModel";
 import { ArchitectChanges } from "./ArchitectChanges";
+import { ChatTaskResultCard, ChatTaskRunCard } from "./ChatTaskCards";
+import { isChatTask } from "./chatTask";
 import { ClampedMarkdown } from "./ClampedMarkdown";
 import { nowMs, useClockTick, AGE_TICK_MS, WORKING_TICK_MS } from "./clock";
 import {
@@ -189,6 +191,8 @@ const RunCard = memo(function RunCard({
         : NEEDS_DECISION_LABEL
       : content.headline
     : "";
+  // a task an agent started from its own conversation is one variant of this card (spec agent-chat-tasks §7)
+  if (job && isChatTask(job)) return <ChatTaskRunCard card={card} job={job} content={content} headline={headline} questions={questions} open={() => void open()} busy={busy} error={error} />;
   return (
     <div
       className={
@@ -412,7 +416,10 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
   const agentTitle = packageAgentDisplayName(part.agent, packageAgents);
   const title = resultTitleFor(part, agentTitle);
   const { open, busy, error } = useOpenSession(jobId);
+  const chatJob = useStore((s) => (jobId ? findJobById(s.jobs, jobId) : null));
   const resultSession = typeof part.sessionID === "string" ? part.sessionID : "";
+  // a task an agent started from its own conversation: the same head as its running card (the result carries its project itself)
+  if (part.startedFrom === "agent-chat" || isChatTask(chatJob)) return <ChatTaskResultCard part={part} job={chatJob ?? null} title={part.name || chatJob?.title || "Task"} open={() => void open()} busy={busy} error={error} />;
   const blocked = part.endedBlocked === true;
   const tone = resultTone(part.state, blocked);
   const text = (part.text ?? "").trim();

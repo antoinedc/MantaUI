@@ -102,7 +102,7 @@ export function startInputOf(part: OpencodePart): { title: string; project: stri
 }
 
 /** "billing-service-0a1b2c3d4e" → "billing service" (a project id's name part); anything else as the agent wrote it. */
-function projectWords(project: string): string {
+export function projectWords(project: string): string {
   const m = /^(.+)-[0-9a-f]{10}$/.exec(project);
   return (m ? m[1] : project).replace(/-/g, " ").trim();
 }

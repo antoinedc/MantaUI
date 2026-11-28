@@ -129,6 +129,7 @@ import { rememberAgentSession, useAgentConversation } from "./useAgentChats";
 import { agentModelSelection } from "./teamView";
 import { isTaskQuestionId, openQuestionCounts, taskQuestionRequest } from "./agentDispatch";
 import { OpenQuestionsByJobContext } from "./BackgroundCards";
+import { PendingApprovalContext } from "./ChatTaskCards";
 import { useTaskQuestions } from "./hooks/useTaskQuestions";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
@@ -3684,6 +3685,7 @@ export function ChatPanel({
         <VoicePlaybackProvider active={isActive}>
           <ExplorerOwnerProvider owner={explorerOwner}>
           <OpenQuestionsByJobContext.Provider value={openQuestionsByJob}>
+          <PendingApprovalContext.Provider value={!!pendingApproval}>
           <Transcript
             messages={shownMessages ?? messages}
             virtuosoRef={virtuosoRef}
@@ -3721,6 +3723,7 @@ export function ChatPanel({
             motionStateRef={motionStateRef}
             rowLocatorRef={rowLocatorRef}
           />
+          </PendingApprovalContext.Provider>
           </OpenQuestionsByJobContext.Provider>
           </ExplorerOwnerProvider>
         </VoicePlaybackProvider>
