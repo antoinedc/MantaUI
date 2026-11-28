@@ -1150,3 +1150,20 @@ test("AC-10.2 Needs you's review of a chat task carries the task's own project (
     await f.cleanup();
   }
 });
+
+test("a task Dev starts from its own conversation is told to the suggestion counter (counted, but never the lead's offer)", async () => {
+  const noted = [];
+  const f = await fixture({ suggestions: { noteHandoff: (i) => (noted.push(i), { pending: Promise.resolve() }) } });
+  try {
+    const b = startCall(f, { project: RONDA, title: "Fix Ronda", brief: "Make it pass." });
+    const r = await f.engine.chatStart(b);
+    assert.equal(r.ok, true);
+    assert.equal(noted.length, 1);
+    assert.deepEqual(
+      { jobId: noted[0].jobId, title: noted[0].title, brief: noted[0].brief, project: noted[0].project, chat: noted[0].chat, lead: noted[0].lead },
+      { jobId: r.jobId, title: "Fix Ronda", brief: "Make it pass.", project: RONDA, chat: SES, lead: false },
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
