@@ -13,7 +13,6 @@ import { isUnknownChannelError } from "../chatUtils";
 
 export const FLEET_REFETCH_DEBOUNCE_MS = 1000;
 export const HISTORY_LIMIT = 50;
-export const OVERVIEW_PREVIEW = { research: 4 } as const;
 export const SEAT_BRIEF_MAX = 4000;
 
 // ---- which page is showing ----
@@ -21,23 +20,29 @@ export const SEAT_BRIEF_MAX = 4000;
 /** null = closed. Needs you is its own page (Fleet redesign): the Fleet page, the Needs you page, or one agent's profile. */
 export type AgentsView = null | { page: "fleet" } | { page: "needs" } | { page: "profile"; slug: string };
 
-export type ProfileTab = "overview" | "research" | "seats" | "history" | "learned" | "tests";
-export const PROFILE_TABS: ReadonlyArray<{ id: ProfileTab; label: string }> = [
-  { id: "overview", label: "Overview" },
-  { id: "research", label: "Research" },
-  { id: "seats", label: "Seats" },
-  { id: "history", label: "History" },
-];
-/** Architect v2 §3.4: the Tests tab, last, shown only when the agent has trial runs. */
-export const TESTS_TAB: { id: ProfileTab; label: string } = { id: "tests", label: "Tests" };
+export type ProfileTab = "overview" | "skills" | "seats" | "learned" | "history" | "research" | "settings";
+const TAB_LABEL: Record<ProfileTab, string> = {
+  overview: "Overview",
+  skills: "Skills",
+  seats: "Seats",
+  learned: "Learned",
+  history: "History",
+  research: "Research",
+  settings: "Settings",
+};
 
-/** Architect v2 §5.1: the Learned tab, before Tests: shown whenever the box sends the agent's learned rules (even none), never for the lead. */
-export const LEARNED_TAB: { id: ProfileTab; label: string } = { id: "learned", label: "Learned" };
-
-/** The tabs a profile shows: the four, plus Learned when the box sends the agent's rules, plus Tests when it sent any trial for this agent. */
-export function profileTabs(profile: { trials?: ReadonlyArray<unknown>; learned?: ReadonlyArray<unknown>; info?: { role?: string } }): ReadonlyArray<{ id: ProfileTab; label: string }> {
-  const learned = Array.isArray(profile.learned) && profile.info?.role !== "lead";
-  return [...PROFILE_TABS, ...(learned ? [LEARNED_TAB] : []), ...((profile.trials?.length ?? 0) > 0 ? [TESTS_TAB] : [])];
+/**
+ * The tabs a profile shows, in this order: Overview, Skills, Seats, Learned, History, Research, Settings. The Architect works in every
+ * project, so it has no Seats; Learned is shown when the box sends the agent's rules (even none), never for the lead. Trial runs are
+ * part of History, so there is no Tests tab.
+ */
+export function profileTabs(profile: { learned?: ReadonlyArray<unknown>; info?: { role?: string } }): ReadonlyArray<{ id: ProfileTab; label: string }> {
+  const role = profile.info?.role;
+  const ids: ProfileTab[] = ["overview", "skills"];
+  if (role !== "architect") ids.push("seats");
+  if (Array.isArray(profile.learned) && role !== "lead") ids.push("learned");
+  ids.push("history", "research", "settings");
+  return ids.map((id) => ({ id, label: TAB_LABEL[id] }));
 }
 
 /** The tab a key press moves to (arrows wrap, Home / End jump); null for any other key. Selection follows focus. */
@@ -116,31 +121,14 @@ export function reviewPart(r: NeedsYouReview): BackgroundResultPart {
 
 // ---- Profile ----
 
-const BUILT_BY: Record<AgentProfile["builtBy"], string> = {
-  architect: "Architect",
-  manta: "Manta",
-  user: "You",
-  "built-in": "Built in",
-};
-
 const ROLE_LABEL: Record<AgentProfile["info"]["role"], string> = { lead: "Lead", architect: "Architect", specialist: "Specialist" };
 
-/** The header's one line of who it is: `@seo · Specialist · 2 seats`. What the details pane says (model, works, built by) is not repeated. */
+/** The header's one line: `@seo · Specialist · Edits code · Auto` (and where it works, for Manta and the Architect). */
 export function factsLine(profile: AgentProfile): string[] {
-  const { info, seats } = profile;
-  const where = info.role === "specialist" ? (seats.length === 0 ? "No seats yet" : `${seats.length} ${seats.length === 1 ? "seat" : "seats"}`) : "Works in every project";
-  return [`@${info.slug}`, ROLE_LABEL[info.role] ?? "Specialist", where];
-}
-
-/** The details pane's rows `[key, value]`: model, what it does to code, who built it, when it last changed (left out when never). */
-export function detailRows(profile: AgentProfile): Array<[string, string]> {
-  const rows: Array<[string, string]> = [
-    ["Model", profile.info.model || "Auto"],
-    ["Works", profile.info.isolation === "worktree" ? "Edits code" : "Read-only"],
-    ["Built by", BUILT_BY[profile.builtBy] ?? "You"],
-  ];
-  if (profile.lastChangedAt != null) rows.push(["Changed", dateLabel(profile.lastChangedAt)]);
-  return rows;
+  const { info } = profile;
+  const facts = [`@${info.slug}`, ROLE_LABEL[info.role] ?? "Specialist", info.isolation === "worktree" ? "Edits code" : "Read-only", info.model || "Auto"];
+  if (info.role !== "specialist") facts.push("Works in every project");
+  return facts;
 }
 
 export const seatNotesLabel = (notes: number | null): string => (notes == null ? "—" : `${notes} ${notes === 1 ? "note" : "notes"}`);
@@ -155,6 +143,7 @@ export function memoryLabel(access: "read" | "read-write" | "none"): string {
 export function historyWho(change: Pick<AgentChange, "origin">): string {
   if (change.origin.kind === "job") return "Architect";
   if (change.origin.kind === "restore") return "You";
+  if (change.origin.kind === "settings") return "You · in Settings";
   if (change.origin.kind === "learned") return "Manta · learned from you";
   return "Manta · for you";
 }
@@ -188,10 +177,17 @@ export function historyStatus(change: Pick<AgentChange, "state" | "decidedBy" | 
   }
 }
 
-/** The history pane's counts: live (applied), waiting (pending), undone. */
-export function historyCounts(records: ReadonlyArray<Pick<AgentChange, "state">>): { live: number; waiting: number; undone: number } {
-  const n = (state: AgentChange["state"]) => records.filter((r) => r.state === state).length;
-  return { live: n("applied"), waiting: n("pending"), undone: n("undone") };
+/** History lists only changes that went live (applied), newest first. Pending, undone, refused and held ones never appear. */
+export function appliedHistory<T extends Pick<AgentChange, "state" | "decidedAt" | "createdAt">>(records: ReadonlyArray<T>): T[] {
+  return records.filter((r) => r.state === "applied").sort((a, b) => (b.decidedAt ?? b.createdAt) - (a.decidedAt ?? a.createdAt));
+}
+
+/** Who made a live change and how it landed, for the expanded row: "Architect · you approved it". */
+export function historyHow(change: Pick<AgentChange, "origin" | "decidedBy">): string {
+  const kind = change.origin.kind;
+  if (kind === "settings") return historyWho(change);
+  if (kind === "restore") return `${historyWho(change)} · restored an earlier version`;
+  return `${historyWho(change)} · ${change.decidedBy === "click" ? "you approved it" : "applied automatically"}`;
 }
 
 /** The id of the newest live (applied) change — the one whose card carries the page's Undo; null when none is live. */
