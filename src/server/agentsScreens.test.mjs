@@ -642,7 +642,7 @@ test("fleetRecap: pure templates for changes and answers, plural forms, six line
   assert.deepEqual(fleetRecap([], [], T0), []);
 });
 
-test("needs you: open questions, pending changes box-wide (not expired), and finished worktree tasks nobody reviewed — newest first, one count", async () => {
+test("needs you: open questions, pending changes box-wide (not expired), and finished tasks that ended on a decision — newest first, one count; an unmerged branch is not an item", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -659,14 +659,16 @@ test("needs you: open questions, pending changes box-wide (not expired), and fin
       job({ id: "r3", filesChanged: 0, branch: "agent/dev-4" }),
       job({ id: "r4", status: "running", filesChanged: 5, finishedAt: null }),
       job({ id: "r5", agent: "agent-architect", agentName: "Architect", filesChanged: 1, branch: "b" }),
+      job({ id: "d1", endedBlocked: true, filesChanged: 2, branch: "agent/dev-5", finishedAt: T0 - 1000, result: "Needs a choice." }),
     ];
     await f.engine.reviewDone("r2");
     const ny = await f.engine.needsYou();
     assert.deepEqual(ny.questions.map((q) => q.id), ["tq_1"]);
     assert.deepEqual(ny.changes.map((c) => c.id), ["p2", "p1"]);
-    assert.deepEqual(ny.reviews.map((r) => r.jobId), ["r1"]);
-    assert.deepEqual(ny.reviews[0], { jobId: "r1", agentSlug: "dev", project: SITE, name: "fix the build", finishedAt: T0 - 1000, filesChanged: 2, branch: "agent/dev-2", resultText: "Fixed the build.", reason: "Branch ready to merge · 2 files", endedBlocked: false });
+    assert.deepEqual(ny.reviews.map((r) => r.jobId), ["d1"], "r1..r5 are finished branches nobody merged: not items");
+    assert.deepEqual(ny.reviews[0], { jobId: "d1", agentSlug: "dev", project: SITE, name: "fix the build", finishedAt: T0 - 1000, filesChanged: 2, branch: "agent/dev-5", resultText: "Needs a choice.", reason: "Needs a decision", endedBlocked: true });
     assert.equal(ny.count, 4);
+    assert.equal(f.w.branchCalls.length, 0, "Needs you never asks git");
     assert.ok(!("prior" in ny.changes[0]), "the wire shape");
     // the review is remembered (≤200) in the counters file
     assert.deepEqual(JSON.parse(await readFile(join(f.root, ".fleet.json"), "utf-8")).reviewed, ["r2"]);
@@ -679,7 +681,7 @@ test("needs you: open questions, pending changes box-wide (not expired), and fin
 
 // ---- rule set P1: what needs the user (docs/superpowers/specs/2026-11-26-agents-screens.md §2.1) ----
 
-test("needs you (P1): only a decision the task is blocked on, or the user's own unmerged branch — Manta-handed, no-change, failed and merged work is not an item", async () => {
+test("needs you (P1): only a decision the task is blocked on — Manta-handed, no-change, failed, merged and the user's own unmerged work is not an item", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -698,17 +700,13 @@ test("needs you (P1): only a decision the task is blocked on, or the user's own 
     const ny = await f.engine.needsYou();
     assert.deepEqual(ny.reviews.map((r) => [r.jobId, r.reason, r.endedBlocked]), [
       ["blocked-mine", "Needs a decision", true],
-      ["mine", "Branch ready to merge · 3 files", false],
-      ["unk", "Branch ready to merge · 1 file", false],
       ["blocked-handed", "Needs a decision", true],
     ]);
-    assert.equal(ny.count, 4);
-    // a decision needs no git; only a user-requested, changed, finished branch is looked up
-    assert.deepEqual(f.w.branchCalls.map((c) => c.branch).sort(), ["b/landed", "b/mine", "b/unknown"]);
-    assert.ok(f.w.branchCalls.every((c) => c.directory === "/repo/site"));
+    assert.equal(ny.count, 2);
+    assert.equal(f.w.branchCalls.length, 0, "a decision needs no git, and nothing else is looked up");
     // a decision is cleared by Done too
     await f.engine.reviewDone("blocked-mine");
-    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["mine", "unk", "blocked-handed"]);
+    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["blocked-handed"]);
   } finally {
     await f.cleanup();
   }
@@ -728,37 +726,18 @@ test("needs you (P1): a task's newest round decides; an old round's decision doe
   }
 });
 
-test("needs you (P1): git answers are cached for a short while, then asked again", async () => {
-  const f = await fixture();
-  try {
-    await f.engine.init();
-    f.w.jobs = [job({ id: "mine", filesChanged: 3, branch: "b/mine" })];
-    await f.engine.needsYou();
-    await f.engine.needsYou();
-    await f.engine.fleet();
-    assert.equal(f.w.branchCalls.length, 1, "one lookup serves the list and the grid");
-    f.w.clock += 60_000;
-    f.w.branches["b/mine"] = "landed";
-    const ny = await f.engine.needsYou();
-    assert.equal(f.w.branchCalls.length, 2);
-    assert.deepEqual(ny.reviews, [], "merged since: it clears itself");
-  } finally {
-    await f.cleanup();
-  }
-});
-
-test("needs you (P1): a failing branch check keeps the item and never fails the read", async () => {
+test("needs you (P1): the list never depends on git, so a failing branch check cannot touch it", async () => {
   const f = await fixture({ extra: { branchState: async () => { throw new Error("git exploded"); } } });
   try {
     await f.engine.init();
-    f.w.jobs = [job({ id: "mine", filesChanged: 3, branch: "b/mine" })];
-    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["mine"]);
+    f.w.jobs = [job({ id: "mine", filesChanged: 3, branch: "b/mine" }), job({ id: "blocked", endedBlocked: true })];
+    assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId), ["blocked"]);
   } finally {
     await f.cleanup();
   }
 });
 
-test("fleet (P1): a cell says needs-you for exactly what Needs you lists — a decision, or the user's own unmerged branch; Manta-handed work is done", async () => {
+test("fleet (P1): a cell says needs-you for exactly what Needs you lists — a decision; finished work is done, merged or not", async () => {
   const f = await fixture();
   try {
     await f.engine.init();
@@ -815,9 +794,9 @@ test("opening a task's session counts as looking at it: every round of the task 
   try {
     await f.engine.init();
     f.w.jobs = [
-      job({ id: "a1", rootJobId: "a1", filesChanged: 2, branch: "b/a", finishedAt: T0 - 9000, supersededBy: "a2" }),
-      job({ id: "a2", rootJobId: "a1", continues: "a1", filesChanged: 2, branch: "b/a", finishedAt: T0 - 1000 }),
-      job({ id: "z", filesChanged: 1, branch: "b/z" }),
+      job({ id: "a1", rootJobId: "a1", endedBlocked: true, finishedAt: T0 - 9000, supersededBy: "a2" }),
+      job({ id: "a2", rootJobId: "a1", continues: "a1", endedBlocked: true, finishedAt: T0 - 1000 }),
+      job({ id: "z", endedBlocked: true }),
       job({ id: "plain", specialist: false }),
     ];
     assert.deepEqual((await f.engine.needsYou()).reviews.map((r) => r.jobId).sort(), ["a2", "z"]);
