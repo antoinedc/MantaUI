@@ -48,6 +48,12 @@ older box still sends branch reviews).
 
 Decisions that block = `changes.length + reviews.length`; open questions = `questions.length` (they never block the task).
 
+`NeedsYou` also gains `changeProjects: { [changeId]: projectSlug | null }`: the registry project of the task that proposed each pending
+change (via its origin job), so the page can put a change under a project heading. A change made in a chat has none (it is listed
+under "Team"). Absent on an older box: every change reads as having no project.
+
+Order on the page: decisions before questions, longest-waiting first inside each; project headings in the order their first item appears.
+
 ### 2.2 New read `agents:tasks` → `FleetTasks`
 
 One read model for the Fleet page and the sidebar's Fleet count. Pure shaping in a new module `src/server/agentsFleetTasks.mjs`
@@ -127,7 +133,7 @@ Under `src/renderer/agents/` (existing conventions: Tailwind classes, `manta-age
 | `FleetDetails.tsx` | Details aside. Live checklist / now / times come from the store's job (`delegate.updated` keeps it live; `view.steps`); the server read supplies everything else. |
 | `StopTaskDialog.tsx` | Native `<dialog>`, `showModal()`, "Keep running" has `autofocus`; `Esc` / backdrop = keep. |
 | `NeedsYou.tsx` | Rewritten as the page body (`NeedsYouPage`): project headings, the item anatomy of the mockup; reuses `QuestionCard`, `AgentChangeView`, `BackgroundResultCard`. |
-| `AgentsRoot.tsx`, `agentsView.ts`, `AgentsSection.tsx`, `App.tsx` | `AgentsView` gets `{ page: "needs" }` (the `focus` / `nonce` hack goes). The App holds the `tasks` read next to `needs` (one subscription each). Sidebar badge (red count / blue dot) and Fleet count. |
+| `AgentsRoot.tsx`, `agentsView.ts`, `AgentsSection.tsx`, `Sidebar.tsx`, `App.tsx` | `AgentsView` gets `{ page: "needs" }` (the `focus` / `nonce` hack goes). The App holds the `tasks` read next to `needs` (one subscription each) and hands the sidebar `needsBadge {decisions, questionDot}` and `fleetCount` (these replace `needsYouCount`). Removed with the grid: `planUsagePercent`, `weekPill`, `recapLead`, `hasFleetRows`. |
 | `useAgentsRead.ts` | Adds `refreshError` (a failed refetch that kept data) and `updatedAt` (when the data last arrived). |
 | shared cards | `QuestionCard` gets optional `note` (the "If no one answers…" line between the options and Submit) and `AgentChangeView` an optional `note` ("Manta recommends …") rendered inside the card before the buttons. Nothing else about them changes. |
 
