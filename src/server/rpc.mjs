@@ -587,6 +587,8 @@ export function buildHandlers({
   delegateView = null,
   // Agents engine (src/server/agents.mjs). Null when not wired (tests): the `agents:*` channels then answer a sentence.
   agents = null,
+  // The agent-suggestion engine (src/server/agentSuggestions.mjs): the `agents:suggestion*` channels. Null when not wired (tests): they answer a sentence.
+  suggestions = null,
   progress,
   voiceNotes,
   contextLimitFor = () => null,
@@ -1014,6 +1016,19 @@ export function buildHandlers({
     }
   };
 
+  // Agent suggestions (docs/superpowers/specs/2026-11-28-research-layer.md §6.6): an engine refusal is a returned `{ok:false,error}`; anything
+  // thrown is logged and answered with a safe sentence.
+  const suggestionsCall = async (route, fn) => {
+    if (!suggestions) throw Object.assign(new Error("Suggestions aren't available on this box yet."), { rpcStatus: 503 });
+    try {
+      return await fn(suggestions);
+    } catch (e) {
+      if (typeof e?.rpcStatus === "number") throw e;
+      console.warn(`[agent-suggestions] ${route} failed:`, e?.message ?? e);
+      throw Object.assign(new Error("Something went wrong on the box — try again."), { rpcStatus: 500 });
+    }
+  };
+
   // Autonomy settings (Agents Phase 3): the user's own answers, read strictly from disk and written through the one
   // config writer. A refusal with a status passes through; anything else is a safe sentence (no path on the screen).
   const autonomyCall = async (route, fn) => {
@@ -1132,6 +1147,9 @@ export function buildHandlers({
         const merged = bad ? { ok: false, error: bad } : validateAndMergeBackgroundWork((await local.configGet())?.backgroundWork, part);
         if (!merged.ok) throw Object.assign(new Error(merged.error), { rpcStatus: 400 });
         patch = { ...rest, backgroundWork: merged.value };
+      }
+      if (patch?.agentSuggestions !== undefined && typeof patch.agentSuggestions !== "boolean") {
+        throw Object.assign(new Error("agentSuggestions must be true or false"), { rpcStatus: 400 });
       }
       if (patch?.handoffMode !== undefined && !["auto", "suggest", "off"].includes(patch.handoffMode)) {
         throw new Error('handoffMode must be "auto", "suggest" or "off"');
@@ -2910,6 +2928,10 @@ export function buildHandlers({
     "agents:refresh-set": (input) => agentsCall("refresh-set", (a) => a.refreshSet(input)),
     "agents:task-research": (input) => agentsCall("task-research", (a) => a.taskResearch(input)),
     "agents:projects": () => agentsCall("projects", (a) => a.projects()),
+    // The "this might deserve an agent" card: read on chat open and every reconnect, acknowledged once rendered, answered once
+    "agents:suggestions": (input) => suggestionsCall("suggestions", (s) => s.list({ sessionId: typeof input?.sessionId === "string" ? input.sessionId : "" })),
+    "agents:suggestion-seen": (input) => suggestionsCall("suggestion-seen", (s) => s.seen({ id: input?.id, sessionId: input?.sessionId })),
+    "agents:suggestion-act": (input) => suggestionsCall("suggestion-act", (s) => s.act({ id: input?.id, action: input?.action })),
     // Architect v2 Stage 1: a trial run of a drafted agent (cases and what they did) and one case's transcript, a window at a time
     "agents:trial": (input) => agentsCall("trial", (a) => a.trial(input)),
     "agents:trial-transcript": (input) => agentsCall("trial-transcript", (a) => a.trialTranscript(input)),
