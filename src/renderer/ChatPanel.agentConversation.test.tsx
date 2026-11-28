@@ -10,7 +10,7 @@ import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { resetPackageAgentsForTest } from "./packageAgents";
 import { resetAgentSessionsForTest } from "./useAgentChats";
-import { installMockApi, mount, resetStore, type Harness, type MockApi } from "./testHarness";
+import { emitStreamAndFlush, installMockApi, mount, resetStore, type Harness, type MockApi, type MockEventBus } from "./testHarness";
 import { useStore } from "./store";
 
 const DEV = { slug: "dev", name: "Dev", description: "Writes code.", isolation: "worktree", model: "openai/gpt-6-sol", color: null, builtIn: true, role: "specialist", useWhen: null, notFor: null, notice: null };
@@ -22,6 +22,7 @@ const MODELS = [
 describe("ChatPanel — an agent's conversation", () => {
   let h: Harness | null = null;
   let api: MockApi;
+  let bus: MockEventBus;
   beforeEach(() => {
     resetPackageAgentsForTest();
     resetAgentSessionsForTest();
@@ -36,7 +37,7 @@ describe("ChatPanel — an agent's conversation", () => {
   async function open(opts: { tmux?: string; session?: string; over?: Record<string, unknown> } = {}) {
     const tmux = opts.tmux ?? "manta-agents";
     const session = opts.session ?? "ses_dev";
-    ({ api } = installMockApi({
+    ({ api, bus } = installMockApi({
       agentsList: () => Promise.resolve([DEV]),
       agentsChats: () => Promise.resolve({ dev: "ses_dev" }),
       opencodeModels: () => Promise.resolve(MODELS),
@@ -45,7 +46,7 @@ describe("ChatPanel — an agent's conversation", () => {
       opencodeClearSession: () => Promise.resolve({ newSessionId: "ses_generic", projects: [] }),
       ...opts.over,
     }));
-    resetStore();
+    resetStore({ jobs: {}, jobSkew: {} } as never);
     act(() => {
       useStore.setState({ projects: [{ tmuxSession: tmux, defaultCwd: "/a/dev/home", attached: false, windows: [{ index: 0, name: "Dev", active: true, paneCurrentPath: "/a/dev/home", opencodeSessionId: session }] }] as never });
     });
@@ -129,5 +130,67 @@ describe("ChatPanel — an agent's conversation", () => {
     await act(async () => byText("Profile")!.click());
     window.removeEventListener("manta-open-agent-profile", on);
     expect(seen).toEqual(["dev"]);
+  });
+  // ---- Clear is refused while tasks started from this conversation run (agent chat tasks FR-012) ----
+
+  const chatJob = (over: Record<string, unknown> = {}) => ({ id: "jc", name: "fix-it", title: "Fix the flaky upload test", parentSessionID: "ses_dev", status: "running", startedFrom: "agent-chat", project: { slug: "ronda-0f9e8d7c6b", name: "Ronda" }, createdAt: 1, agent: "agent-dev", ...over });
+  const alertText = () => document.body.querySelector('[role="alert"]')?.textContent ?? null;
+  async function openClear() {
+    await act(async () => h!.container.querySelector<HTMLElement>('[aria-label="Session actions"]')!.click());
+    await act(async () => byText("Clear conversation…")!.click());
+  }
+
+  it("a task running from this conversation: the dialog opens already refused, lists it, and nothing is cleared", async () => {
+    await open();
+    act(() => useStore.setState({ jobs: { ses_jc: chatJob() } as never }));
+    await openClear();
+    expect(alertText()).toBe("Dev has 1 task running from this conversation; wait for it or stop it first.");
+    expect(document.body.textContent).toContain("Fix the flaky upload test · Ronda · In progress");
+    expect(byText("Clear conversation")).toBeUndefined();
+    expect(api.calls.agentsClearChat).toBeUndefined();
+  });
+
+  it("a start still waiting (the agent_start_task call is running) counts too: 'Starting…'", async () => {
+    await open({
+      over: {
+        opencodeMessages: () =>
+          Promise.resolve([
+            { info: { id: "m1", role: "assistant", sessionID: "ses_dev", time: { created: 1 } }, parts: [{ id: "p1", type: "tool", tool: "agent_start_task", callID: "c1", state: { status: "running", input: { project: "ronda-0f9e8d7c6b", title: "Fix the billing page totals", brief: "b" } } }] },
+          ]),
+      },
+    });
+    await h!.flush();
+    await emitStreamAndFlush(bus, h!, { sub: "running", sessionId: "ses_dev", payload: { running: true } }); // the agent is mid-turn: its call is live
+    await openClear();
+    expect(alertText()).toBe("Dev has 1 task running from this conversation; wait for it or stop it first.");
+    expect(document.body.textContent).toContain("Fix the billing page totals");
+    expect(document.body.textContent).toContain("Starting…");
+  });
+
+  it("a refusal from the box after the press (a task started in between): the same refused dialog with the box's sentence, not a stray banner; Close forgets it", async () => {
+    await open({ over: { agentsClearChat: () => Promise.reject(new Error("Dev has 2 tasks running from this conversation; wait for them or stop them first")) } });
+    await clearFromMenu();
+    expect(alertText()).toBe("Dev has 2 tasks running from this conversation; wait for them or stop them first.");
+    expect(byText("Close")).toBeTruthy();
+    expect(byText("Open Fleet")).toBeTruthy();
+    expect(h!.container.textContent).not.toContain("running from this conversation");
+    await act(async () => byText("Close")!.click());
+    await h!.flush();
+    await openClear();
+    await h!.flush();
+    expect(alertText()).toBeNull();
+    expect(byText("Clear conversation")).toBeTruthy();
+  });
+
+  it("Open Fleet from the refused dialog asks the app to open the Fleet page", async () => {
+    await open();
+    act(() => useStore.setState({ jobs: { ses_jc: chatJob() } as never }));
+    const seen: unknown[] = [];
+    const on = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener("manta-open-agents-page", on);
+    await openClear();
+    await act(async () => byText("Open Fleet")!.click());
+    window.removeEventListener("manta-open-agents-page", on);
+    expect(seen).toEqual([{ page: "fleet" }]);
   });
 });

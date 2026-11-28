@@ -571,7 +571,15 @@ export function SessionHeader({
         onCancel={() => setConfirm(null)}
       />
       {agentConversation && clearBlock && clearBlocked && (
-        <ClearBlockedModal open={confirm === "clear"} agentName={agentConversation.name} block={clearBlock} onClose={() => setConfirm(null)} />
+        <ClearBlockedModal
+          open={confirm === "clear"}
+          agentName={agentConversation.name}
+          block={clearBlock}
+          onClose={() => {
+            setConfirm(null);
+            clearBlock.onDismiss?.();
+          }}
+        />
       )}
       <ConfirmModal
         open={confirm === "clear" && !clearBlocked}

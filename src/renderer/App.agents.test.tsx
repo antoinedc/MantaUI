@@ -149,6 +149,19 @@ describe("agent pages in the main pane", () => {
     expect(agentsRoot()?.dataset.slug).toBe("dev");
   });
 
+  it("the refused Clear dialog's Open Fleet (a window event) opens the Fleet page", async () => {
+    await mountApp();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("manta-open-agents-page", { detail: { page: "fleet" } }));
+    });
+    expect(agentsRoot()?.dataset.page).toBe("fleet");
+    // only the Fleet page can be asked for this way
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("manta-open-agents-page", { detail: { page: "profile", slug: "x" } }));
+    });
+    expect(agentsRoot()?.dataset.page).toBe("fleet");
+  });
+
   it("the chat pane steps aside while an agent page is open", async () => {
     await mountApp();
     // PanelShell hides a pane with display:none on its own wrapper

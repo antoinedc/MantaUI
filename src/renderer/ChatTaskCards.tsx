@@ -280,7 +280,7 @@ export const resetProjectNamesForTest = (): void => {
 };
 
 /** The project's display name for an id the agent named: the registry's, else the id's own words (never the id). */
-function useProjectName(project: string): string | null {
+export function useProjectNameOf(): (project: string) => string | null {
   const [names, setNames] = useState<ReadonlyMap<string, string> | null>(null);
   useEffect(() => {
     let alive = true;
@@ -289,13 +289,13 @@ function useProjectName(project: string): string | null {
       alive = false;
     };
   }, []);
-  return project ? (names?.get(project) ?? projectWords(project)) : null;
+  return (project) => (project ? (names?.get(project) ?? projectWords(project)) : null);
 }
 
 function StartingCard({ part }: { part: OpencodePart }) {
   const { title, project } = startInputOf(part);
   const waiting = useContext(PendingApprovalContext);
-  const projectName = useProjectName(project);
+  const projectName = useProjectNameOf()(project);
   const status: ChatTaskStatus = waiting ? { label: "Waiting for your approval", tone: "run" } : chatTaskStatus({ kind: "starting" });
   return <ChatTaskCard kind="starting" title={title || "Starting a task"} project={projectName} status={status} spinning />;
 }

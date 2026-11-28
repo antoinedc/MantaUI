@@ -13,6 +13,8 @@ export type ClearBlock = {
   /** The box's own refusal sentence, when Clear was pressed and refused (shown as it is, with a full stop). */
   refusal: string | null;
   onOpenFleet: () => void;
+  /** The dialog was closed: a stored refusal is forgotten (the tasks may be done by the next press). */
+  onDismiss?: () => void;
 };
 
 export function ClearBlockedModal({ open, agentName, block, onClose }: { open: boolean; agentName: string; block: ClearBlock; onClose: () => void }) {

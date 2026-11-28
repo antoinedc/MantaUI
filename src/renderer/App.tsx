@@ -1647,6 +1647,15 @@ function Shell() {
     return () => window.removeEventListener("manta-open-agent-profile", handler);
   }, [setAgentsView]);
 
+  // The refused "Clear conversation" dialog's Open Fleet (agent chat tasks): same window-CustomEvent convention. Only Fleet can be asked for.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      if ((ev as CustomEvent<{ page?: string }>).detail?.page === "fleet") setAgentsView({ page: "fleet" });
+    };
+    window.addEventListener("manta-open-agents-page", handler);
+    return () => window.removeEventListener("manta-open-agents-page", handler);
+  }, [setAgentsView]);
+
   // BET-869: the "Review changes" button in the branch popover opens the
   // artifacts panel (ArtifactsPanel separately switches itself to its Review
   // tab). Same window-CustomEvent convention as manta-open-settings above.
