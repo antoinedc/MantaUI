@@ -51,6 +51,7 @@ import { toggleExplorer, useExplorerExpanded, useExplorerOpen, useShownRightPane
 import { SidebarRevealButton } from "./SidebarToggle";
 import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
+import { ClearBlockedModal, type ClearBlock } from "./ClearBlockedModal";
 import { previousEntryLabel, type PreviousSessionEntry } from "./handoff";
 
 // Auto-handoff wiring for the header (spec §9): the "Hand off" button in the
@@ -237,7 +238,9 @@ export function SessionHeader({
   // An AGENT's conversation (profile v5): the crumb reads "Team / <Name>"; there is no branch chip, forge item, Explorer toggle or
   // hand-off (it runs from the agent's home folder, and one conversation is summarized in place); a Profile button goes back to the
   // agent; the session menu holds only "Summarize earlier messages now" and "Clear conversation…".
-  agentConversation?: { name: string; onOpenProfile: () => void };
+  // `clearBlock` (agent chat tasks): the tasks that stop Clear (the dialog then opens already refused), and the box's own refusal when
+  // Clear was pressed and lost a race (the dialog opens in the same refused state).
+  agentConversation?: { name: string; onOpenProfile: () => void; clearBlock?: ClearBlock };
 }) {
   const { pct, hasLimit, segments, freshInput, cacheRead, cacheWrite, totalInput } =
     ctxBreakdown;
@@ -275,6 +278,13 @@ export function SessionHeader({
   // dialogs are hoisted here so SessionMenu stops owning dialog state and the
   // stale-cache "Clear session" path (previously instant) now confirms.
   const [confirm, setConfirm] = useState<"clear" | "delete" | null>(null);
+  // the box refused a Clear that was pressed (a task started in between): show the refused dialog
+  const clearRefusal = agentConversation?.clearBlock?.refusal ?? null;
+  useEffect(() => {
+    if (clearRefusal) setConfirm("clear");
+  }, [clearRefusal]);
+  const clearBlock = agentConversation?.clearBlock;
+  const clearBlocked = !!clearBlock && (clearBlock.tasks.length > 0 || !!clearBlock.refusal);
 
   // BET-789: the checks chip is the ONE new status item, registered only when
   // there is a PR with checks and a non-empty rollup. No PR / no checks / forge
@@ -560,8 +570,11 @@ export function SessionHeader({
         }}
         onCancel={() => setConfirm(null)}
       />
+      {agentConversation && clearBlock && clearBlocked && (
+        <ClearBlockedModal open={confirm === "clear"} agentName={agentConversation.name} block={clearBlock} onClose={() => setConfirm(null)} />
+      )}
       <ConfirmModal
-        open={confirm === "clear"}
+        open={confirm === "clear" && !clearBlocked}
         title={agentConversation ? `Clear your conversation with ${agentConversation.name}?` : "Clear this conversation?"}
         body={
           agentConversation

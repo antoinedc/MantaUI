@@ -524,7 +524,14 @@ export async function emitStreamAndFlush(
 export function mountSessionHeader(
   overrides: Partial<React.ComponentProps<typeof SessionHeader>> = {},
 ): Harness {
-  return mount(
+  return mount(sessionHeaderElement(overrides));
+}
+
+/** The SessionHeader element `mountSessionHeader` mounts (so a test can `rerender` it with changed props). */
+export function sessionHeaderElement(
+  overrides: Partial<React.ComponentProps<typeof SessionHeader>> = {},
+): React.ReactElement {
+  return (
     <SessionHeader
       branch={null}
       ctxBreakdown={{
@@ -548,6 +555,6 @@ export function mountSessionHeader(
       mode="chat"
       onModeChange={() => {}}
       {...overrides}
-    />,
+    />
   );
 }

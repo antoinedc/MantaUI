@@ -4,7 +4,9 @@
 // and what the user reads when the agent's call was refused (plain words; the agent's own sentence stays in the tooltip).
 import { describe, expect, it } from "vitest";
 import {
+  blockingChatTasks,
   chatTaskStatus,
+  clearRefusalSentence,
   cleanResultText,
   friendlyRefusal,
   isChatTask,
@@ -12,6 +14,7 @@ import {
   modelLine,
   refusalOf,
   taskBranchLine,
+  withStop,
 } from "./chatTask";
 import { endedBadge } from "./agents/fleetView";
 
@@ -132,5 +135,31 @@ describe("the agent_start_task tool part", () => {
     expect(refusalOf(part({ status: "completed", output: 'Started "Fix it" in Ronda (task j1, branch x). Its result will arrive as a later message; tell the user in one line which project you picked and stop.' }))).toBeNull();
     expect(refusalOf(part({ status: "running" }))).toBeNull();
     expect(refusalOf(part({ status: "error", error: "tool exploded" }))).toBe("tool exploded");
+  });
+});
+
+describe("the Clear conversation refusal", () => {
+  it("is the server's sentence, in the singular or plural, ending in a full stop", () => {
+    expect(clearRefusalSentence("Dev", 1)).toBe("Dev has 1 task running from this conversation; wait for it or stop it first.");
+    expect(clearRefusalSentence("Dev", 3)).toBe("Dev has 3 tasks running from this conversation; wait for them or stop them first.");
+    expect(withStop("Dev has 1 task running from this conversation; wait for it or stop it first")).toMatch(/first\.$/);
+    expect(withStop("Already done.")).toBe("Already done.");
+  });
+  it("lists the tasks that block it: running or paused, started from this conversation; and the starts still waiting (the tool part is running)", () => {
+    const jobs = {
+      a: { id: "a", status: "running", parentSessionID: "ses_c", startedFrom: "agent-chat", title: "Fix it", project: { slug: "r", name: "Ronda" } },
+      b: { id: "b", status: "paused", parentSessionID: "ses_c", startedFrom: "agent-chat", title: "Look", name: "look", project: { slug: "r", name: "Ronda" } },
+      c: { id: "c", status: "done", parentSessionID: "ses_c", startedFrom: "agent-chat", title: "Old" },
+      d: { id: "d", status: "running", parentSessionID: "ses_other", startedFrom: "agent-chat", title: "Not mine" },
+      e: { id: "e", status: "running", parentSessionID: "ses_c", title: "Mention" },
+      f: { id: "f", status: "running", parentSessionID: "ses_c", startedFrom: "agent-chat", supersededBy: "g", title: "Superseded" },
+    } as never;
+    const starting = [{ key: "start:call_1", title: "Fix the billing page totals", project: "Ronda" }];
+    expect(blockingChatTasks(jobs, "ses_c", starting)).toEqual([
+      { key: "a", title: "Fix it", project: "Ronda", status: "In progress" },
+      { key: "b", title: "Look", project: "Ronda", status: "Paused by you" },
+      { key: "start:call_1", title: "Fix the billing page totals", project: "Ronda", status: "Starting…" },
+    ]);
+    expect(blockingChatTasks({} as never, "ses_c", [])).toEqual([]);
   });
 });

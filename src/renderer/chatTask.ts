@@ -131,3 +131,32 @@ export function friendlyRefusal(sentence: string, ctx: { project: string }): str
   }
   return /agent_(projects|start_task)/.test(s) ? "The request was refused." : s;
 }
+
+// ---- Clear conversation, refused while tasks started from the conversation run (spec FR-012, design §5) ----
+
+/** The box's refusal sentence, for the dialog that opens already refused (singular and plural). */
+export function clearRefusalSentence(agentName: string, n: number): string {
+  const one = n === 1;
+  return `${agentName} has ${n} task${one ? "" : "s"} running from this conversation; wait for ${one ? "it" : "them"} or stop ${one ? "it" : "them"} first.`;
+}
+
+/** A sentence with a full stop at its end (the box's refusal carries none). */
+export const withStop = (sentence: string): string => (/[.!?]$/.test(sentence.trim()) ? sentence.trim() : `${sentence.trim()}.`);
+
+export type BlockingTask = { key: string; title: string; project: string | null; status: string };
+
+/**
+ * The tasks that stop Clear for conversation `sessionId`: its running or paused chat tasks (the job store), then the starts still on
+ * their way (an `agent_start_task` call that has not answered yet: "Starting…"). `starting` comes from the transcript's tool parts.
+ */
+export function blockingChatTasks(
+  jobs: Record<string, DelegateJob>,
+  sessionId: string,
+  starting: ReadonlyArray<{ key: string; title: string; project: string | null }>,
+): BlockingTask[] {
+  const live = Object.values(jobs ?? {})
+    .filter((j) => isChatTask(j) && j.parentSessionID === sessionId && !j.supersededBy && (j.status === "running" || j.status === "paused"))
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((j) => ({ key: j.id, title: j.title?.trim() || j.name, project: j.project?.name ?? null, status: j.status === "paused" ? "Paused by you" : "In progress" }));
+  return [...live, ...starting.map((s) => ({ ...s, status: "Starting…" }))];
+}
