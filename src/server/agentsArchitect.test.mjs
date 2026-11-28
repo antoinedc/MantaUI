@@ -2705,7 +2705,7 @@ test("the real trials module and the real engine together: agent_trial → agent
       for (const e of edits) (e.value === undefined ? delete f.config.cfg.agent[e.path[1]] : (f.config.cfg.agent[e.path[1]] = e.value));
       return { ok: true, changed: edits.length > 0 };
     },
-    budget: { canSpend: async () => ({ ok: true }), book: async () => {} },
+    budget: { book: async () => {} },
     policy: async () => ({ ...MODES.balanced, agent_change: "auto" }),
     log: { warn: () => {} },
   });

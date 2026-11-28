@@ -222,7 +222,7 @@ export function readCase(messages) {
  *   oc              { createSession, sendPrompt, abortSession, deleteSessionRaw, listMessages, replyQuestion }
  *   gitRun(args)    git through the box's own runner → { stdout }
  *   editConfig      the opencode config writer (an agent block per trial)
- *   budget          { canSpend({workType, model?}) → {ok, reason?}, book({workType, model, usage, usd, inLedger}) }
+ *   budget          { book({workType, model, usage, usd, inLedger}) } — what a case spent is counted; nothing is ever refused (a trial is part of the task the user asked for)
  *   policy()        the user's autonomy policy (read strictly; a throw fails the case)
  *   projectDirectory(slug) → a checkout of that project on this box, or null
  *   projectOf(directory) → the slug of the project owning that folder, or null (the Architect task's own project)
@@ -403,8 +403,9 @@ export function createAgentTrials({
     try {
       if (t.aborted) return await finish("aborted", { durationMs: null });
       const model = parseModel(t.plan.meta?.model);
-      const gate = await budget.canSpend({ workType: WORK_TYPE, ...(model ? { model } : {}) });
-      if (!gate?.ok) return await finish("failed", { error: `Not run: the background budget doesn't allow it right now (${gate?.reason ?? "unavailable"})` });
+      // No budget gate: a trial is part of a task the user asked for, not optional background work, so the background budget's level
+      // never refuses it. What it spends is still counted (`budget.book`, below); the hard limits (15-minute ceiling, cases and
+      // trials per task) are the ones that bound it.
       let policyNow;
       try {
         policyNow = await policy();
@@ -444,6 +445,7 @@ export function createAgentTrials({
       } catch (e) {
         return await finish("failed", { error: `The test run couldn't start: ${String(e?.message ?? e).slice(0, 160)}` });
       }
+      c.started = true; // the agent was given its task: from here the trial counts toward the limits
       let timer = null;
       const timeout = new Promise((resolve) => {
         timer = setTimeoutFn(() => resolve({ outcome: "timeout" }), caseTimeoutMs);
@@ -500,7 +502,7 @@ export function createAgentTrials({
     if (t.settled || !allEnded(t)) return;
     t.settled = true;
     try {
-      const doc = { id: t.id, rootJobId: t.rootJobId, jobId: t.jobId, agentSlug: t.agentSlug, kind: t.kind, draftHash: t.draftHash, files: t.files, createdAt: t.createdAt, finishedAt: now(), cases: t.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null, transcript: c.transcript ?? "", agentTranscript: c.agentTranscript ?? "" })) };
+      const doc = { id: t.id, rootJobId: t.rootJobId, jobId: t.jobId, agentSlug: t.agentSlug, kind: t.kind, draftHash: t.draftHash, files: t.files, createdAt: t.createdAt, finishedAt: now(), cases: t.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null, started: c.started === true, transcript: c.transcript ?? "", agentTranscript: c.agentTranscript ?? "" })) };
       await fs.writeFile(join(dirOf(t.id), RESULT_FILE), `${JSON.stringify(doc)}\n`, { mode: 0o600 });
     } catch (e) {
       log.warn?.(`[agent-trials] couldn't write the result of ${t.id}: ${e?.message ?? e}`);
@@ -584,7 +586,10 @@ export function createAgentTrials({
     return { cases: out };
   }
 
-  const mineOf = (rootJobId) => [...trials.values(), ...reserved].filter((t) => t.rootJobId === rootJobId);
+  // A trial counts toward the limits while it may still run, and afterwards only if a case actually started: one in which every case
+  // was refused before it ran (a project that couldn't be copied, settings that couldn't be read, an aborted round) used up nothing.
+  const counts = (t) => reserved.has(t) || !t.settled || (t.cases ?? []).some((c) => c.started === true);
+  const mineOf = (rootJobId) => [...trials.values(), ...reserved].filter((t) => t.rootJobId === rootJobId && counts(t));
 
   async function create(input) {
     const b = keyedInput(input, ["action", "agent", "baseHash", "draft", "cases"]);
@@ -810,7 +815,7 @@ export function createAgentTrials({
           finishedAt: doc.finishedAt,
           settled: true,
           aborted: false,
-          cases: doc.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null })),
+          cases: doc.cases.map((c) => ({ ...caseView(c), task: c.task, checks: c.checks, project: c.project ?? null, started: c.started === true })),
         });
         continue;
       }

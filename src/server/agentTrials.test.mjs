@@ -471,7 +471,6 @@ test("the draft's model is the trial's model; no model is Auto", async () => {
     await settle(f.t, a.trialId);
     assert.deepEqual(f.w.created[0].model, { providerID: "anthropic", modelID: "claude-sonnet-5-5" });
     assert.deepEqual(f.w.prompts[0].model, { providerID: "anthropic", modelID: "claude-sonnet-5-5" });
-    assert.deepEqual(f.w.canSpend[0].model, { providerID: "anthropic", modelID: "claude-sonnet-5-5" });
     f.w.plan = planFor();
     const b = await f.t.create(f.input({ messageID: "msg_2", callID: "call_2" }));
     await settle(f.t, b.trialId);
@@ -577,19 +576,67 @@ test("a failed session is recorded as failed", async () => {
   }
 });
 
-test("the budget is asked before a case and told what it cost; a refusal fails the case without running it", async () => {
+test("a trial is part of the task the user asked for: the background budget never refuses a case, and what it cost is still booked", async () => {
   const f = await rig();
   try {
     const a = await f.t.create(f.input());
     await settle(f.t, a.trialId);
-    assert.deepEqual(f.w.canSpend[0], { workType: "agent-trial" });
     assert.deepEqual(f.w.booked[0], { workType: "agent-trial", model: { providerID: "p", modelID: "m" }, usage: { input: 100, output: 20, cache: { read: 0, write: 0 } }, usd: 0.01, inLedger: false });
+    // the budget says no (background level off, a dollar cap hit, …): the case runs anyway
     f.w.canSpendOk = false;
     const b = await f.t.create(f.input({ messageID: "msg_2", callID: "call_2" }));
     const r = await settle(f.t, b.trialId);
-    assert.equal(r.cases[0].state, "failed");
-    assert.match(r.cases[0].error, /budget|usd-cap/i);
-    assert.equal(f.w.created.length, 1, "no second session");
+    assert.equal(r.cases[0].state, "done", r.cases[0].error);
+    assert.equal(r.cases[0].error, null);
+    assert.equal(f.w.created.length, 2, "a second session ran");
+    assert.equal(f.w.booked.length, 2, "and its spend was counted");
+    assert.equal(f.w.canSpend.length, 0, "nothing asked the budget for permission");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a trial in which no case started doesn't use up the per-agent or the per-task limit", async () => {
+  const f = await rig();
+  try {
+    // every case is refused before it runs (the copy of the project holds a link out of it): no session ever starts
+    f.w.symlinkOk = false;
+    for (let i = 0; i < 8; i++) {
+      f.w.plan = planFor({ slug: i < 4 ? "seo-reviewer" : `other-${i}` });
+      const r = await f.t.create(f.input({ messageID: `m${i}`, callID: `c${i}`, cases: [f.caseOf("main", { project: "shop" })] }));
+      assert.equal(r.ok, true, `trial ${i}: ${r.error}`);
+      const done = await settle(f.t, r.trialId);
+      assert.equal(done.cases[0].state, "failed");
+      assert.match(done.cases[0].error, /link/);
+    }
+    assert.equal(f.w.created.length, 0, "no session ever started");
+    // the limits are still all there for trials that run: 3 of an agent, then the 4th is refused
+    f.w.symlinkOk = true;
+    f.w.outcome = "hang";
+    f.w.plan = planFor({ slug: "seo-reviewer" });
+    for (let i = 0; i < 3; i++) assert.equal((await f.t.create(f.input({ messageID: `r${i}`, callID: `rc${i}` }))).ok, true);
+    const fourth = await f.t.create(f.input({ messageID: "r9", callID: "rc9" }));
+    assert.equal(fourth.ok, false);
+    assert.match(fourth.error, /3 trials/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a trial whose case started counts toward the limits even when it ends in failure", async () => {
+  const f = await rig();
+  try {
+    f.w.outcome = "failed";
+    f.w.plan = planFor({ slug: "seo-reviewer" });
+    for (let i = 0; i < 3; i++) {
+      const r = await f.t.create(f.input({ messageID: `m${i}`, callID: `c${i}` }));
+      assert.equal(r.ok, true, r.error);
+      assert.equal((await settle(f.t, r.trialId)).cases[0].state, "failed");
+    }
+    assert.equal(f.w.created.length, 3);
+    const fourth = await f.t.create(f.input({ messageID: "m9", callID: "c9" }));
+    assert.equal(fourth.ok, false);
+    assert.match(fourth.error, /3 trials/);
   } finally {
     await f.cleanup();
   }
