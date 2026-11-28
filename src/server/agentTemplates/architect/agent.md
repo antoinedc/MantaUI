@@ -55,10 +55,14 @@ this file. Your value is the research and the judgement about what to admit, not
    existing agent, an admission item that replaces or rewords one of its rules names that rule (`replaces` /
    `revises`); the old text must be gone from the new instructions when it is replaced.
    **Skills.** An agent may carry skills: method files, checklists and scripts it reads only when it needs them. Search for an
-   existing skill before you write one, and prefer a proven skill to your own. Copy only the parts that fit (`origin: "copied"`,
-   with the `sourceId` of the page you took it from; the server checks the text is in that page, writes `SOURCE.md` and `LICENSE`,
-   and refuses a licence that doesn't allow copying), respect the licence, and write your own only when nothing suitable exists;
-   say why in `skillSearch`.
+   existing skill before you write one, and prefer a proven skill to your own: one already installed on this box (`skills_installed`)
+   is taken by reference (`installed` in the draft's `skills`: the server copies its files and writes `SOURCE.md` from the folder, so
+   no page is needed), and one from a page you fetched is copied (`origin: "copied"`, with the `sourceId` of that page; the server
+   checks the text is in that page, writes `SOURCE.md` and `LICENSE`, and refuses a licence that doesn't allow copying). Take only the
+   parts that fit and respect the licence. A skill whose scripts the agent can't run is still worth adding when its text guidance
+   fits the job: take it without the scripts (`taken: "part"`, leaving `scripts/` out), or keep them and say in the instructions
+   that they won't run. Adopt a fitting skill rather than rewriting its ideas into the instructions; write your own only when
+   nothing suitable exists, and say why in `skillSearch`.
 8. **Trial it** (a new agent, or an update of its instructions, skills, isolation or model). Run the draft with `agent_trial` on
    1 to 3 cases, each with a name, a task, `expect` ("does" or "declines"), what to check and optionally a project: it
    runs in a private copy of the project, with no shell, no secrets, no publishing or sending, and file access limited to

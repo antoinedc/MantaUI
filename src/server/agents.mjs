@@ -640,6 +640,18 @@ function strictSkillHeader(text) {
   }
 }
 
+/** A SKILL.md's whole frontmatter as an object (licence, version, repository…), or null when it has none that parses. */
+function skillFrontmatterOf(text) {
+  const front = splitFrontmatter(text);
+  if (!front) return null;
+  try {
+    const data = YAML.parse(front.yaml);
+    return data && typeof data === "object" && !Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 const LS_REMOTE_MS = 10_000;
 const SKILL_UPDATES_CACHE_MS = 24 * 60 * 60 * 1000; // an upstream is asked about at most once a day
 const SKILL_UPDATES_MAX_REPOS = 5; // per agent: a bounded number of `git ls-remote` calls
@@ -3602,6 +3614,108 @@ export function createAgentsEngine({
     return out;
   }
 
+  // ---- a skill already installed on this box, adopted by reference: the server reads the folder, the model sends nothing ----
+
+  const INSTALLED_MAX_ENTRIES = 3000; // files and folders looked at in one installed skill
+  const INSTALLED_READ_MAX = SPACE_TOTAL_MAX; // bytes read for one adoption (the agent's own 1 MiB is judged by the plan)
+  const GENERATED_ROOT_RE = /^(?:source\.md|licen[cs]e(?:\.md|\.txt)?|copying|unlicense)$/i; // the server writes these; they are read for the provenance only
+
+  /**
+   * What an installed skill holds, for `planSkills` (`spec`: `{ skill, taken, take }`): the folder is found only among the skills
+   * `skills_installed` lists (by folder or by name), never by an arbitrary path; hidden entries are skipped; a link in anything taken, a file that
+   * isn't plain UTF-8 text, a file over 256 KiB, or too many entries is refused by name. A link in a part that is left out is not looked at.
+   * `{ files: Map<path, text>, all: string[], licenceText, sourceMd }` or `{ error }` (a sentence).
+   */
+  async function readInstalledSkill(spec) {
+    const rows = await listInstalledSkills();
+    let hits = rows.filter((r) => r.folder === spec.skill);
+    if (hits.length === 0) hits = rows.filter((r) => r.name === spec.skill || r.folder.split("/").at(-1) === spec.skill);
+    if (hits.length === 0) return { error: `there is no skill "${spec.skill.slice(0, 80)}" installed on this box; skills_installed lists the ones that are (use its name or folder)` };
+    if (hits.length > 1) return { error: `"${spec.skill.slice(0, 80)}" is installed more than once (${hits.map((h) => h.folder).join(", ")}); pass the folder of the one you mean` };
+    let root;
+    try {
+      root = await fs.realpath(hits[0].folder);
+    } catch {
+      return { error: "the installed skill's folder couldn't be read" };
+    }
+    // every file of the folder, by name (a link is noted, never followed)
+    const all = [];
+    const links = new Set();
+    let seen = 0;
+    const list = async (rel) => {
+      let dirents;
+      try {
+        dirents = (await fs.readdir(rel ? join(root, rel) : root, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      } catch {
+        return "a folder of the installed skill couldn't be read";
+      }
+      for (const d of dirents) {
+        if (d.name.startsWith(".")) continue;
+        if (++seen > INSTALLED_MAX_ENTRIES) return `the installed skill has more than ${INSTALLED_MAX_ENTRIES} files and folders`;
+        const path = rel ? `${rel}/${d.name}` : d.name;
+        if (!rel && GENERATED_ROOT_RE.test(d.name)) continue;
+        if (d.isSymbolicLink()) links.add(path);
+        else if (d.isDirectory()) {
+          const bad = await list(path);
+          if (bad) return bad;
+        } else all.push(path);
+      }
+      return null;
+    };
+    const listed = await list("");
+    if (listed) return { error: listed };
+    const taken = (() => {
+      if (spec.taken === "whole") return { paths: all, linked: [...links] };
+      const want = new Set(["SKILL.md", ...spec.take]);
+      const covers = (p) => [...want].some((w) => p === w || p.startsWith(`${w}/`));
+      return { paths: all.filter(covers), linked: [...links].filter((l) => [...want].some((w) => l === w || l.startsWith(`${w}/`) || w.startsWith(`${l}/`))) };
+    })();
+    if (taken.linked.length > 0) return { error: `${taken.linked[0]} is a link; a link isn't copied (take part of the skill without it)` };
+    if (spec.taken === "part") {
+      for (const w of spec.take) {
+        if (!all.some((p) => p === w || p.startsWith(`${w}/`))) return { error: `${w} isn't in the installed skill (it holds: ${[...new Set(all.map((p) => p.split("/")[0]))].slice(0, 15).join(", ")})` };
+      }
+    }
+    const files = new Map();
+    let total = 0;
+    for (const path of taken.paths) {
+      let st;
+      try {
+        st = await fs.lstat(join(root, path));
+      } catch {
+        return { error: `${path} couldn't be read` };
+      }
+      if (!st.isFile() || st.isSymbolicLink()) return { error: `${path} isn't a plain file` };
+      if (st.size > SPACE_FILE_MAX) return { error: `${path} is ${Math.ceil(st.size / 1024)} KiB; a file can be at most ${SPACE_FILE_MAX / 1024} KiB (take part of the skill without it)` };
+      total += st.size;
+      if (total > INSTALLED_READ_MAX) return { error: `the installed skill is more than ${INSTALLED_READ_MAX / 1024 / 1024} MiB; an agent's skills can total at most 1 MiB. Take part of it: taken "part" with take listing what fits` };
+      let buf;
+      try {
+        buf = await fs.readFile(join(root, path));
+      } catch {
+        return { error: `${path} couldn't be read` };
+      }
+      if (buf.includes(0)) return { error: `${path} isn't text (only UTF-8 text files are copied; take part of the skill without it)` };
+      files.set(path, buf.toString("utf-8"));
+    }
+    if (!files.has("SKILL.md")) return { error: "the installed skill has no SKILL.md" };
+    // what the folder says about itself, for its provenance and notice
+    const plain = async (name, max) => {
+      try {
+        const st = await fs.lstat(join(root, name));
+        return st.isFile() && !st.isSymbolicLink() && st.size <= max ? await fs.readFile(join(root, name), "utf-8") : null;
+      } catch {
+        return null;
+      }
+    };
+    let licenceText = null;
+    for (const n of ["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING", "UNLICENSE"]) {
+      licenceText = await plain(n, 64 * 1024);
+      if (licenceText) break;
+    }
+    return { files, all, licenceText, sourceMd: await plain("SOURCE.md", 8 * 1024) };
+  }
+
   /**
    * `planChange` for a draft that may carry `skills`: `{ plan, skills }` (`skills`: `{ files, diff }` or null) or `{ error }`. A draft that only
    * changes skills leaves agent.md as it is. The caller holds `syncLock`; `ctx.children`: the task's child sessions (sources of copied files).
@@ -3629,7 +3743,7 @@ export function createAgentsEngine({
       if (!space) return { error: `@${plan.slug}'s files can't be snapshotted safely (a link, or too big); fix it by hand` };
       existing = existingSkillsOf(space);
     }
-    const planned = await planSkills({ ops: skillOps, existing, fetchSource: (id) => taskSource(ctx.children, id), listSources: () => taskSources(ctx.children) });
+    const planned = await planSkills({ ops: skillOps, existing, fetchSource: (id) => taskSource(ctx.children, id), listSources: () => taskSources(ctx.children), readInstalled: readInstalledSkill, header: strictSkillHeader, frontmatter: skillFrontmatterOf });
     if (planned.error) return { error: planned.error };
     return { plan, skills: planned, ops: skillOps };
   }

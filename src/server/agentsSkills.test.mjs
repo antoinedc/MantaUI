@@ -1507,9 +1507,13 @@ test("installed: the skill is found by name or by the folder skills_installed li
     assert.equal((await planFor(f, { skills: [adoptOp({ skill: folder })] })).error, undefined);
     assert.match((await planFor(f, { skills: [adoptOp({ skill: "no-such-skill" })] })).error, /no skill .*no-such-skill.*installed on this box|skills_installed/i);
     assert.match((await planFor(f, { skills: [adoptOp({ skill: "/etc" })] })).error, /installed/i, "a path that isn't a listed skill folder is never read");
-    // another root with the same name
-    await mkdir(join(f.base, "installed-skills-2", "design-ref"), { recursive: true });
-    await writeFile(join(f.base, "installed-skills-2", "design-ref", "SKILL.md"), DESIGN_MD);
+    // a team agent carries a skill of the same name: the name alone is ambiguous, the folder says which
+    await mkdir(skillFile(f, "design-ref"), { recursive: true });
+    await writeFile(skillFile(f, "design-ref", "SKILL.md"), DESIGN_MD);
+    const both = await planFor(f, { skills: [adoptOp({ skill: "design-ref" }, { op: "replace" })] });
+    assert.match(both.error, /more than once/);
+    assert.match(both.error, /installed-skills\/design-ref/);
+    assert.equal((await planFor(f, { skills: [adoptOp({ skill: folder }, { op: "replace" })] })).error, undefined);
   } finally {
     await f.cleanup();
   }
@@ -1675,4 +1679,17 @@ test("installed: adding it still needs skillSearch; the installed skill is a can
   } finally {
     await f.cleanup();
   }
+});
+
+test("installed: the Architect's built-in guidance says what a skill with scripts is worth and to adopt a fitting skill rather than rewrite it", async () => {
+  const agent = await readFile(join(REAL_TEMPLATES, "architect", "agent.md"), "utf-8");
+  const authoring = await readFile(join(REAL_TEMPLATES, "architect", "skills", "authoring", "SKILL.md"), "utf-8");
+  assert.match(agent, /skills_installed/);
+  assert.match(agent, /by reference \(`installed`/);
+  assert.match(agent, /A skill whose scripts the agent can't run is still worth adding when its text guidance\s+fits the job/);
+  assert.match(agent, /`taken: "part"`, leaving `scripts\/` out/);
+  assert.match(agent, /say in the instructions\s+that they won't run/);
+  assert.match(agent, /Adopt a fitting skill rather than rewriting its ideas into the instructions/);
+  assert.match(authoring, /\{name, op, installed: \{skill, taken, take\?\}\}/);
+  assert.match(authoring, /20-file and 256 KiB limits\s+don't apply/);
 });
