@@ -350,6 +350,8 @@ type State = {
   // Auto-rename chat-mode windows from the conversation (opt-in). See
   // AppConfig.autoRenameSessions.
   autoRenameSessions: boolean;
+  // "Suggest agents for repeated work": on unless the box config says false. See AppConfig.agentSuggestions.
+  agentSuggestions: boolean;
   // BET-738: show the composer usage dial even when every window is under
   // 70% (the dial's normal "quiet unless it matters" threshold). Settings-
   // only — rides the generic configUpdate path. See AppConfig.alwaysShowUsage.
@@ -865,6 +867,7 @@ export const useStore = create<State>((set, get) => ({
   pairLinkError: null,
   chatAutoAllow: false,
   autoRenameSessions: false,
+  agentSuggestions: true,
   alwaysShowUsage: false,
   optimizerEnabled: false,
   hiddenStatusItems: [],
@@ -1157,6 +1160,7 @@ export const useStore = create<State>((set, get) => ({
       onboardingSkipped: c.onboardingSkipped ?? false,
       chatAutoAllow: c.chatAutoAllow ?? false,
       autoRenameSessions: c.autoRenameSessions ?? false,
+      agentSuggestions: c.agentSuggestions !== false,
       alwaysShowUsage: c.alwaysShowUsage ?? false,
       optimizerEnabled: c.optimizerEnabled === true,
       hiddenStatusItems: Array.isArray(c.hiddenStatusItems) ? c.hiddenStatusItems : [],

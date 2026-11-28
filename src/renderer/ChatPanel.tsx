@@ -134,6 +134,8 @@ import { blockingChatTasks, isChatTaskStartPart, startInputOf } from "./chatTask
 import { useTaskQuestions } from "./hooks/useTaskQuestions";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
+import { useAgentSuggestions } from "./hooks/useAgentSuggestions";
+import { SuggestionCard } from "./SuggestionCard";
 import {
   CarriedContextBlock,
   DeletedSessionNotice,
@@ -855,6 +857,8 @@ export function ChatPanel({
   // The nested read-only view of a previous session (and a background job's
   // session) shows history only: no cards, no composer, no session menu.
   const viewOnly = !!jobOwnership || !!readOnlyView;
+  // Manta's "this might deserve an agent" offers for this chat: read from the box on open, on every reconnect and on the bus hint
+  const suggestions = useAgentSuggestions(sessionId, isActive, !viewOnly);
 
 
   // ===== Pending messages (V2 inbox) =====
@@ -3352,6 +3356,15 @@ export function ChatPanel({
 
   // Server-path handoff cards live in the transcript tail (after the todos), not
   // the pinned stack; memoized on the records so streaming never re-renders them.
+  const suggestionCards = useMemo(
+    () =>
+      suggestions.offers.map((offer) => ({
+        id: offer.id,
+        anchorMessageId: offer.anchorMessageId,
+        node: <SuggestionCard offer={offer} local={suggestions.local[offer.id] ?? null} onAct={(action) => void suggestions.act(offer.id, action)} onVisible={() => suggestions.markSeen(offer.id)} />,
+      })),
+    [suggestions.offers, suggestions.local, suggestions.act, suggestions.markSeen],
+  );
   const handoffCardsNode = useMemo(
     () => (handoff.pinned.length > 0 ? <HandoffTailCards records={handoff.pinned} /> : undefined),
     [handoff.pinned],
@@ -3745,6 +3758,7 @@ export function ChatPanel({
             planCard={routineRun && hasReportView(routineRun.run) ? <RoutineReportCard /> : planCard}
             backgroundCards={backgroundCards}
             handoffCards={handoffCardsNode}
+            suggestionCards={suggestionCards}
             scrollerElRef={scrollerElRef}
             followingRef={followingRef}
             onFollowingChange={setFollowing}

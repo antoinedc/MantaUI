@@ -124,6 +124,9 @@ export type AppConfig = {
   // set by hand — so it's OFF by default and opt-in via Settings. See the
   // "Auto-rename" notes in AGENTS.md.
   autoRenameSessions?: boolean;
+  // "Suggest agents for repeated work" (Settings → Sessions): when the same kind of work has been handed to Dev 3 times, Manta offers once to
+  // make an agent or a skill for it. Absent = on; `false` stops the offers (counting continues). Written through the generic configUpdate path.
+  agentSuggestions?: boolean;
   // BET-738: show the composer's usage dial even when every window is under
   // the dial's normal 70% threshold. Off by default — the dial's whole point
   // is to be absent unless it matters; this is the opt-out for someone who
@@ -4530,6 +4533,34 @@ export interface TaskQuestionEvent {
   parentSessionID: string;
   rootJobId: string;
   state: TaskQuestionState;
+}
+/** What the user can answer to Manta's "this might deserve an agent" offer. */
+export type AgentSuggestionAction = "agent" | "skill" | "later" | "never";
+/**
+ * One stored offer, as `agents:suggestions` returns it (docs/superpowers/specs/2026-11-28-research-layer.md §6.6). `final`: this "Not now"
+ * was the second, so Manta won't suggest it again. `accept` exists only for an answered agent/skill offer.
+ */
+export interface AgentSuggestion {
+  id: string;
+  anchorMessageId: string;
+  label: string;
+  verdict: "agent" | "skill";
+  why: string;
+  count: number;
+  state: "pending" | "answered";
+  answer?: AgentSuggestionAction;
+  final?: boolean;
+  accept?: { state: "posting" | "posted" | "failed"; messageId: string };
+  seenAt: string | null;
+  createdAt: string;
+}
+export type AgentSuggestionActResult =
+  | { ok: true; posted?: string; sending?: true; failed?: true; already?: AgentSuggestionAction; disabled?: true }
+  | { ok: false; error: string };
+/** Bus kinds `agentSuggestion` (an offer was created) and `agentSuggestion.resolved` (answered or withdrawn): hints, re-read. */
+export interface AgentSuggestionEvent {
+  sessionId: string;
+  id: string;
 }
 export interface AgentSeat {
   project: string;

@@ -718,10 +718,9 @@ Subsequent **re-titles** (every `AUTO_RENAME_EVERY_N_TURNS` = 5 turns) and the
 first-name fallback use V2's session-less one-shot `POST
 /api/experimental/generate` (`generateText` in `src/server/opencode.mjs`): no
 hidden session is created, prompted, polled or deleted. V1's `title` agent no
-longer exists, so a cheap CONNECTED model is picked explicitly
-(`pickCheapModel`: haiku/mini/flash/nano/lite/small by name, then lowest input
-cost; V2's own default is the free tier, which refuses calls from outside
-opencode). It returns "" on any failure/timeout so the caller skips rather
+longer exists, so the model is picked explicitly: `summaryModel.resolveCheapWriter(sessionId)`
+(the Summary model, else the conversation's own — the old `pickCheapModel` is gone; V2's own
+default is the free tier, which refuses calls from outside opencode). It returns "" on any failure/timeout so the caller skips rather
 than errors. `sanitizeGeneratedTitle` stays as a safety net on both paths.
 
 Do not change `AUTO_RENAME_EVERY_N_TURNS` (cadence is a separate concern); the
@@ -4357,6 +4356,45 @@ Spec `docs/superpowers/specs/2026-11-28-agent-chat-tasks.md`; design `docs/scree
 - **Seats are written after a confirmed launch only** (no rollback exists): the record carries `seatOwed`; `settleSeatOf` (right after the start, and `reconcileSeats` on boot / every 60 s sweep) creates `seats/<id>.md` (`added_by: chat`) only if missing under `syncLock`, then `delegate.settleSeat` swaps `seatOwed` for `seatAdded`. A write failure keeps `seatOwed`.
 - **Records and Fleet.** `project`, `startedFrom`, `knowledgeProject`, `seatOwed` on the job; the completion text starts `Project: <name>` and the result carries project/branch/isolation. Fleet shows such a task as its own `task` row in its project (Running and Ended today, in the tree or not: `shapeFleetTasks` keeps chat tasks out of every conversation row's subs), `askedBy` is `{by:"agent-chat"}` ("Dev, in your conversation"). Needs you has `chatQuestions` (open `question` forms of every Team conversation): a red "Waiting on you" item under "Team" whose Open conversation button selects the conversation.
 - **Renderer.** `ChatTaskCards.tsx` (+ `chatTask.ts`) is one card family: the running and result cards (`RunCard` / `BackgroundResultCard` hand over a job with `startedFrom`), the "starting" card and the quiet "Not started" row from the `agent_start_task` tool part (`ToolCall`), with plain-language refusals (`friendlyRefusal`; the agent's own sentence is the tooltip). The words are Fleet's (`endedBadge` over the one `outcomeOfJob` in `src/shared/fleetOutcome.mjs`). Clear conversation opens already refused (`ClearBlockedModal`, a native `<dialog>` via `showModal()` like `StopTaskDialog`; jsdom tests use `installDialogPolyfill`) from the job store, an in-flight start, or the box's own refusal.
+
+## Agent suggestions — repeated work becomes an offer (`src/server/agentSuggestions.mjs`)
+
+Spec `docs/superpowers/specs/2026-11-28-research-layer.md` US4 / §6.5 / §6.6; design `docs/screens/research/` (decisions.md §17, §21–25).
+When the same KIND of work keeps being handed to Dev, Manta offers once — a card under its message — to make a dedicated agent or a skill.
+
+- **What counts.** Only NEW tasks for the built-in Dev: a lead's `agent_handoff` and a task Dev starts from its own conversation
+  (`noteDevTask` in `agents.mjs`, fire-and-forget after the launch). Other agents' tasks and `continueJob` rounds never count; a task
+  from Dev's own conversation counts towards a cluster but only a led chat's handoff can make the offer.
+- **The kind of work is NAMED by one cheap model call per handoff** (`briefLabel.mjs`: prompt v3, parser, `labelKey`/`sameKind`), run in the
+  background through `generateText` on `summaryModel.resolveCheapWriter(chat)` (Summary model, else the chat's own — the auto-rename path;
+  `pickCheapModel` no longer exists). The handoff never waits for it or fails because of it; a failed call = that handoff isn't counted.
+  Equal label keys (lowercase, filler dropped, light stemming) = same kind = one cluster. **Do NOT go back to word overlap or embeddings:
+  both were measured on the fixture and fail** (they measure the topic; spec §6.5 "Measures tried"). The call is made even with the
+  setting off (counting continues).
+- **AC-4.2 is a recorded-label replay.** `src/server/fixtures/briefSimilarity.json` (60 labelled pairs, never edit) is labelled by a live model
+  into `src/server/fixtures/briefLabels.json`; `briefLabel.test.mjs` replays it with no network. ANY change to the prompt, parser or matching
+  rule means bumping `LABEL_PROMPT_VERSION` and re-recording: `OPENCODE_PASSWORD=… node scripts/research/label-fixture.mjs --model <p>/<m>
+  --passes 4 [--append --seed N]` (uses only the session-less `POST /api/experimental/generate`; creates no session). The prompt's examples must
+  not be kinds of work from the fixture (a test checks).
+- **State** in `~/.manta/agents/.suggestions.json` (items ≤ 500 / clusters 90 days / offers) and the SEPARATE, never-pruned
+  `.suggestion-suppressions.json` ("Don't ask again"; keyed by label key; the labelling prompt is offered the suppressed labels so the model
+  keeps reusing the exact label). Both hold job ids and short labels, never brief text. A cluster of 3 within 30 days (3 since a "Not now"),
+  one offer per chat per day, three per box per week; a second "Not now" is for good; the setting is `agentSuggestions` in the box config
+  (absent = on; written by the generic `config:update`, validated boolean).
+- **Offers are durable.** Created after ONE check call (agent or skill? + a plain label); the renderer READS `agents:suggestions {sessionId}`
+  on chat open, when the chat becomes active, on every `resync` and on the `agentSuggestion*` bus hints — never only the event.
+  `agents:suggestion-seen` is sent when the card is ≥ 50 % on screen (IntersectionObserver; the transcript is virtualised); an offer never
+  seen for 7 days is withdrawn by the 60 s sweep and its cluster reopens.
+- **Accepting is retry-safe.** `agents:suggestion-act` writes `accept {state:"posting", messageId (pre-minted msg_…), text}` first, posts only if
+  `readMessageStrict` finds no message with that id (`delivery:"queue"` when the chat is busy), then marks it `posted`; failures back off
+  30 s → 8 min, 5 attempts then `failed` (Retry = the same call, same id). Recovery runs at boot, in the sweep and on every read of that chat;
+  `inFlight` ids stop two attempts in one process. The offer only POSTS A MESSAGE (origin unknown, not user-typed); Manta hands it to the Architect.
+- **Renderer.** `SuggestionCard.tsx` + the pure `agentSuggestion.ts` (all card states and words), `hooks/useAgentSuggestions.ts`; `Transcript`
+  places each card under its `anchorMessageId` (an undrawn anchor falls back to the last row). The setting is a Sessions toggle
+  (`settingsSchema.ts` `agentSuggestions`, group "Agents"). Existing boxes need nothing: the stores are created on first use and the engine
+  starts with the server.
+- Tests: `briefLabel.test.mjs`, `agentSuggestions.test.mjs`, `agentsSuggestions.test.mjs` (the handoff seam, AC-4.2b), `rpc.suggestions.test.mjs`,
+  `ChatPanel.suggestion.test.tsx`, `agentSuggestion.test.ts`, the Settings toggle in `Settings.test.tsx`.
 
 ## Open work (as of 2026-05-18)
 

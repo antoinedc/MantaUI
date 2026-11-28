@@ -263,6 +263,7 @@ import { createCtoConversationService, authorizeCtoProjectMutation } from "./cto
 import { createAgentsEngine, isArchitect } from "./agents.mjs";
 import { createAgentTrials, TRIAL_PROGRESS_PREFIX, trialScratchRoot } from "./agentTrials.mjs";
 import { createAgentLearning, createLearningStore, createUserCommitReader } from "./agentLearning.mjs";
+import { createAgentSuggestions, createSuggestionStore } from "./agentSuggestions.mjs";
 import { checkLearnedRule } from "./agentScriptReview.mjs";
 import { scanSymlinks as scanTrialSymlinks } from "./knowledge/trial.mjs";
 import { createSecretScanner } from "./knowledge/secretScan.mjs";
@@ -2709,7 +2710,30 @@ const agentTrials = createAgentTrials({
   // "Trial running · case 2 of 3" on the Architect's task card while a case runs; cleared when the trial ends
   progress: (jobId, label) => delegateEngine.setJobLabel(jobId, label, { clearPrefix: TRIAL_PROGRESS_PREFIX }),
 });
+// "This might deserve an agent" (src/server/agentSuggestions.mjs): every accepted handoff to Dev is labelled with its kind of work by ONE
+// cheap one-shot call (the Summary model, else the asking conversation's own: the same writer auto-rename uses) in the background; three of a
+// kind become a durable offer. State lives in two files beside the agents; the setting is `agentSuggestions` in the box config (default on).
+const agentSuggestions = createAgentSuggestions({
+  store: createSuggestionStore({ path: statePath("agents", ".suggestions.json") }),
+  suppressStore: createSuggestionStore({ path: statePath("agents", ".suggestion-suppressions.json") }),
+  generate: async ({ instruction, sessionId }) => {
+    const writer = await summaryModel.resolveCheapWriter(sessionId);
+    if (!writer) return "";
+    return oc.generateText({ instruction, model: { providerID: writer.providerID, modelID: writer.modelID } });
+  },
+  // the raw brief leads a job's prompt; the engine reads only its head
+  readJobs: async (ids) => {
+    const wanted = new Set(ids);
+    const records = (await delegateEngine.loadRecordsStrict()) ?? [];
+    return Object.fromEntries(records.filter((j) => wanted.has(j.id)).map((j) => [j.id, { title: j.title ?? j.request ?? "", prompt: j.prompt ?? "" }]));
+  },
+  oc,
+  enabled: async () => (await local.configGet())?.agentSuggestions !== false,
+  disable: () => local.configUpdate({ agentSuggestions: false }),
+  publish: (evt) => bus.publish(evt),
+});
 const agentsEngine = createAgentsEngine({
+  suggestions: agentSuggestions,
   trials: agentTrials,
   research: researchEngine,
   library: researchLibrary, // the Architect's fit check is checked against the entries it names
@@ -2818,6 +2842,9 @@ const agentLearning = createAgentLearning({
 });
 agentLearningSink = (job) => agentLearning.noteEnded(job);
 startPoller(() => agentLearning.runDue(), { intervalMs: 60_000, label: "agent-learning", immediate: false });
+// offers nobody saw are withdrawn after 7 days, and an accepted offer whose message didn't go out (a crash, opencode down) is posted: at boot and every minute
+void agentSuggestions.recover({ boot: true }).catch((e) => console.warn("[agent-suggestions] boot recovery failed:", e?.message ?? e));
+startPoller(() => agentSuggestions.sweep(), { intervalMs: 60_000, label: "agent-suggestions", immediate: false });
 // leftovers of a crashed trial (a session, a copy of a project, a block) are cleaned at boot; results are kept 30 days
 void agentTrials.recover().catch((e) => console.error("[agent-trials] boot cleanup failed:", e?.message ?? e));
 startPoller(() => agentTrials.sweep(), { intervalMs: 60 * 60_000, label: "agent-trials-sweep", immediate: false });
@@ -2834,6 +2861,7 @@ const claudeCliVersionSync = createClaudeCliVersionSync();
 rpcHandlers = buildHandlers({
   usageCalibration,
   agents: agentsEngine,
+  suggestions: agentSuggestions,
   routines: routinesEngine,
   knowledge: knowledgeEngine,
   backgroundBudget,

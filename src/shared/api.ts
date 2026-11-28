@@ -55,6 +55,10 @@ import type {
   NeedsYou,
   TaskQuestion,
   TaskQuestionEvent,
+  AgentSuggestion,
+  AgentSuggestionAction,
+  AgentSuggestionActResult,
+  AgentSuggestionEvent,
   AgentDispatchInput,
   DelegateApprovalTool,
   DesktopNotifyPayload,
@@ -2052,6 +2056,14 @@ export interface Api {
   agentsChangeFile(input: { id: string; path: string }): Promise<{ before: string | null; after: string | null; truncated?: boolean }>;
   /** Architect v2 Stage 3: take back one rule an agent learned (`id` = `lr_…`); the answer is the change record that removed it. Its words won't produce it again. */
   agentsLearnedUndo(input: { slug: string; id: string }): Promise<AgentChange>;
+  /** The offers stored for one chat (pending and answered, oldest first). Read on chat open and on every reconnect; the bus kinds are only hints. */
+  agentsSuggestions(input: { sessionId: string }): Promise<{ offers: AgentSuggestion[] }>;
+  /** The card is on screen: stored once (first call wins). */
+  agentsSuggestionSeen(input: { id: string; sessionId: string }): Promise<{ ok: true; seenAt: string } | { ok: false; error: string }>;
+  /** The user's answer. First answer wins; a repeat returns `already`. */
+  agentsSuggestionAct(input: { id: string; action: AgentSuggestionAction }): Promise<AgentSuggestionActResult>;
+  /** Bus kinds `agentSuggestion` and `agentSuggestion.resolved` (hints: re-read the chat's offers). */
+  onAgentSuggestion(cb: (p: AgentSuggestionEvent) => void): () => void;
   /** Bus kind `taskQuestion`: a question was asked, answered, dismissed or lost (a hint: refetch). */
   onTaskQuestion(cb: (p: TaskQuestionEvent) => void): () => void;
   /** Bus kind `agentFleet`: jobs, changes, seats or questions changed (a hint: refetch, debounced). */

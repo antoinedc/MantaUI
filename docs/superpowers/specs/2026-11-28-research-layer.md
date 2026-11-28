@@ -4,7 +4,7 @@ Status: spec, 2026-11-28, revised after review of PR #1779 (migration parses aga
 durable suggestion offers with read/ack contracts; similarity fixture with recall and tuned threshold; no private material in
 outside queries; uncapped "don't ask again" suppression set); second round: built-in `websearch`/`webfetch` guarded by the
 plugin's blocking `execute.before` hook (proof gates release, routed fallback specified), whole-URL checking, retry-safe
-accept. Owner: Antoine. Builds on `2026-11-24-research-library.md` (the library, the research tools of every
+accept; fourth round (slice 4): the repeated-work counter names the kind of work with one cheap model call per handoff to Dev (word overlap and local embeddings both failed the fixture). Owner: Antoine. Builds on `2026-11-24-research-library.md` (the library, the research tools of every
 specialist task), `2026-11-24-agents-phase5-builder.md` §4.3a (the Architect's extra sources), `2026-11-27-architect-v2.md`
 (the Architect's rounds) and `2026-11-28-agent-profile-redesign.md` (profile, settings through the change flow).
 Out of scope here: the screens (the Product Designer does the Settings page, the profile line and the suggestion line next),
@@ -42,7 +42,7 @@ box):
 ## 2. Appetite
 
 Medium: about two weeks for one implementer, split into four shippable slices (§11). It rules out: a new search provider we
-pay for; embeddings or a vector store; a library viewer/purge screen; per-agent source lists; agents adding or editing sources
+pay for; embeddings or a vector store (tried, they fail the fixture: §6.5); a library viewer/purge screen; per-agent source lists; agents adding or editing sources
 themselves; bundling a browser-driven scraping tool; new built-in agents.
 
 ## 3. Scope
@@ -58,7 +58,7 @@ themselves; bundling a browser-driven scraping tool; new built-in agents.
 5. **Search-first rule** in the server-built base instructions every agent gets, in tasks and in chats (Manta's own
    `agent.md` unchanged).
 6. **Agent profile**: one read-only line — the sources the agent searches and the library size.
-7. **Agent-or-skill suggestion**: the server groups handoffs by kind of work, cheaply; after 3 similar ones Manta offers a
+7. **Agent-or-skill suggestion**: the server names the kind of work of each handoff to Dev with one cheap background call; after 3 of a kind Manta offers a
    dedicated agent or a skill, once; the user can accept, defer or say never for that kind.
 8. **No bundled skill** by default (§8: agent-reach evaluated and rejected as a default).
 9. Existing boxes converge on update with no manual step; built-ins stay Manta, Dev, the Architect.
@@ -70,7 +70,7 @@ themselves; bundling a browser-driven scraping tool; new built-in agents.
 - Per-agent source lists or per-agent overrides (sources are box-wide; decision 1).
 - A library browser, purge or edit screen (the profile's existing Research tab stays as is).
 - Product Manager, Designer, Reviewer as built-ins (decision 8). They stay user agents.
-- Paid search APIs, embeddings, a browser.
+- Paid search APIs, a provider call per handoff (local embeddings were evaluated: §6.5), a browser.
 - Counting work Manta does itself in the chat without a handoff (the server can't see it without reading every message).
 
 ## 4. User stories (P1 first)
@@ -210,14 +210,17 @@ do it better; I can say yes, later, or never for that kind of work.*
     cards show the resolved state.
   - **Never rendered**: an offer with no `seenAt` after 7 days is withdrawn (card never appears), the cluster goes back to
     `open`, and the next similar handoff may offer it again; it doesn't count as a "Not now".
-- AC-4.2 Similarity, on the labelled fixture of §6.5 (`src/server/fixtures/briefSimilarity.json`, ≥ 60 pairs): at the shipped
-  threshold, precision ≥ 0.90 and recall ≥ 0.60 over all pairs, recall ≥ 0.80 on the templated positives, and every hard negative
-  (same template headings, different work — e.g., "fix the upload test" vs "write release notes" both in the brief template) is
-  kept apart. The threshold is the value the tuning test picks from this fixture (§6.5), not a number fixed in advance.
+- AC-4.2 Kind of work, on the labelled fixture of §6.5 (`src/server/fixtures/briefSimilarity.json`, 60 pairs, unchanged), judged by
+  whether the two briefs of a pair get the same label (`sameKind`): precision ≥ 0.90 and recall ≥ 0.60 over all pairs and no hard
+  negative (same template headings, different work — e.g., "fix the upload test" vs "write release notes") given the same label,
+  in every recorded pass; recall on the templated positives ≥ 0.80 over the recorded passes together (≥ 0.70 in each: a pass has only
+  ten templated pairs and the labeller is a model). The labels are recorded from a live model (`src/server/fixtures/briefLabels.json`,
+  ≥ 2 passes over every brief) and replayed by the test, with no network; `scripts/research/label-fixture.mjs` re-records them.
 - AC-4.2b End to end: Given three accepted Dev handoffs with similar briefs worded differently (injected fakes through
-  `agents.handoff`), Then exactly one offer is created and exactly one check call is made; a fourth similar handoff creates no
-  second offer and no call; three dissimilar handoffs create none.
-- AC-4.3 Given a suggestion, When the user picks "Build an agent", Then a user message is posted in that chat ("Yes — build a
+  `agents.handoff`), Then exactly one offer is created, with exactly three labelling calls (one per handoff) and one check call; a
+  fourth similar handoff makes one more labelling call and creates no second offer and no check call; three dissimilar handoffs
+  create none.
+- AC-4.3 Given a suggestion, When the user picks "Make an agent" (the design's name for the action: decision A of `docs/screens/research/decisions.md`), Then a user message is posted in that chat ("Yes — build a
   dedicated agent for <kind>. Earlier briefs: …") and Manta hands it to the Architect through the normal handoff; the cluster
   becomes `accepted`. "Make a skill" does the same with the skill wording. No agent or skill is created by the suggestion itself.
 - AC-4.3b Accepting is safe to retry (§6.5 "Accepting"). Tests, each with injected fakes for the store and opencode:
@@ -234,8 +237,8 @@ do it better; I can say yes, later, or never for that kind of work.*
   - **Busy chat**: the post uses `delivery: "queue"` so it never steers a running turn, and recovery still finds it by id.
   - **Other answers** ("Not now", "Don't ask again") post nothing and are a single state write.
 - AC-4.4 Given "Not now", Then that cluster is not offered again until 3 more similar handoffs; after a second "Not now" it is
-  never offered again. Given "Don't ask again for this", Then the cluster's signature goes into the suppression set (§6.1), and
-  a later brief similar to it is never offered — also after the cluster itself has aged out of the 500-item / 90-day history.
+  never offered again. Given "Don't ask again for this", Then the cluster's label goes into the suppression set (§6.1), and
+  a later brief given that label is never offered — also after the cluster itself has aged out of the 500-item / 90-day history.
   Test: dismiss a cluster, push 600 unrelated handoffs and 100 days of time through the store, then 3 briefs similar to the
   dismissed kind → no offer.
 - AC-4.5 Given any number of clusters, Then at most one offer is created per chat per day and at most three per box per week
@@ -243,11 +246,14 @@ do it better; I can say yes, later, or never for that kind of work.*
 - AC-4.6 Given Settings → Agents → "Suggest agents for repeated work" off (default on),
   Then no suggestion is created; counting continues (so turning it on later works on recent history).
 - AC-4.7 Given a user explicitly asks Manta for an agent, Then Manta hands it to the Architect as today; no suggestion is involved.
-- AC-4.8 Given a handoff, Then no model call is made to count it; exactly one small model call (the Summary model, else the
-  chat's own) is made per suggestion shown (the label and the agent-or-skill check). If that call fails, no suggestion is shown
-  and the cluster stays `due` for the next similar handoff.
-- AC-4.9 Given the suggestions store and the suppression set, Then they hold no brief text: only job ids, normalised
-  content-word tokens, counts and states.
+- AC-4.8 Given a handoff to Dev, Then exactly one small, cheap model call is made for it: the labelling call (§6.5), the
+  session-less one-shot that auto-rename uses, on the Summary model, else the chat's own. It runs in the background after the
+  handoff has started — the handoff never waits for it and never fails because of it — and a failed or unparseable answer just
+  means that handoff isn't counted. No other model call is made per handoff (no embeddings, no second call). One more small call
+  (the same writer) is made when an offer is created: the label for the user and the agent-or-skill check. If it fails, no
+  suggestion is shown and the cluster stays `due` for the next similar handoff.
+- AC-4.9 Given the suggestions store and the suppression set, Then they hold no brief text: only job ids, the short kind-of-work
+  labels (a verb and a kind, never the brief), counts and states.
 
 ### US5 (P2) — The profile says what the agent searches
 - AC-5.1 Given any agent's profile, Then one read-only line shows the enabled sources in priority order (private ones marked) and
@@ -287,8 +293,9 @@ do it better; I can say yes, later, or never for that kind of work.*
 - **FR-011** Default sources for a new box are those of §7, enabled, in the §7 order; future built-ins are added to existing boxes
   enabled, after the user's sources, unless the user had already turned off a source with that id.
 - **FR-012** Per-source rate limits are enforced box-wide (§10) and a source's own backoff/quota signals are honoured.
-- **FR-013** The server clusters Dev handoffs (and agent-chat tasks started for Dev) by similarity of their title + brief without a
-  model call; a cluster of 3 within 30 days becomes due for a suggestion.
+- **FR-013** Every accepted new task for Dev (a lead's handoff, or a task Dev starts from its own conversation) is labelled with
+  its kind of work by one cheap one-shot call in the background; tasks with the same label are one cluster; a cluster of 3 within
+  30 days, completed by a led chat's handoff, becomes due for a suggestion.
 - **FR-014** A due suggestion is checked by one model call (label ≤ 6 words; verdict `agent` | `skill` with a one-line why) and
   becomes a durable offer in the chat that triggered it, with four actions (build an agent, make a skill, not now, don't ask
   again). Clients render offers from a read contract on chat load and on reconnect, acknowledge rendering, and the offer stays
@@ -333,7 +340,7 @@ other store):
 
 ```json
 { "version": 1,
-  "items": [ { "jobId": "…", "at": "…", "project": "slug|dir:…", "chat": "<lead session id>", "tokens": ["release","notes","changelog"], "cluster": "c_…" } ],
+  "items": [ { "jobId": "…", "at": "…", "project": "slug|dir:…", "chat": "<session id>", "key": "write release note", "label": "write release notes" } ],
   "clusters": { "c_…": { "count": 3, "firstAt": "…", "lastAt": "…", "state": "open|due|offered|snoozed|accepted|dismissed",
                           "offers": 1, "snoozeUntil": 6 } },
   "offers": [ { "id": "o_…", "cluster": "c_…", "chat": "<lead session id>", "anchorMessageId": "<Manta message the card sits under>",
@@ -352,21 +359,20 @@ Caps: 500 items (oldest dropped); clusters with no item in 90 days dropped; offe
 **Suppression set** `~/.manta/agents/.suggestion-suppressions.json`, separate file, never pruned by the history caps:
 
 ```json
-{ "version": 1, "entries": [ { "id": "s_…", "tokens": ["release", "note", "changelog", "version"], "at": "…" } ] }
+{ "version": 1, "entries": [ { "id": "s_…", "key": "write release note", "label": "write release notes", "at": "…" } ] }
 ```
 
-- Written when the user answers "Don't ask again" (and when a second "Not now" closes a cluster for good): `tokens` is the
-  cluster's **stable signature**, frozen at that moment — the ≤ 40 content words that occur in the most of its members (ties by
-  token order). It is never recomputed from history, so it survives the cluster being dropped.
-- Every new handoff is compared against the suppression set FIRST, with the same measure as clustering but a lower bar
-  (0.8 × the clustering threshold, to err on the side of silence); a match is recorded nowhere and can never lead to an offer.
+- Written when the user answers "Don't ask again" (and when a second "Not now" closes a cluster for good): `key` is the cluster's
+  label key (§6.5), `label` its display form. It is never recomputed from history, so it survives the cluster being dropped.
+- Every new handoff is labelled first and then compared with the suppression set: a label with a suppressed key is recorded
+  nowhere and can never lead to an offer. The labelling prompt is offered the suppressed labels too (§6.5), so the model keeps
+  reusing the exact label for that kind of work.
 - No pruning. A hard ceiling of 10,000 entries exists only as a sanity bound: at three offers per box per week it can't be
   reached (≈ 156 a year). At the ceiling a new dismissal still succeeds by turning OFF suggestions box-wide and saying so,
   rather than forgetting an older promise.
-- **What is promised**: after "Don't ask again", Manta never again offers an agent or a skill for briefs that the shipped
-  similarity measure finds similar to that kind of work, for the life of the box (or until the user turns suggestions off and
-  clears them — a follow-up control). Briefs worded so differently that the measure doesn't match them are a new kind and may
-  be offered once.
+- **What is promised**: after "Don't ask again", Manta never again offers an agent or a skill for a brief that the labeller gives
+  that label, for the life of the box (or until the user turns suggestions off and clears them — a follow-up control). The labeller
+  is a model: a brief it words as a different label is a new kind and may be offered once.
 
 ### 6.2 Migration (runs once at manta-server boot, idempotent, non-fatal)
 
@@ -492,44 +498,88 @@ query), the fetched addresses (`research_fetch`, `webfetch`), and `websearch` in
 case-insensitively against the brief's private terms. This trial is an extra check on behaviour; the guarantee comes from the
 check of AC-2.8 running in front of every covered call (AC-2.9).
 
-### 6.5 Similarity for the suggestion counter (cheap, deterministic, no model call)
+### 6.5 Counting repeated work by KIND (one cheap label call per handoff to Dev)
 
-- Counted events: an accepted `agent_handoff` to the built-in **Dev**, and an `agent_start_task` started from Dev's own
+Decision 2026-11-28: word overlap and sentence embeddings both failed the fixture (the table below); a small model call that NAMES
+the kind of work passes it. Equal labels mean the same kind of work; the topic is ignored.
+
+- Counted events: an accepted new `agent_handoff` to the built-in **Dev**, and an `agent_start_task` started from Dev's own
   conversation. Handoffs to other agents are not counted (they already have a dedicated agent); follow-up rounds
-  (`continueJob`) of the same task are not counted.
-- Input: the RAW `brief` and `title` the lead passed to `agent_handoff` (never the dispatch prompt, so the seat brief, learned
-  rules and conversation excerpt the server appends are never compared).
-- **Boilerplate removal**, before tokenising, in this order:
-  1. Fixed template lines: the headings and labels of the brief template Manta's instructions ask for and the dispatch block
-     markers (a list kept next to the code, e.g. `Goal`, `Context`, `Done when`, `Acceptance criteria`, `Constraints`,
-     `Files to read first`, `Report`, `Hand-off`, markdown heading/bullet/number markup), matched as whole lines after trimming.
-  2. Learned template lines: any whole line (normalised: lowercase, whitespace collapsed, digits → `0`) that appears in ≥ 30 % of
-     the stored Dev briefs, once there are ≥ 10 of them (line document-frequency kept in the store as hashes only).
-  3. Common tokens: after tokenising, any token present in > 50 % of stored signatures is dropped (min 10 signatures).
-- Signature: title + the first 600 characters of what remains → lowercase → MiniSearch's tokenizer → drop stop words, numbers,
-  paths, URLs, hex/ids, code identifiers with `_`/camelCase → light suffix stemming (`-ing`, `-ed`, `-s`) → a set of content
-  words (≤ 40). The title counts twice (its tokens are added with weight 2), since titles name the work most directly.
-- Match: index stored signatures in MiniSearch; take the top 5 candidates for the new signature; similarity =
-  IDF-weighted Jaccard (Σ idf(common) / Σ idf(union), idf over the stored items). Join the best cluster if ≥ the threshold,
-  else start a new cluster. Same project not required (kind of work crosses projects).
-- **The threshold is tuned from the fixture, not fixed in advance.** Fixture `src/server/fixtures/briefSimilarity.json`, ≥ 60
-  labelled pairs, each pair a `{title, brief}` × 2 in the real brief template:
-  - ≥ 20 **paraphrase positives**: same kind of work, different wording ("write this week's release notes" / "draft the
-    changelog for v2.3 from the merged PRs"; "add a Playwright test for login" / "cover the sign-in flow with an end-to-end test").
-  - ≥ 10 **templated positives**: same kind of work in the full template, different projects and details.
-  - ≥ 20 **hard negatives**: same template headings and similar length, different work ("fix the flaky upload test" vs "write
-    release notes"; "add a settings toggle" vs "add a settings migration").
-  - ≥ 10 plain negatives.
-  A test sweeps thresholds 0.10–0.60 in 0.025 steps over a background corpus (the fixture's briefs, to give realistic IDF),
-  picks the threshold with the highest recall among those with precision ≥ 0.90, asserts the AC-4.2 targets at it, and asserts
-  that the constant in the code equals the picked value (changing the fixture or the measure forces a re-tune). If no threshold
-  meets the targets, slice 4 does not ship; the follow-up is a better measure (embeddings), not a looser bar.
-- Lexical matching can't see true synonyms the fixture doesn't share words for; the recall target accepts that (≥ 0.60 overall).
-- Due: cluster count within the last 30 days ≥ 3 (first offer) or ≥ `snoozeUntil` (second offer), state `open`/`snoozed`, the
-  chat and box caps of AC-4.5 not hit, the setting on.
-- Check call (one, at offer time): input = the cluster's titles and the first 300 characters of up to 5 briefs (read from the job
-  records), plus the question "does this work need its own rules, tools or independence (its own model, isolation, permissions,
-  separate context)? If not, a skill is enough." Output JSON `{label, verdict: "agent"|"skill", why}`; anything else = failure.
+  (`continueJob`) of the same task are not counted. A task Dev starts from its own conversation counts towards a cluster but can
+  never make the offer: only a led chat's handoff can (Manta's chat is where an agent gets built).
+- **The call.** `generateText` (`src/server/opencode.mjs`: the session-less one-shot `POST /api/experimental/generate` that
+  auto-rename uses) on `summaryModel.resolveCheapWriter(chat)`: the Summary model, else the chat's own model, nothing new to
+  configure. It starts after the handoff has been accepted and runs in the background, one at a time per box (so the labels offered
+  to the model are always current); the handoff never waits for it and never fails because of it. A failed, empty or unparseable
+  answer: that handoff isn't counted (logged), nothing else changes.
+- **Input.** The RAW title and brief the lead passed (never the dispatch prompt), the brief cut at 1,200 characters, marked as data.
+- **The prompt** (`src/server/briefLabel.mjs`, version 3): the label is a verb plus the kind of thing worked on, 2–4 words, lowercase;
+  it names the ACTIVITY, never the subject (product, feature, page, file, library, customer, version, numbers); different activities
+  stay apart even on the same subject; only the main job counts (not the checks and report every brief ends with). The box's
+  labels so far are listed (up to 40 from live clusters, most used first, then up to 20 suppressed ones) and the model is told to
+  reuse one exactly only when it names the same ACTIVITY ("sharing the topic is not enough"), else to coin a new one. The prompt's
+  own examples are not kinds of work from the fixture (a test checks it). Answer parsing: first line, 2–5 words, ≤ 40 characters,
+  else failure.
+- **Matching rule.** Two labels are the same kind when their keys are equal: lowercase, filler words dropped (a an the of for to and in
+  on new some our my your up), light suffix stemming (-ing, -ed, -ies, -es, -s), word order kept. A cluster IS a label key. Nothing
+  fuzzier was needed (a looser rule would join the fixture's "write data export script" and "write data import script").
+- Due: cluster count within the last 30 days ≥ 3 (first offer) or ≥ 3 since the "Not now" (second offer), state
+  `open`/`snoozed`/`due`, the chat and box caps of AC-4.5 not hit, the setting on, and the handoff that completes it from a led chat.
+- **Fixture and results.** `src/server/fixtures/briefSimilarity.json`, 60 labelled pairs, each pair a `{title, brief}` × 2 in the real
+  brief template (written before any measure existed and never edited): 20 paraphrase positives, 10 templated positives, 20 hard
+  negatives (same headings, different work: "add a settings toggle" vs "add a settings migration"), 10 plain negatives. The 120 briefs
+  are labelled one after the other the way the box does it (each call is offered the labels coined so far in that pass); pass 1 in
+  fixture order, later passes in a seeded shuffle. The answers of a live model are committed (`src/server/fixtures/briefLabels.json`);
+  `briefLabel.test.mjs` replays them offline and asserts AC-4.2; `scripts/research/label-fixture.mjs` (opt-in, needs the box's
+  opencode password, uses only the one-shot route) re-records them and fails the test until it does after any prompt change.
+
+  Model `openai/gpt-6-luna` (the Anthropic OAuth on the dev box was revoked at the time; the Summary model of a real box is the user's choice).
+
+  | Prompt | Passes | Precision | Recall | Templated recall | Hard negatives leaking |
+  |---|---|---|---|---|---|
+  | v1 (first draft) | 3 | 0.97, 1.00, 1.00 | 0.97, 0.87, 0.93 | 1.00, 0.80, 0.90 | 1, 0, 0 (of 20) |
+  | v2 (+ "use a generic object, not what it is about") | 4 | 1.00, 0.96, 1.00, 0.96 | 1.00, 0.87, 0.93, 0.87 | 1.00, 1.00, 1.00, 0.80 | 0, 1, 0, 1 |
+  | **v3 (v1 + "reuse only when the ACTIVITY is the same")** | **8** | **1.00 in every pass** | **0.83 – 0.93** | **0.70 – 1.00; 0.86 over the 8 passes (69/80)** | **0 in every pass (0 of 160)** |
+
+  v1's one leak was label reuse stretched over different work ("implement localization" for both a translation and a language
+  setting); v3's single added sentence fixed it. v2's "generic object" rule made labels too coarse ("write script" for both an
+  export and an import) and is gone. Three prompt versions were tried on the same fixture the targets are measured on, so the figures
+  are an upper estimate for unseen briefs: real handoffs are messier than a crafted fixture.
+
+  Consistency across the 8 v3 passes: two different passes call the same pairs alike in 92.7 % of the 60 pairs (49 pairs are called
+  the same way in all 8); the exact label TEXT of a brief is identical in all passes for only 17 of 120 briefs (the model words
+  "add settings toggle" / "add settings option" differently), which is why matching is on the stemmed key and why the misses
+  (the 2–5 positive pairs per pass that are not matched) are labels worded one step apart: "export order data" / "export subscriber data",
+  "write user documentation" / "write developer documentation", "fix deployment workflow" / "fix ci workflow". Misses cost a missed
+  offer, never a wrong one.
+
+  Target reading: one pass has ten templated pairs, so one pair moves its templated recall by 0.10 and a model-labelled pass is a
+  sample. Precision, recall and "no hard negative leaks" hold in every one of the 8 passes; the templated-recall target (≥ 0.80) holds
+  over the passes together (0.86) and in 7 of 8 passes (the other: 0.70). The test asserts it that way (pooled ≥ 0.80, each pass
+  ≥ 0.70) — a reading of "the same targets" for a stochastic labeller, for the user to confirm.
+
+- **Measures tried (2026-11-28), same fixture, same targets.** Best case at precision ≥ 0.90 with no hard negative leaking (recall /
+  templated recall):
+
+  | Measure | Recall | Templated recall |
+  |---|---|---|
+  | IDF-weighted Jaccard of content words, MiniSearch candidates (overlap, cosine, Dice, IDF², title weight 1–3 tried) | 0.27 (best variant 0.37) | 0.70 (0.80) |
+  | all-MiniLM-L6-v2, int8, cosine of title + brief | 0.10 | 0.20 |
+  | all-MiniLM-L6-v2, fp32 | 0.10 | 0.20 |
+  | bge-small-en-v1.5, int8 | 0.20 | 0.40 |
+  | potion-base-8M (static embeddings) | 0.17 | 0.50 |
+  | potion-base-32M | 0.17 | 0.50 |
+  | the same with the corpus mean removed from every vector | 0.03–0.33 (best: potion-base-8M, 0.33) | 0.1–0.6 |
+  | embedding + IDF-Jaccard summed | 0.20 | 0.40 |
+  | **one label call per handoff (above)** | **0.83 – 0.93, every pass** | **0.86 pooled** |
+
+  Why the first two families fail: they measure *topic*, not *kind of work*. In the fixture the hard negatives share a topic and a
+  template ("add logging to the webhook" / "write a test for the webhook": MiniLM cosine 0.75) and score as high as the paraphrase
+  positives (median 0.62). Quantisation is not the cause (fp32 gives the same numbers).
+- Check call (one, at offer time, the same writer): input = the cluster's titles and the first 300 characters of up to 5 briefs
+  (read from the job records), plus the question "does this work need its own rules, tools or independence (its own model,
+  isolation, permissions, separate context)? If not, a skill is enough." Output JSON `{label, verdict: "agent"|"skill", why}`
+  (label ≤ 6 words, for the user); anything else = failure.
 - **Offer lifecycle** (durable; the event is only a hint):
   1. Created (`state: pending`, `seenAt: null`) under the suggestions mutex after the check call succeeds, anchored to the Manta
      message that carried the third handoff; the cluster becomes `offered`. Then `agentSuggestion` is published.
@@ -647,7 +697,8 @@ Numbers fetched 2026-11-28 from the npm registry / npm downloads API / GitHub AP
 | **HN, arXiv, GitHub** | Existing adapters | — |
 | **Bundled default skill** | **None.** Agent-Reach evaluated: MIT (copying allowed), very popular (115,609 stars, 10,400 forks, pushed 2026-11-24, 167 open issues), read-only by design. Rejected as a default for every box because: install is agent-driven from an unpinned `main` install.md (supply-chain risk on every box); it installs a Python CLI + uv and, for login channels, a dedicated stealth browser that copies the site login from the user's own Chrome; its README advises secondary accounts because platforms restrict automated access (account-ban risk); its default-safe part (keyless Reddit/X via Exa + Jina) is already shipped in Manta. A user who wants it can still install it and add it as a command source. | Other skills/MCP found (awesome lists of skills, Exa MCP) add nothing keyless beyond what the adapters above give. |
 | **Rate limiting per source** | **p-throttle 8.1.1** (MIT, 0 deps, published 2026-09-12, 8.5 M/week, 523 stars, pushed 2026-09-18) for arXiv's 1/3 s and GitHub's 10/min; Stack Exchange quota read from its own `quota_remaining` / `backoff` fields | bottleneck 2.19.5 (MIT, 0 deps, 14.2 M/week, 2,010 stars) — last publish 2019-08-03, last push 2024-01: unmaintained; hand-rolled timers: a maintained 0-dep library exists. |
-| **Similarity of briefs (counter)** | **MiniSearch 7.2.0** (already a dependency: MIT, 0 deps, 6.26 M/week, 6,215 stars, last publish 2025-09-16) for tokenising and candidate retrieval, plus an IDF-weighted Jaccard threshold (~20 lines: trivially small, deterministic, testable) | natural 8.2.6 (MIT, 14 deps, 1.74 M/week, 10,883 stars, pushed 2026-10-26): 14 dependencies for a TF-IDF we need ~20 lines of; wink-nlp 2.4.0 (MIT, 0 deps, 622 k/week, 1,392 stars): needs a separate language-model package; string-similarity 4.0.4: **deprecated**; datasketch MinHash (MIT, 2,985 stars): Python only; embeddings: a model/provider call per handoff (cost; decision 7 asks for no model call to count). |
+| **Telling the kind of work of a handoff (counter)** | **One cheap one-shot model call per handoff to Dev** that names the kind of work in a short label (`generateText`, the session-less path auto-rename already uses, on the Summary model else the chat's own: no new provider, no new key); equal labels = same kind; the ~25-line matching rule (lowercase, filler dropped, light stemming) is trivially small and deterministic. Passes the fixture where nothing else did (§6.5: recall 0.83–0.93, precision 1.00, no hard negative leaking, in every one of 8 recorded passes). | **MiniSearch 7.2.0** (already a dependency) + IDF-weighted Jaccard of content words: lexical, measures the subject — recall 0.27–0.37 on the fixture. natural 8.2.6 (MIT, 14 deps), wink-nlp 2.4.0 (needs a separate language model), string-similarity 4.0.4 (**deprecated**), datasketch (Python only): the same lexical family, no better and heavier. **Local sentence embeddings** (MiniLM, bge-small, potion; next row): measure topic too — recall 0.10–0.33. **A provider embedding call per handoff**: a remote call like the label call, but on a measure that fails. **A trained classifier**: no labelled data. |
+| **Local embedding runtime and model (evaluated, not adopted)** | None adopted: no tested model meets AC-4.2 (measure topic, not kind of work), so no dependency was added. Numbers fetched 2026-11-28. **onnxruntime-node 1.31.1** (MIT, published 2026-10-26, 9.1 M/week, 3 deps; unpacked 307 MB of which the CUDA provider is 284 MB: a CPU-only install is 48 MB on linux-x64, 26 MB on linux-arm64, 45 MB on darwin-arm64, to be pruned at pack time) + **@huggingface/tokenizers 0.2.0** (Apache-2.0, 0 deps, 361 KB, 11.3 k stars, pushed 2026-11-28): the lean route, about 40 lines of our own for pooling. Models: all-MiniLM-L6-v2 int8 23 MB on disk (Apache-2.0), process RSS 136 MB peak against 44 MB for a bare node, 7–47 ms per brief on one thread; bge-small-en-v1.5 int8 34 MB, 15–74 ms per brief; **potion-base-8M** static model (MIT, 30 MB, 0 native dependencies, 99 MB peak RSS, under 2 ms per brief, loaded with a 30-line safetensors reader and the same tokenizer). | **@huggingface/transformers 4.3.2** (Apache-2.0, 4.34 M/week, 16.5 k stars, pushed 2026-11-27): installs onnxruntime-node (548 MB) **and** onnxruntime-web (141 MB, unused in node) **and** sharp (28 MB, an image library) — 744 MB and 32 packages in a scratch install; the same models, a heavier route. **fastembed 3.0.0** (MIT, 111 k/week): the repository is **archived** (2026-09-24), pins onnxruntime-node 1.21 and did not install cleanly on Node 22 in a scratch install. @xenova/transformers 2.17.2: superseded by @huggingface/transformers. |
 | **Agent-or-skill check + label** | Existing `generateText` path (Summary model, else the chat's own), one call per offer | A classifier model: training data we don't have. |
 | **Settings storage** | Existing `writeJsonAtomic` + `createMutex` (`jsonStore.mjs`) in a dedicated file | `config.json` via the generic `config:update`: no per-write validation or credential scanning, and no recompile hook; lowdb/conf: the project already runs this primitive for every store. |
 | **Source validation and execution** | Existing `architectSources.mjs` + `research/extra.mjs` | JSON Schema (ajv): would duplicate the credential rules that can't be expressed as schema. |
@@ -689,7 +740,7 @@ for the built-in `websearch` / `webfetch` (§6.3a; fallback: deny them and route
 records only the refusal kind. The trial (AC-2.9c) is an extra check for paraphrases. Not guarded mechanically: the shell and MCP servers.
 Reddit and X go through Exa (a third party) as well as the site itself, so they are outside sources.
 **Migration**: everything migrated from the Architect's file is private until the user widens it.
-**Suggestions store and suppression set** hold tokens, not text.
+**Suggestions store and suppression set** hold job ids and short kind-of-work labels, not brief text. The labelling call does send the brief (first 1,200 characters, marked as data) to the Summary model, the same provider the task itself runs on.
 **Cost controls**:
 - Library first (rule) — the main saving.
 - Box-wide throttles: arXiv 1 request / 3 s; GitHub 10 / min; Stack Exchange stops for the day when `quota_remaining` hits 0
@@ -697,7 +748,7 @@ Reddit and X go through Exa (a third party) as well as the site itself, so they 
 - Identical query to the same source within 10 minutes returns the stored answer (Stack Exchange asks for no repeats within a minute).
 - Per task round and per chat turn: at most 30 `research_search` and 40 `research_fetch` calls; then a refusal asking the agent
   to work with what it has. (Sizing: an Architect round today uses well under this; to confirm on the first week's data.)
-- The suggestion: zero model calls to count; one per shown suggestion; at most 3 per box per week.
+- The suggestion: one cheap, short, background call per handoff to Dev (the label) and one per shown suggestion (the check); at most 3 shown per box per week.
 - The base block adds ~25 lines to every compiled prompt (cached by the provider's prompt cache).
 
 ## 11. Delivery slices (each shippable alone)
@@ -708,7 +759,7 @@ Reddit and X go through Exa (a third party) as well as the site itself, so they 
    routed fallback if the proof fails (§6.3a). Then the base block in compiled prompts + chat bindings (US2, US3 server part,
    AC-3.1–3.3).
 3. Renderer: Settings page + profile line (after the Designer).
-4. Similarity fixture + tuning test first, then the counter, offers, suppression set, read/ack contracts, chat line, setting (US4).
+4. Similarity fixture + the replay test of recorded labels first (AC-4.2; word overlap and embeddings failed it, §6.5), then the counter, offers, suppression set, read/ack contracts, chat card, setting (US4).
 The Architect then writes the rule wording and runs the evaluation (AC-3.4/3.5/2.9) — its own task, after slice 2.
 
 ## 12. Risks and rabbit holes
@@ -721,8 +772,15 @@ The Architect then writes the rule wording and runs the evaluation (AC-3.4/3.5/2
   never silently.
 - **Private-source attribution in free text** can't be enforced structurally (the agent writes prose). Only the library and the
   marker are enforced; follow-up: a check that flags a result naming a private source id/name verbatim.
-- **Similarity threshold** wrong → nagging or never firing. Tuned from the labelled fixture with precision and recall targets;
-  caps and the suppression set bound the damage. If the targets can't be met, slice 4 waits; don't reach for embeddings in this appetite.
+- **The labeller is wrong or inconsistent** (a model names the kind of work; two similar briefs may get labels worded one step apart,
+  or one label may stretch over different work) → a missed offer, rarely a wrong one: precision 1.00 and no hard-negative leak in all
+  8 recorded passes, recall 0.83–0.93, 92.7 % pair agreement between passes. The fixture is crafted and the prompt was tuned on it
+  over three versions, so expect real handoffs to do worse; the box's labels are offered back to the model for reuse, the caps
+  (one offer per chat per day, three per box per week) and "Don't ask again" bound the nagging, and a failed call only loses a count.
+  A different Summary model may label differently: re-record with `scripts/research/label-fixture.mjs --model <p>/<m>` and re-run
+  the test before trusting a new default writer.
+- **A model call per handoff to Dev** costs a little on every handoff, also with the setting off (counting continues so turning it on
+  later works) — one short prompt and a few output tokens on the cheapest connected model, in the background.
 - **The outside-query check can't catch everything** (a paraphrased codename isn't mechanically detectable). It blocks the clear
   cases; the rule and the confidential-brief trial cover the rest. Don't build a model-based classifier on every query.
 - **The `execute.before` hook might not block on 2.0.30** (only strongly evidenced, not yet run). AC-2.9 proves it first; the
@@ -766,7 +824,7 @@ read-only profile line, and a cheap counter that offers "a dedicated agent or a 
 
 **Must keep.** Manta's `agent.md` unchanged; built-ins exactly manta/dev/architect; source validation, credential rules and
 command execution as today (`architectSources.mjs`, `research/extra.mjs`); private-source library rules; "page text is data"
-banners; tool names and parameters; no opencode restart for any of it; no model call to count handoffs; the suggestion never
+banners; tool names and parameters; no opencode restart for any of it; no model call per handoff to Dev beyond the one cheap background label call (never delaying or failing the handoff); the suggestion never
 creates anything by itself; automatic convergence on update. The migration parses legacy sources against the OLD id set, renames,
 forces private, then validates — never drops a source because a new built-in took its id. Offers render from the durable record,
 never only from an event. "Don't ask again" lives in the uncapped suppression set.
@@ -781,7 +839,7 @@ the table doesn't cover; don't hand-roll what it adopts).
 **How to check.** Targeted while iterating: `node --import ./scripts/testSandbox.mjs --test src/server/<file>.test.mjs` for the
 touched server modules (research, researchLibrary, agents, a new `researchSources.test.mjs` with the AC-1.14/1.15 migration
 fixtures, a new `outsideQuery.test.mjs` for AC-2.8 (queries and whole URLs, path-only and fragment-only cases), a new
-`agentSuggestions.test.mjs` with the similarity fixture, the threshold tuning test, the end-to-end AC-4.2b case, the offer
+`briefLabel.test.mjs` (the recorded-label replay of AC-4.2), `agentSuggestions.test.mjs`, `agentsSuggestions.test.mjs` (the end-to-end AC-4.2b case), the offer
 lifecycle (reconnect, closed client, ack, two clients, withdrawal), the accept crash/retry cases of AC-4.3b and the suppression
 test of AC-4.4), the pinned-binary probe `scripts/opencode-v2/web-guard.e2e.mjs` for AC-2.9 (sandboxed like the other
 `scripts/opencode-v2/*.e2e.mjs`, never the live `:4096`), `npx vitest run <renderer test>` for UI (the card renders from `agents:suggestions` and acks). Full `npm run typecheck && npm test` once at the end, on a

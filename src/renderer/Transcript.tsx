@@ -506,6 +506,9 @@ export type TranscriptProps = {
   backgroundCards?: ReadonlyArray<BackgroundCard>;
   // Handoff cards, mounted in the tail after the todo checklist (see TranscriptContext.handoffCards).
   handoffCards?: React.ReactNode;
+  // Manta's "this might deserve an agent" offers: each card sits under the message that carried the handoff that completed the third
+  // (`anchorMessageId`); an anchor that isn't a drawn row (an older, unloaded message) falls back to the last row.
+  suggestionCards?: ReadonlyArray<{ id: string; anchorMessageId: string; node: React.ReactNode }>;
   // The Virtuoso scroll container, published upward so ChatPanel's
   // scrollToTail can address the real bottom (Footer included).
   scrollerElRef: React.MutableRefObject<HTMLElement | null>;
@@ -553,6 +556,7 @@ export function Transcript({
   planCard,
   backgroundCards,
   handoffCards,
+  suggestionCards,
   scrollerElRef,
   followingRef,
   onFollowingChange,
@@ -632,6 +636,20 @@ export function Transcript({
       ),
     [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId, liveMediaHandles],
   );
+
+  const suggestionsByRow = useMemo(() => {
+    const out = new Map<string, NonNullable<TranscriptProps["suggestionCards"]>[number][]>();
+    if (!suggestionCards?.length || visibleMessages.length === 0) return out;
+    const drawn = new Set(visibleMessages.map((m) => m.info.id));
+    const last = visibleMessages[visibleMessages.length - 1].info.id;
+    for (const c of suggestionCards) {
+      const id = drawn.has(c.anchorMessageId) ? c.anchorMessageId : last;
+      const list = out.get(id);
+      if (list) list.push(c);
+      else out.set(id, [c]);
+    }
+    return out;
+  }, [suggestionCards, visibleMessages]);
 
   const backgroundByRowRef = useRef<Map<string, BackgroundCard[]>>(new Map());
   const backgroundByRow = useMemo(() => {
@@ -978,12 +996,20 @@ export function Transcript({
                 // Always wrapped, so a row whose turn-start status flips (an
                 // earlier row loads or settles) restyles instead of remounting.
                 const bg = backgroundByRow.get(m.info.id);
+                const sug = suggestionsByRow.get(m.info.id);
                 return (
                   <div style={turnStartIds.has(m.info.id) ? TURN_START_PAD : undefined}>
                     {row}
                     {bg && (
                       <div style={{ marginTop: "var(--block-gap)" }}>
                         <ErrorBoundary><BackgroundRunCards cards={bg} /></ErrorBoundary>
+                      </div>
+                    )}
+                    {sug && (
+                      <div className="flex flex-col" style={{ marginTop: "var(--block-gap)", gap: "var(--block-gap)" }}>
+                        {sug.map((c) => (
+                          <ErrorBoundary key={c.id}>{c.node}</ErrorBoundary>
+                        ))}
                       </div>
                     )}
                   </div>

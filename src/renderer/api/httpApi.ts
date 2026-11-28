@@ -3,6 +3,7 @@ import {
   type AgentChangeEvent,
   type AgentFileReady,
   type TaskQuestionEvent,
+  type AgentSuggestionEvent,
   type AuthPairResult,
   type DelegateJob,
   type DelegateApproval,
@@ -448,6 +449,8 @@ type Kind =
   | "ctoState"
   | "routines.updated"
   | "agentChange"
+  | "agentSuggestion"
+  | "agentSuggestion.resolved"
   | "taskQuestion"
   | "agentFleet";
 
@@ -484,6 +487,8 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   ctoState: new Set(),
   "routines.updated": new Set(),
   agentChange: new Set(),
+  agentSuggestion: new Set(),
+  "agentSuggestion.resolved": new Set(),
   taskQuestion: new Set(),
   agentFleet: new Set(),
 };
@@ -1399,6 +1404,13 @@ export const httpApi: Api = {
   agentsChangeFile: (input) => rpc("agents:change-file", input),
   agentsLearnedUndo: (input) => rpc("agents:learned-undo", input),
   // The box publishes `taskQuestion` ({id, parentSessionID, rootJobId, state}) and `agentFleet` ({}): hints, refetch.
+  agentsSuggestions: (input) => rpc("agents:suggestions", input),
+  agentsSuggestionSeen: (input) => rpc("agents:suggestion-seen", input),
+  agentsSuggestionAct: (input) => rpc("agents:suggestion-act", input),
+  onAgentSuggestion: (cb) => {
+    const offs = [on<AgentSuggestionEvent>("agentSuggestion", cb), on<AgentSuggestionEvent>("agentSuggestion.resolved", cb)];
+    return () => offs.forEach((off) => off());
+  },
   onTaskQuestion: (cb) => on<TaskQuestionEvent>("taskQuestion", cb),
   onAgentFleet: (cb) => on<unknown>("agentFleet", () => cb()),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
