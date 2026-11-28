@@ -1269,29 +1269,51 @@ export const SCREENS = [
   },
 
   // ---- Agent screens (docs/screens/agents) -------------------------------
-  // The Fleet page (three cards, a recap, the grid) and the profile are longer than the desktop default: they sit in view in a
-  // taller capture so the page's own scroller doesn't hide the grid or the tabs.
+  // The Fleet and Needs you pages and the profile are longer than the desktop default: they sit in view in a taller capture so
+  // the page's own scroller doesn't hide the lists or the tabs.
   // Both rows boot the `agents` demo state (demoAgents.ts) and reach their page with the sidebar's own rows. The mockup's
   // tab strip is clicked for the matching screen; its region is the page pane (the sidebar and chrome are not under review).
+  // Fleet and Needs you (docs/screens/fleet, mockup v10): two pages of their own, each against the v10 mockup's matching view.
   {
     id: "agents-fleet",
-    title: "Fleet page — needs you, recap, agents × projects",
+    title: "Fleet page — decisions card, tasks by project, ended today",
     url: "/app/index.html?demo&state=agents&desktop",
     ready: '[data-screen="session"]',
     final: ".manta-agents-fleet",
     region: ".manta-agents-fleet",
     actions: async (page) => {
       await page.locator('[data-testid="agents-nav-fleet"]').click();
-      await page.waitForSelector('[data-testid="fleet-grid"]', { state: "visible" });
-      await page.waitForSelector('[data-testid="needs-you-list"]', { state: "visible" });
+      await page.waitForSelector('[data-testid="fleet-column"]', { state: "visible" });
+      await page.waitForSelector('[data-testid="fleet-ended"]', { state: "visible" });
       await page.mouse.move(0, 0);
     },
-    mockup: "docs/screens/agents/mockup.html",
+    mockup: "docs/screens/fleet/mockup-v10.html",
     mockupActions: async (page) => {
-      await page.click('[data-tab="fleet"]');
+      await page.click('#dview [data-v="projects"]');
     },
-    mockupReady: "section[data-screen].on",
-    mockupRegion: 'section[data-screen="fleet"] .pane',
+    mockupReady: "#pane",
+    mockupRegion: "#pane",
+    viewport: AGENTS_VIEWPORT,
+    surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
+  },
+  {
+    id: "agents-needs",
+    title: "Needs you page — decisions and open questions under project headings",
+    url: "/app/index.html?demo&state=agents&desktop",
+    ready: '[data-screen="session"]',
+    final: ".manta-agents-needs",
+    region: ".manta-agents-needs",
+    actions: async (page) => {
+      await page.locator('[data-testid="agents-nav-needs"]').click();
+      await page.waitForSelector('[data-testid="needs-you-project"]', { state: "visible" });
+      await page.mouse.move(0, 0);
+    },
+    mockup: "docs/screens/fleet/mockup-v10.html",
+    mockupActions: async (page) => {
+      await page.click('#dview [data-v="needs"]');
+    },
+    mockupReady: "#pane",
+    mockupRegion: "#pane",
     viewport: AGENTS_VIEWPORT,
     surfacesClosed: ["manta-effort-picker-btn", "manta-model-picker-btn", "manta-session-menu-trigger"],
   },
