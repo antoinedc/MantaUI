@@ -126,7 +126,7 @@ svg.i.s12{width:12px;height:12px}svg.i.s14{width:14px;height:14px}
 /* notice (the profile's .locknote look) */
 .notice{display:flex;gap:var(--sp-3);align-items:flex-start;background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:var(--sp-3) var(--sp-4);font-size:13px;line-height:1.5;color:var(--tx2);margin:0 0 var(--sp-5);max-width:760px}
 .notice>svg{margin-top:2px;color:var(--accent-tx)}
-.notice.err>svg{color:var(--danger)}
+.notice.bad>svg{color:var(--danger)}
 .notice p{margin:0}
 .notice ul{margin:var(--sp-1) 0 0;padding-left:18px}
 .notice li{margin:2px 0}
@@ -526,7 +526,7 @@ function researchPanel(){
   const s = STATES[st.state];
   const intro = `<p class="lead">When a decision rests on facts that change — a library, a version, a price, how others do it — agents check the research library first, then search these sources, top first. Sources here are shared by every agent on this box.</p>`;
   if (s.loading) return intro + `<div class="lhead"><h3>Sources, in priority order</h3></div><div aria-busy="true" aria-label="Loading sources">${'<div class="sk"><i class="a"></i><div><i></i><i></i></div></div>'.repeat(6)}</div>`;
-  if (s.error) return intro + `<div class="notice err" role="alert">${icon('alert')}<div><p><b>Couldn’t load research sources.</b> ${esc(s.error)}</p></div><button class="btn sm" type="button" data-note="Retries research:sources-list.">Try again</button></div>`;
+  if (s.error) return intro + `<div class="notice bad" role="alert">${icon('alert')}<div><p><b>Couldn’t load research sources.</b> ${esc(s.error)}</p></div><button class="btn sm" type="button" data-note="Retries research:sources-list.">Try again</button></div>`;
   if (s.unsupported) return intro + `<div class="notice" role="note">${icon('info')}<p>Update the box to manage research sources here. Until then only the Architect searches Bookface and other sources of your own.</p></div>`;
   const m = mine().length, full = m >= 20;
   const empty = m===0 ? `<div class="mine-empty"><p><b>No sources of your own yet.</b> Add one to have agents search it first: a forum you’re a member of, your team’s wiki, an internal search. Agents already use the defaults below.</p><button class="btn" type="button" data-act="add">${icon('plus','s14')}Add source</button></div>` : '';
