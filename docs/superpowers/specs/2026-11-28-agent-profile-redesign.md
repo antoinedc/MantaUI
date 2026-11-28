@@ -199,3 +199,13 @@ Seats), `AgentOverview` (markdown, Sections index threshold), `TeamSection` (row
 | Change record, undo, history | existing change store, `planChange`, `applyLocked`, `undoChange` | none: this is the "use the existing flow" requirement |
 | Rows / dots in the sidebar | existing `RailSessionRow` | none |
 | Rows we write ourselves | the Team section, the settings state line, the sections index | each is a thin composition of the above; nothing maintained does "autosave status line" or "agent row" |
+
+## 11. As built — where it differs from the plan above or from the mockup
+- **A fourth rpc, `agents:approved-models`** (→ `string[]`): the Model select needs the models the box will accept for an agent, and only the box knows (`listApprovedModels`). Empty when it can't tell; the select then offers Auto and the current model.
+- **Description limit is 200 characters** (the box's `DESCRIPTION_MAX`), not the mockup's 300.
+- **Learning's link goes to Settings → Sessions** — that is where the team-wide "learn a preference" level lives today (there is no "Agents" settings tab). The link text is "Change in Settings".
+- **The profile keeps the tab bodies' own note, under the content.** Seats, Research and Learned each had a tinted side pane ("What a seat is", "About the library", "How rules are learned"); there is no side column any more, so `TwoColumn` stacks the pane under the content as a plain hairline-separated block (same words, same test ids) instead of rewriting three tabs.
+- **History's opened line reuses the existing change card** (`AgentChangeView`: the change, the trial block with each case, Undo) under a "who · how it landed" line, instead of the mockup's hand-drawn detail. The Tests tab's trial list is therefore gone; its content is in the card of the change that was tested.
+- **Isolation raise from Settings waits** (see §2.1.4) and the profile says "Waiting for your OK in Needs you"; it is shown there as made by "You".
+- **Visual gate:** the `agents-profile*` rows were re-pointed at the v5 mockup and the settings tab added; the four old baselines (png + aria) were removed because they describe the old page. They are regenerated with `npm run visual:update` (needs the build, so it is not run here).
+- **Auto-handoff** of an agent's conversation is not handled (follow-ups).
