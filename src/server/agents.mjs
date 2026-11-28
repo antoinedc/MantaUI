@@ -6473,21 +6473,26 @@ export function createAgentsEngine({
     return sessionId;
   }
 
+  /** Whose conversation `{ slug }` names: the agent (never the Architect), its home folder (made if missing), its chat record and the session stored there. The caller holds `chatLock`. */
+  async function chatTarget(input) {
+    const slug = typeof input?.slug === "string" ? input.slug : "";
+    const agent = await find(slug);
+    if (!agent) throw new AgentError(`No agent named @${slug}`);
+    if (isArchitect(agent)) throw new AgentError(ARCHITECT_CHAT_REFUSAL);
+    const home = join(agent.dir, "home");
+    await fs.mkdir(home, { recursive: true });
+    const chatFile = join(agent.dir, CHAT_FILE);
+    return { agent, home, chatFile, stored: (await readJsonOptional(fs, chatFile))?.sessionId };
+  }
+
   /**
    * "Clear conversation" (profile redesign spec §2.2): a NEW session for the agent (same key, same home), its chat record pointing at it,
    * and the open window re-stamped to carry it. The old session stays in OpenCode. Learned preferences, seats and project notes are
    * other stores and are not touched. `{ sessionId, windowIndex }` — `windowIndex` null when no window is open.
    */
   function clearChat(input) {
-    const slug = typeof input?.slug === "string" ? input.slug : "";
     return chatLock.runExclusive(async () => {
-      const agent = await find(slug);
-      if (!agent) throw new AgentError(`No agent named @${slug}`);
-      if (isArchitect(agent)) throw new AgentError(ARCHITECT_CHAT_REFUSAL);
-      const home = join(agent.dir, "home");
-      await fs.mkdir(home, { recursive: true });
-      const chatFile = join(agent.dir, CHAT_FILE);
-      const stored = (await readJsonOptional(fs, chatFile))?.sessionId;
+      const { agent, home, chatFile, stored } = await chatTarget(input);
       const sessionId = await newChatSession(agent, home, chatFile);
       const space = ((await tmux.listProjects()) ?? []).find((p) => p.tmuxSession === AGENTS_TMUX_SESSION);
       const open = typeof stored === "string" && stored ? space?.windows?.find((w) => w.opencodeSessionId === stored) : null;
@@ -6509,15 +6514,8 @@ export function createAgentsEngine({
   }
 
   function openChat(input) {
-    const slug = typeof input?.slug === "string" ? input.slug : "";
     return chatLock.runExclusive(async () => {
-      const agent = await find(slug);
-      if (!agent) throw new AgentError(`No agent named @${slug}`);
-      if (isArchitect(agent)) throw new AgentError(ARCHITECT_CHAT_REFUSAL);
-      const home = join(agent.dir, "home");
-      await fs.mkdir(home, { recursive: true });
-      const chatFile = join(agent.dir, CHAT_FILE);
-      const stored = (await readJsonOptional(fs, chatFile))?.sessionId;
+      const { agent, home, chatFile, stored } = await chatTarget(input);
 
       const projects = await tmux.listProjects();
       const space = projects.find((p) => p.tmuxSession === AGENTS_TMUX_SESSION);

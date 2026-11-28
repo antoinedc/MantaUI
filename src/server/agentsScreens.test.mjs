@@ -7,9 +7,8 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, cp, symlink, lstat } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODES } from "../shared/autonomyShared.mjs";
 import { createAgentsEngine, pruneChangeRecords, fleetRecap, refreshDay, AgentError, CHANGE_KEEP_MS, CHANGE_MAX, AGENT_CHANGE_OFF, AGENTS_TMUX_SESSION } from "./agents.mjs";
-import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
+import { baseEngineDeps } from "./fixtures/agentEngineDeps.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const DAY = 24 * 60 * 60 * 1000;
@@ -56,18 +55,8 @@ async function fixture({ extra = {}, level = "auto", templates = ["dev", "manta"
   const config = { cfg: { agent: {} }, edits: [], reloads: 0 };
   const make = (over = {}) =>
     createAgentsEngine({
-      root,
-      templatesDir,
-      home: "/h",
-      now: () => w.clock,
-      isGitRepo: async () => true,
+      ...baseEngineDeps({ root, templatesDir, config, w }),
       branchState: async (i) => (w.branchCalls.push(i), w.branches[i.branch] ?? "unmerged"),
-      editConfig: fakeConfigWriter(config),
-      reload: async () => ({ ok: true, reloaded: true }),
-      log: { warn: () => {} },
-      retryDelayMs: 0,
-      autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: w.level }),
-      publish: (p) => w.pubs.push(p),
       oc: { listMessages: async () => [], readSession: async () => ({ state: "found", session: { id: "ses", directory: "/repo/site" } }) },
       delegate: {
         startJob: async (i) => (w.startJobs.push(i), w.startResult),

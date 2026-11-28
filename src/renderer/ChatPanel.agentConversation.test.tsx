@@ -55,6 +55,13 @@ describe("ChatPanel — an agent's conversation", () => {
     await h.flush();
   }
   const labels = () => [...h!.container.querySelectorAll("button")].map((b) => b.getAttribute("aria-label") ?? "");
+  /** The header menu's Clear conversation… and its confirmation. */
+  async function clearFromMenu() {
+    await act(async () => h!.container.querySelector<HTMLElement>('[aria-label="Session actions"]')!.click());
+    await act(async () => byText("Clear conversation…")!.click());
+    await act(async () => byText("Clear conversation")!.click());
+    await h!.flush();
+  }
   const byText = (text: string) => [...document.body.querySelectorAll<HTMLElement>("button, [role=menuitem]")].find((b) => (b.textContent ?? "").trim() === text);
 
   it("the header reads Team / Dev and offers the profile", async () => {
@@ -102,20 +109,14 @@ describe("ChatPanel — an agent's conversation", () => {
 
   it("Clear conversation starts a new session for the agent through its own channel, never the generic /clear", async () => {
     await open();
-    await act(async () => h!.container.querySelector<HTMLElement>('[aria-label="Session actions"]')!.click());
-    await act(async () => byText("Clear conversation…")!.click());
-    await act(async () => byText("Clear conversation")!.click());
-    await h!.flush();
+    await clearFromMenu();
     expect(api.calls.agentsClearChat).toEqual([[{ slug: "dev" }]]);
     expect(api.calls.opencodeClearSession).toBeUndefined();
   });
 
   it("a refused Clear says why in the panel", async () => {
     await open({ over: { agentsClearChat: () => Promise.reject(new Error("OpenCode didn't start a chat for this agent")) } });
-    await act(async () => h!.container.querySelector<HTMLElement>('[aria-label="Session actions"]')!.click());
-    await act(async () => byText("Clear conversation…")!.click());
-    await act(async () => byText("Clear conversation")!.click());
-    await h!.flush();
+    await clearFromMenu();
     expect(h!.container.textContent).toContain("OpenCode didn't start a chat for this agent");
   });
 

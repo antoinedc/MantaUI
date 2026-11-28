@@ -7,9 +7,8 @@ import { mkdtemp, mkdir, readFile, rm, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MODES } from "../shared/autonomyShared.mjs";
 import { createAgentsEngine, parseAgentMd, AgentError, AGENT_CHANGE_OFF } from "./agents.mjs";
-import { fakeConfigWriter } from "./fixtures/agentConfigFake.mjs";
+import { baseEngineDeps } from "./fixtures/agentEngineDeps.mjs";
 
 const REAL_TEMPLATES = fileURLToPath(new URL("./agentTemplates", import.meta.url));
 const T0 = Date.parse("2026-11-25T12:00:00Z");
@@ -24,17 +23,7 @@ async function fixture({ level = "auto" } = {}) {
   const w = { clock: T0, level, pubs: [] };
   const config = { cfg: { agent: {} }, edits: [], reloads: 0 };
   const engine = createAgentsEngine({
-    root,
-    templatesDir,
-    home: "/h",
-    now: () => w.clock,
-    isGitRepo: async () => true,
-    editConfig: fakeConfigWriter(config),
-    reload: async () => ({ ok: true, reloaded: true }),
-    log: { warn: () => {} },
-    retryDelayMs: 0,
-    autonomyPolicy: async () => ({ ...MODES.balanced, agent_change: w.level }),
-    publish: (p) => w.pubs.push(p),
+    ...baseEngineDeps({ root, templatesDir, config, w }),
     listApprovedModels: async () => MODELS,
     oc: { listMessages: async () => [], readSession: async () => ({ state: "found", session: { id: "ses", directory: "/repo" } }) },
     delegate: { startJob: async () => ({ ok: true, job: { id: "job" } }), loadRecords: async () => [], loadRecordsStrict: async () => [] },
