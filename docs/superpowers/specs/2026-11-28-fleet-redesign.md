@@ -189,6 +189,70 @@ No dependency is added.
 - The visual gate row `agents-fleet` is repointed at the new page and the v10 mockup; baselines must be regenerated in CI
   (no browser here) — see the PR.
 
+## 5b. Addendum (2026-11-28): Fleet rows are sessions, not jobs
+
+Why: a row per job made every subagent and helper job its own row, and a row's name read as the subagent's. The user wants work at the
+level of a **session** (a chat like the one they are in, or a top-level background task) with the session's title and one line on what
+it is doing now, the same line the background job card shows.
+
+**What a row is.** One row per *working top-level session*, decided from the session graph the sidebar already uses (`Project.tree`:
+job records, opencode `parentID`, `session_link`; `sessionStatus.mjs`). A root of the tree is a row when its status says `busy` (its own
+turn, or anything beneath it, is running). Everything beneath a root (subagents, helper jobs, handoffs started from it) is never a row:
+it is listed in that row's Details as `title + status`. A root with nothing running but a job beneath it **paused by the user** is a row
+too ("Paused by you"); its Details carries Resume on each paused job. Terminal windows (no session) and sessions the tree hides (internal,
+the CTO conversation) are never rows. A running or paused *specialist* job whose session is not in any tree (a routine run, a refresh /
+check-up task, a tree that is not hydrated yet) is folded under the root of its parent session when that is in the tree, else it is a
+row of its own (a task row, as before). Nothing is inferred: a job with neither a placed session nor a placed parent is its own row.
+
+**Kind.** `kind: "chat"` (a root that is a plain window/session: status "In progress" while busy) or `"task"` (the row *is* a job: a
+top-level job window, or an orphan job; it has `jobId`, Stop and Resume as before).
+
+**Title.** The session's own title, as the sidebar shows it (window name, which auto-rename keeps plain). A row that is a job uses the
+job title rules of #1770 (`displayTitle`). Empty → "Untitled session". A sub item uses the same two rules.
+
+**One-liner** (`oneLiner`, any session, `src/server/sessionLine.mjs`, which reuses the job card's own `headlineOf`):
+1. the latest `progress_report` label of the session (or of the job record for a job row), while fresh (the card's 30 minutes);
+2. else the in-progress to-do item (the job's checklist, or the session's live `todo_write` list);
+3. else the last short line of the session's last assistant message (last non-empty line, markdown marks removed, at most 120 characters);
+4. else empty (no line is drawn). Never a subagent's name.
+
+**Agent.** The agent running the row: a job row → its specialist's slug; a chat that is an agent's own conversation (`agents:chats`) →
+that agent; any other chat → `manta`. Agents view groups by it ("Manta" for a plain chat).
+
+**Project.** The registry project owning the row's folder (a window's pane path, else the tmux project's default folder, else the job's
+folder); with none, the tmux project's name, so a chat in an unregistered workspace still has a heading. The Projects view groups by the
+registry slug, else by that name.
+
+**Ended today** stays driven by the specialist jobs that ended since local midnight, but **one row per top-level session**: ended jobs
+are grouped under the root of their session (their own, else their parent's) in the tree; the row carries the session's title, the
+newest job's outcome badge and sentence, and Details lists every ended job (`title + agent + outcome`). A job whose session is not in
+the tree (closed chat, routine) is its own row with its job title, as before. A chat that finished a turn but handed nothing off has no
+Ended row (the box records no "finished a turn today" fact yet; follow-up).
+
+**Wire** (`agents:tasks`, additive; every new field is optional for an older box, the renderer falls back to the old shape):
+
+```ts
+interface FleetSub { key: string; title: string; status: "in-progress" | "paused-by-you" | "finished" | "didnt-finish"; jobId: string | null; agentSlug: string | null }
+// FleetTask (running[]) gains:
+key?: string;                     // row identity: the session id of a chat row, the job id of a task row
+kind?: "chat" | "task";
+sessionId?: string | null;        // the row's session (null: an orphan job whose session is not placed)
+window?: { tmuxSession: string; index: number } | null;  // where Open session goes for a chat row
+oneLiner?: string;
+subs?: FleetSub[];                // what runs beneath it (title + status); paused jobs carry Resume
+// FleetEnded (ended[]) gains: key, kind, sessionId, window, subs (the ended jobs of that session)
+```
+`jobId` of a chat row is `""` (nothing to stop, nothing to resume at row level); Stop is only offered on a task row, Resume on a
+task row and on a paused sub item.
+
+**Fresh data.** The page refetches on the `agentFleet` hint; the box now also publishes that hint (throttled to one per 2 s) when a
+session's status frame or a progress report changes (`fleetHints.mjs`), so a chat starting to work shows up without a job event.
+
+**Tests (written first).** `sessionLine.test.mjs` (the priority order, freshness, trimming), `agentsFleetTasks.test.mjs` (a subagent's job
+is not a row and is in its parent's `subs`; a running chat is a row; title fallbacks; orphan job rows; Ended grouped per session; paused
+child → paused row), `fleetHints.test.mjs`, `fleetView.test.ts` (grouping by name when no registry slug, Agents view by agent) and
+`FleetPage.test.tsx` (the one-liner is drawn, Details lists the subs, chat rows have no Stop).
+
 ## 6. Follow-ups (not built)
 
 - Decisions that ended a task (`endedBlocked`) keep the existing result card with its Done button. The mockup draws them as an option
