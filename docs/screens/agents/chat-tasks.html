@@ -1,0 +1,522 @@
+<!doctype html>
+<!-- THROWAWAY MOCKUP — tasks an agent starts from its own conversation.
+     Spec: docs/superpowers/specs/2026-11-28-agent-chat-tasks.md (§7 Task card data, §9 Design).
+     Decisions: docs/screens/agents/chat-tasks-decisions.md. Builds on docs/screens/agents/profile-v5.html (tokens copied from
+     src/renderer/tokens.css via v5; no new tokens).
+     MOCK BEHAVIOUR: nothing talks to a box. Buttons only switch the mock's own state (Open session, Details and Open Fleet
+     show a note; Submit on the question jumps to the "running" state; Clear conversation… opens the native dialog).
+     URL params for screenshots: ?state=<id>&theme=light|dark&w=420|900|1280 -->
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent conversation: tasks it starts (throwaway mockup)</title>
+<style>
+:root{
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;--sp-10:40px;
+  --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:12px;--r-full:999px;
+  --font-sans:"Inter Variable",Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono Variable","JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --motion-fast:120ms;--ease-out:cubic-bezier(0.22,1,0.36,1);
+}
+[data-theme="dark"]{
+  color-scheme:dark;
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-solid:#5A88FF;--on-accent:#0B1020;
+  --ok:#3DD9A4;--warn:#FACC15;--danger:#FF6B7A;--danger-bg:#FF6B7A1f;--ok-bg:#3DD9A41f;--warn-bg:#FACC151f;--accent-bg:#5A88FF1f;
+  --fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);--fill-active:rgba(255,255,255,.10);
+  --shadow-sm:0 1px 2px rgb(0 0 0 / .4);--shadow-lg:0 12px 40px rgb(0 0 0 / .5);
+}
+[data-theme="light"]{
+  color-scheme:light;
+  --canvas:#FAF9F7;--panel:#F2F0EC;--card:#FFFFFF;--raised:#EAE7E1;
+  --border-subtle:#E8E4DD;--border:#DAD5CC;--border-strong:#857C6E;
+  --tx1:#33302B;--tx2:#48433C;--tx3:#665F55;--tx4:#8A8275;
+  --accent:#2E6BFF;--accent-tx:#1F55D6;--accent-solid:#1F55D6;--on-accent:#FFFFFF;
+  --ok:#0A7A53;--warn:#6E6200;--danger:#BE2F3C;--danger-bg:#BE2F3C14;--ok-bg:#0A7A5314;--warn-bg:#6E620014;--accent-bg:#2E6BFF14;
+  --fill:rgba(26,24,21,.035);--fill-hover:rgba(26,24,21,.06);--fill-active:rgba(26,24,21,.09);
+  --shadow-sm:0 1px 2px rgb(26 24 21 / .06);--shadow-lg:0 12px 40px rgb(26 24 21 / .18);
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--canvas);color:var(--tx1);font-family:var(--font-sans);-webkit-font-smoothing:antialiased}
+::selection{background:var(--accent-bg);color:var(--tx1)}
+button,select,input{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-xs)}
+svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+svg.i.s12{width:12px;height:12px}svg.i.s14{width:14px;height:14px}
+.mono{font-family:var(--font-mono);font-size:11.5px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+
+/* ---------- demo chrome (outside the app frame) ---------- */
+.demo{position:sticky;top:0;z-index:20;display:flex;flex-wrap:wrap;gap:var(--sp-2) var(--sp-5);align-items:center;padding:var(--sp-2) var(--sp-4);background:var(--raised);border-bottom:1px solid var(--border);font-size:12px;color:var(--tx2)}
+.demo b{font-weight:600;color:var(--tx1)}
+.demo label{display:flex;align-items:center;gap:6px}
+.demo select{height:26px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--card);padding:0 6px;font-size:12px}
+.demo .tag{margin-left:auto;color:var(--tx3)}
+.demo .src{flex-basis:100%;color:var(--tx3)}
+.stage{padding:var(--sp-6) var(--sp-4);display:flex;justify-content:center}
+.app{container:app/inline-size;width:var(--frame-w,1280px);max-width:100%;height:860px;display:flex;background:var(--canvas);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;box-shadow:0 8px 30px rgb(0 0 0 / .12)}
+
+/* ---------- sidebar (SessionRow) ---------- */
+.sb{width:232px;flex:none;border-right:1px solid var(--border-subtle);background:var(--panel);padding:var(--sp-3) var(--sp-2) var(--sp-3) var(--sp-3);overflow:hidden}
+.sb-h{font-size:12px;font-weight:600;color:var(--tx3);padding:4px 4px 8px}
+.sb-p{display:flex;align-items:center;gap:6px;padding:8px 4px 4px;font-size:12px;font-weight:600;color:var(--tx3)}
+.srow{position:relative;display:flex;align-items:center;gap:var(--sp-2);width:100%;min-height:26px;padding:4px 8px;margin-bottom:4px;border:0;background:none;border-radius:var(--r-md);text-align:left}
+.srow:hover{background:var(--fill-hover)}
+.srow.on{background:var(--raised)}
+.srow.on::before{content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);height:16px;width:3px;border-radius:0 3px 3px 0;background:var(--accent)}
+.srow .st{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:var(--tx4)}
+.srow .st.run{background:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);animation:pulse 1.6s ease-in-out infinite}
+.srow .st.att{background:var(--danger);box-shadow:0 0 0 3px var(--danger-bg);animation:pulse 1.2s ease-in-out infinite}
+.srow .st.ok{background:var(--ok)}
+.srow .t{flex:1;min-width:0;font:500 13px/1.4 var(--font-sans);color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.srow.on .t{color:var(--tx1);font-weight:600}
+.srow .age{font:500 11px/1 var(--font-mono);color:var(--tx4);flex-shrink:0;font-variant-numeric:tabular-nums}
+.srow .badge{font:600 11px/1 var(--font-sans);color:var(--on-accent);background:var(--danger);border-radius:var(--r-full);padding:2px 6px}
+@keyframes pulse{50%{opacity:.45}}
+@container app (max-width:640px){.sb{display:none}}
+
+/* ---------- main column ---------- */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.shead{height:44px;flex:none;display:flex;align-items:center;gap:var(--sp-2);padding:0 var(--sp-3);border-bottom:1px solid var(--border)}
+.crumb{display:flex;align-items:center;gap:7px;font:500 13px/1 var(--font-sans);color:var(--tx1);min-width:0;white-space:nowrap}
+.crumb .mut{color:var(--tx3)}.crumb .slash{color:var(--tx4)}
+.shead .sp{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2)}
+.ibtn{min-width:28px;height:28px;display:grid;place-items:center;border:0;background:none;border-radius:var(--r-sm);color:var(--tx3)}
+.ibtn:hover{background:var(--fill-hover);color:var(--tx1)}
+.btn{height:30px;padding:0 var(--sp-3);border-radius:var(--r-sm);border:1px solid var(--border);background:var(--card);font-size:13px;font-weight:500;box-shadow:var(--shadow-sm);white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
+.btn:hover{background:var(--fill-hover)}
+.btn.primary{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.btn.danger{background:var(--danger);border-color:transparent;color:#fff}
+[data-theme="dark"] .btn.danger{color:#0B1020}
+.btn.ghost{background:transparent;border-color:transparent;box-shadow:none;color:var(--tx2)}
+.btn.sm{height:28px;padding:0 var(--sp-2);font-size:12px}
+.menu{position:absolute;inset:auto;margin:0;border:1px solid var(--border);border-radius:var(--r-md);background:var(--card);box-shadow:var(--shadow-lg);padding:4px;min-width:260px}
+.menu button{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:7px 8px;border-radius:var(--r-sm);font-size:13px;text-align:left}
+.menu button:hover{background:var(--fill-hover)}
+.menu .t-meta{margin-left:auto;font-size:12px;color:var(--tx3)}
+.scroller{flex:1;min-height:0;overflow-y:auto;container:col/inline-size}
+.msgs{max-width:760px;margin:0 auto;padding:var(--sp-6) var(--sp-4) var(--sp-8);display:flex;flex-direction:column;gap:var(--sp-5)}
+.remem{margin:0;text-align:center;font-size:12px;color:var(--tx3);line-height:1.45}
+.uwrap{display:flex;justify-content:flex-end}
+.umsg{background:var(--fill);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:11px var(--sp-4);font:400 15px/1.55 var(--font-sans);max-width:min(88%,64ch)}
+.amsg{font:400 15px/1.6 var(--font-sans);max-width:68ch}
+.amsg p{margin:0 0 6px}.amsg p:last-child{margin:0}
+.amsg b{font-weight:600}
+.note{font-size:12px;color:var(--tx3);border:1px dashed var(--border);border-radius:var(--r-md);padding:6px 10px;background:transparent}
+.note b{color:var(--tx2)}
+
+/* ---------- the task card: one RunCard / BackgroundResultCard variant ---------- */
+.tc{border:1px solid var(--border-subtle);background:var(--panel);border-radius:var(--r-md);padding:10px var(--sp-3);font-size:12px;line-height:1.4}
+.tc.live{border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.tc.bad{border-color:color-mix(in srgb,var(--danger) 40%,transparent)}
+.tc{display:grid;grid-template-columns:8px minmax(0,1fr) auto;column-gap:var(--sp-2);align-items:center}
+.tc>.tc-x,.tc>.tc-m,.tc>.bar,.tc>.tc-seat,.tc>.tc-err,.tc>.tc-body{grid-column:2 / -1}
+.tc-t{margin:0;min-width:0;font:600 13px/1.35 var(--font-sans);color:var(--tx1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tc-acts{display:flex;align-items:center;gap:2px}
+.lnk{display:inline-flex;align-items:center;min-height:24px;padding:0 6px;border:0;background:none;border-radius:var(--r-xs);font-size:12px;font-weight:500;color:var(--tx3);white-space:nowrap}
+.lnk:hover{background:var(--fill-hover);color:var(--tx1)}
+.lnk.acc{color:var(--accent-tx)}
+.g{width:8px;height:8px;border-radius:50%;flex:none;background:var(--tx4)}
+.g.ok{background:var(--ok)}.g.bad{background:var(--danger)}.g.warn{background:var(--warn)}
+.spin{width:10px;height:10px;flex:none;margin-left:-1px;border-radius:50%;border:2px solid color-mix(in srgb,var(--accent) 35%,transparent);border-top-color:var(--accent-tx);animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(1turn)}}
+@media (prefers-reduced-motion:reduce){.spin,.srow .st{animation:none !important}}
+.tc-m{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:4px;color:var(--tx3)}
+.tc-m>*{white-space:nowrap}
+.tc-m .sep{color:var(--tx4)}
+.pchip{display:inline-flex;align-items:center;gap:4px;border-radius:var(--r-full);padding:1px 7px 1px 6px;background:var(--fill-active);color:var(--tx2);font-weight:500;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.tc-m .stat{color:var(--tx2)}
+.tc-m .stat.ok{color:var(--ok)}.tc-m .stat.bad{color:var(--danger)}.tc-m .stat.warn{color:var(--warn)}
+.tc-m .num{font-family:var(--font-mono);font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--tx3)}
+.tc-m .br{display:inline-flex;align-items:center;gap:4px;white-space:normal;overflow-wrap:anywhere}
+.tc-m .q{color:var(--warn);font-weight:500}
+.tc-x{margin-top:6px}
+.tc-hl{color:var(--tx1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tc-hl.warn{color:var(--warn)}
+.bar{margin-top:6px;height:2px;border-radius:2px;background:var(--border);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.tc-seat{margin-top:6px;color:var(--tx3)}
+.tc-err{margin-top:6px;color:var(--danger);overflow-wrap:anywhere}
+.tc-body{margin-top:8px;font-size:13px;line-height:1.5;color:var(--tx1)}
+.tc-body p{margin:0 0 4px}
+.tc-body .clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tc-more{margin-left:-6px}
+/* narrow transcript: the title wraps, and the actions move to the last row */
+@container col (max-width:520px){
+  .tc{align-items:start}
+  .tc>.g,.tc>.spin{margin-top:4px}
+  .tc-t{white-space:normal;grid-column:2 / -1}
+  .tc-acts{grid-row:20;grid-column:2 / -1;margin:6px 0 0 -6px}
+}
+
+/* tool row for a call that didn't start a task (no job exists) */
+.trow{display:flex;gap:var(--sp-2);align-items:flex-start;font-size:12px;line-height:1.45;color:var(--tx3);padding:2px 0}
+.trow .g{margin-top:4px}
+.trow b{color:var(--tx2);font-weight:600}
+.trow .why{color:var(--tx2);overflow-wrap:anywhere}
+
+/* ---------- QuestionCard (existing look) ---------- */
+.ask{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);box-shadow:var(--shadow-sm);overflow:hidden}
+.ask-top{display:flex;gap:var(--sp-3);padding:var(--sp-4) var(--sp-4) var(--sp-3)}
+.ask-badge{width:30px;height:30px;border-radius:var(--r-md);display:grid;place-items:center;flex-shrink:0;background:var(--accent-bg);color:var(--accent-tx)}
+.ask-txt h4{font:600 14px/1.35 var(--font-sans);margin:0 0 2px}.ask-txt .sub{font-size:13px;line-height:1.45;color:var(--tx3)}
+.ask fieldset{border:0;margin:0;padding:0 var(--sp-4)}
+.opt{display:flex;align-items:center;gap:8px;width:100%;margin:0 0 var(--sp-2);padding:10px var(--sp-3);border:1px solid var(--border);border-radius:var(--r-md);background:var(--canvas);font:500 13px/1.4 var(--font-sans);cursor:pointer}
+.opt:hover,.opt:has(input:checked){border-color:var(--accent);background:var(--accent-bg)}
+.opt:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.opt input{position:absolute;opacity:0;pointer-events:none}
+.opt .mk{width:15px;height:15px;border-radius:var(--r-xs);border:1px solid var(--border-strong);display:grid;place-items:center;flex:none}
+.opt:has(input:checked) .mk{background:var(--accent-solid);border-color:transparent;color:var(--on-accent)}
+.opt .d{display:block;font-weight:400;font-size:12px;color:var(--tx3);margin-top:1px}
+.rec{display:inline-flex;border-radius:var(--r-full);padding:1px 7px;font-size:11.5px;background:var(--ok-bg);color:var(--ok);margin-left:6px;white-space:nowrap}
+.free{display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--canvas);padding:7px 10px}
+.free input{flex:1;min-width:0;border:0;background:transparent;outline:0;font-size:12px}
+.free input::placeholder{color:var(--tx3)}
+.ask hr{border:0;border-top:1px solid var(--border-subtle);margin:var(--sp-3) var(--sp-4) 0}
+.ask-acts{display:flex;align-items:center;gap:var(--sp-2);padding:var(--sp-3) var(--sp-4) var(--sp-4)}
+
+/* approval card (existing DelegateApprovalCard look) */
+.appr{border:1px solid color-mix(in srgb,var(--accent) 33%,transparent);border-radius:var(--r-sm);background:var(--card);padding:8px var(--sp-3);font-size:12px;line-height:1.45}
+.appr .row{display:flex;align-items:center;gap:8px}
+.appr .tag{display:inline-block;font-family:var(--font-mono);font-size:11px;border:1px solid var(--border);border-radius:var(--r-xs);padding:0 5px;margin:2px 4px 0 0;color:var(--tx2)}
+
+/* composer */
+.composer{flex:none;padding:0 0 var(--sp-3)}
+.comp-in{max-width:760px;margin:0 auto;padding:0 var(--sp-4)}
+.cbox{border:1px solid var(--border-subtle);border-radius:var(--r-lg);background:var(--card);padding:var(--sp-3) var(--sp-4);display:flex;align-items:center;gap:var(--sp-2);box-shadow:var(--shadow-sm)}
+.cbox .ta{flex:1;font:400 15px/1.55 var(--font-sans);color:var(--tx3)}
+.cbox .send{width:28px;height:28px;border-radius:var(--r-sm);border:0;display:grid;place-items:center;background:var(--accent);color:var(--on-accent)}
+
+/* ---------- Needs you (v10 item look) ---------- */
+.page{max-width:960px;margin:0 auto;padding:var(--sp-6) var(--sp-6) var(--sp-10)}
+@container col (max-width:560px){.page{padding:var(--sp-5) var(--sp-4)}}
+.page h2{margin:0 0 var(--sp-4);font:600 14px/1.4 var(--font-sans);letter-spacing:-.01em}
+.page section+section{margin-top:var(--sp-10)}
+.ny{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--sp-8)}
+.ny li{border-left:3px solid var(--danger);padding-left:var(--sp-4)}
+.ny li.q{border-left-color:var(--accent)}
+.lab{display:inline-flex;align-items:center;gap:6px;border-radius:var(--r-xs);padding:2px 8px;font-size:12px;font-weight:600;background:var(--danger);color:var(--canvas)}
+.lab.q{background:var(--accent-bg);color:var(--accent-tx)}
+.ny .top{display:flex;align-items:center;gap:8px;min-height:24px}
+.ny .ago{margin-left:auto;font-size:12px;color:var(--tx3)}
+.ny h3{margin:8px 0 0;font:600 15px/1.4 var(--font-sans);letter-spacing:-.005em;overflow-wrap:anywhere}
+.who{display:flex;flex-wrap:wrap;align-items:center;gap:4px 6px;margin-top:4px;font-size:12px;color:var(--tx3)}
+.who b{color:var(--tx1);font-weight:600}
+.av{width:18px;height:18px;border-radius:var(--r-xs);display:grid;place-items:center;font:700 10px/1 var(--font-sans);color:#0B1020}
+.ny .lead{margin:8px 0 0;font-size:14px;line-height:1.5;color:var(--tx2)}
+.ny .acts{margin-top:var(--sp-3);display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.ny .err{margin-top:8px;font-size:12px;color:var(--danger)}
+
+/* ---------- Fleet running row (v10, unchanged) ---------- */
+.frow{display:grid;align-items:center;gap:4px 12px;border-bottom:1px solid var(--border-subtle);padding:12px 0;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'tt tt' 'who who' 'stat acts'}
+@container col (min-width:560px){.frow{align-items:start;gap:4px 16px;grid-template-columns:minmax(0,1fr) 190px 200px;grid-template-areas:'tt stat acts' 'who stat acts'}}
+@container col (min-width:850px){.frow{gap:4px 20px;grid-template-columns:minmax(0,1fr) 160px 230px 200px;grid-template-areas:'tt who stat acts'}}
+.frow .tt{grid-area:tt;font-size:14px;font-weight:500}
+.frow .fw{grid-area:who;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--tx2)}
+.frow .fs{grid-area:stat;font-size:13px;color:var(--ok)}
+.frow .fa{grid-area:acts;display:flex;justify-content:flex-end;gap:4px}
+
+/* ---------- dialog (native) ---------- */
+dialog{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--card);color:var(--tx1);box-shadow:var(--shadow-lg);padding:0;width:min(440px,calc(100vw - 32px))}
+dialog::backdrop{background:rgb(0 0 0 / .35)}
+.dl{padding:var(--sp-5)}
+.dl h2{margin:0 0 6px;font:600 15px/1.35 var(--font-sans)}
+.dl p{margin:0 0 var(--sp-3);font-size:13px;line-height:1.5;color:var(--tx2)}
+.dl .alert{display:flex;gap:8px;align-items:flex-start;border-radius:var(--r-md);background:var(--warn-bg);color:var(--tx1);padding:10px 12px;font-size:13px;line-height:1.45;margin:0 0 var(--sp-3)}
+.dl .alert svg{color:var(--warn);margin-top:2px}
+.dl ul{list-style:none;margin:0 0 var(--sp-3);padding:0;font-size:12px}
+.dl li{display:flex;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--border-subtle)}
+.dl li .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500;color:var(--tx1)}
+.dl li .s{color:var(--tx3);white-space:nowrap}
+.dl .row{display:flex;justify-content:flex-end;gap:var(--sp-2)}
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--tx1);color:var(--canvas);font-size:12px;padding:6px 12px;border-radius:var(--r-sm);opacity:0;transition:opacity var(--motion-fast)}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7"/><path d="M18 10.5c0 4-6 3-11 6"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.3-2.4 3.8"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 4v4"/><path d="M9 14h.01M15 14h.01"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m5.7 5.7 12.6 12.6"/></symbol>
+</svg>
+
+<div class="demo" role="region" aria-label="Mockup controls (not part of the design)">
+  <b>Agent conversation · tasks</b>
+  <label>State <select id="sel-state"></select></label>
+  <label>Theme <select id="sel-theme"><option>light</option><option>dark</option></select></label>
+  <label>Width <select id="sel-w"><option>1280</option><option>900</option><option>420</option></select></label>
+  <span class="tag">Throwaway mockup · mock behaviour only</span>
+  <span class="src" id="src"></span>
+</div>
+<div class="stage"><div class="app" id="app"></div></div>
+<div class="toast" id="toast" role="status"></div>
+
+<dialog id="clear" aria-labelledby="clear-t"></dialog>
+
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ic = (n, c='s12') => `<svg class="i ${c}" aria-hidden="true"><use href="#i-${n}"/></svg>`;
+
+// ---------- the task card (RunCard / BackgroundResultCard, startedFrom:"agent-chat") ----------
+// t: {title, project, kind, status, tone, steps, elapsed, branch, headline, headTone, bar, seat, questions, model, result, error}
+function card(t){
+  const live = ['starting','running','paused','settling'].includes(t.kind);
+  const lead = t.kind==='starting' || (t.kind==='running') ? `<span class="spin" aria-hidden="true"></span>`
+    : `<span class="g ${t.tone||''}" aria-hidden="true"></span>`;
+  const id = 'tc-' + Math.random().toString(36).slice(2,8);
+  const acts = [];
+  if (t.kind!=='starting') acts.push(`<button type="button" class="lnk" data-act="details" aria-label="Details: ${esc(t.title)}">Details</button>`);
+  if (t.kind!=='starting') acts.push(`<button type="button" class="lnk acc" data-act="open" aria-label="Open session: ${esc(t.title)}">Open session${t.result?' →':''}</button>`);
+  const branch = t.branch===null
+    ? `<span class="br">${ic('eye')}read-only</span>`
+    : t.branch ? `<span class="br mono">${ic('branch')}${esc(t.branch)}</span>` : '';
+  const meta = [
+    t.project ? `<span class="pchip">${ic('folder')}${esc(t.project)}</span>` : '',
+    `<span class="stat ${t.tone||''}">${esc(t.status)}</span>`,
+    t.steps ? `<span class="num" title="Steps done of the plan">${esc(t.steps)}${t.elapsed?` · ${esc(t.elapsed)}`:''}</span>` : (t.elapsed?`<span class="num">${esc(t.elapsed)}</span>`:''),
+    t.questions ? `<span class="q">${t.questions} ${t.questions===1?'question':'questions'}</span>` : '',
+    branch,
+    t.model ? `<span title="Model this task runs on">${esc(t.model)}</span>` : '',
+  ].filter(Boolean).join('<span class="sep" aria-hidden="true">·</span>');
+  return `<article class="tc ${live?'live':''} ${t.kind==='uncertain'||t.kind==='failed'?'bad':''}" aria-labelledby="${id}" data-kind="${t.kind}">
+    ${lead}<h4 class="tc-t" id="${id}" title="${esc(t.title)}">${esc(t.title)}</h4><div class="tc-acts">${acts.join('')}</div>
+    <div class="tc-m">${meta}</div>
+    ${t.headline ? `<div class="tc-x tc-hl ${t.headTone||''}" title="${esc(t.headline)}">${esc(t.headline)}</div>`:''}
+    ${t.bar!=null ? `<div class="bar" role="progressbar" aria-label="Plan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(t.bar*100)}"><i style="width:${Math.round(t.bar*100)}%"></i></div>`:''}
+    ${t.seat ? `<div class="tc-seat">${esc(t.seat)}</div>`:''}
+    ${t.error ? `<div class="tc-err">${esc(t.error)}</div>`:''}
+    ${t.result ? `<div class="tc-body"><div class="clamp" id="${id}-b">${t.result}</div><button type="button" class="lnk tc-more" data-act="more" aria-expanded="false" aria-controls="${id}-b">Show more</button></div>`:''}
+  </article>`;
+}
+// a call that started nothing: the tool row, with the sentence the agent got back
+const refused = (title, why) => `<div class="trow" role="note"><span class="g bad" aria-hidden="true"></span><div><b>Not started</b> · ${esc(title)}<div class="why">${esc(why)}</div></div></div>`;
+const you = (t) => `<div class="uwrap"><div class="umsg">${esc(t)}</div></div>`;
+const agent = (...ps) => `<div class="amsg">${ps.map(p=>`<p>${p}</p>`).join('')}</div>`;
+const note = (t) => `<div class="note" role="note">${t}</div>`;
+
+function question({header, sub, opts, recFirst=true}){
+  return `<div class="ask"><div class="ask-top"><div class="ask-badge">${ic('help','s14')}</div><div class="ask-txt"><h4>${esc(header)}</h4><div class="sub">${esc(sub)}</div></div></div>
+  <fieldset><legend class="sr">${esc(header)}</legend>
+    ${opts.map((o,i)=>`<label class="opt"><input type="radio" name="proj" ${o.rec?'checked':''}><span class="mk">${o.rec?ic('check','s12'):''}</span><span><span>${esc(o.label)}</span>${o.rec?'<span class="rec">Recommended</span>':''}<span class="d">${esc(o.d)}</span></span></label>`).join('')}
+    <div class="free">${ic('send','s14')}<input type="text" placeholder="Or type your own answer…" aria-label="Or type your own answer"></div>
+  </fieldset><hr>
+  <div class="ask-acts"><button type="button" class="btn sm primary" data-act="submit">Submit <span aria-hidden="true" style="opacity:.7">⏎</span></button><span style="flex:1"></span><button type="button" class="btn sm ghost" data-act="dismiss">Dismiss</button></div></div>`;
+}
+
+// ---------- fixtures ----------
+const T = {
+  title:'Fix the flaky upload test', project:'Ronda', branch:'agent/dev/fix-flaky-upload-test', model:'Sonnet 5.5',
+};
+const AMBIG = question({
+  header:'Which project?',
+  sub:'Which project is the flaky upload test in? MantaUI and Ronda both have one, and nothing earlier in our conversation says which.',
+  opts:[
+    {label:'Ronda', rec:true, d:'Its upload test failed twice this week'},
+    {label:'MantaUI', d:'Its upload test last failed on 12 Nov'},
+  ]});
+
+const OPENING = [you('The flaky upload test is failing again, can you fix it?')];
+const NAMED = agent('I’ll do this in <b>Ronda</b>: its upload test is the one that failed twice this week. I’ve started a task and will tell you when it’s done.');
+
+const STATES = {
+  ambiguous:{label:'1 · Asks which project', team:'att', src:'US-3 · QuestionCard (existing), question tool',
+    msgs:[...OPENING, AMBIG]},
+  starting:{label:'2 · Starting (call in flight)', team:'run', src:'agent_start_task tool part running · input.title, project id → name via the projects list',
+    msgs:[...OPENING, card({kind:'starting', title:T.title, project:T.project, status:'Starting…'})]},
+  approval:{label:'2b · Starting, waiting on your approval', team:'att', src:'Existing DelegateApprovalCard (trust mode off) · starting card stays above it',
+    msgs:[...OPENING, card({kind:'starting', title:T.title, project:T.project, status:'Waiting for your approval'}),
+      `<div class="appr"><div class="row">${ic('bot','s14')}<span>Background job approval</span><span style="color:var(--tx3)">· Dev · ${esc(T.title)}</span></div>
+       <div style="color:var(--tx2);margin:4px 0">Fix the flaky upload test in Ronda. Done when it passes 20 runs in a row…</div>
+       <div style="color:var(--tx3)">Will be allowed to:</div><div><span class="tag">bash: **</span><span class="tag">edit: **</span><span class="tag">read: **</span></div>
+       <div class="row" style="margin-top:8px"><button class="btn sm primary" type="button">Start job</button><button class="btn sm" type="button">Edit access</button><button class="btn sm ghost" type="button">Not now</button></div></div>`]},
+  running:{label:'3 · Running (seat added)', team:'run', src:'job: title, project.name, status running, view (steps, elapsed, headline, bar), branch, seatAdded',
+    msgs:[...OPENING, card({kind:'running', title:T.title, project:T.project, status:'In progress', steps:'3/7', elapsed:'4m', branch:T.branch, model:T.model,
+      headline:'Running the upload test 20 times to catch the failure', bar:3/7, seat:'Added @dev to Ronda'}), NAMED]},
+  question:{label:'3b · Running, the task asks you', team:'att', src:'OpenQuestionsByJobContext → “· 1 question”; the task question card (existing)',
+    msgs:[...OPENING, card({kind:'running', title:T.title, project:T.project, status:'In progress', steps:'4/7', elapsed:'9m', branch:T.branch, model:T.model, questions:1,
+      headline:'Needs a decision: retry the upload on timeout, or fail fast?', headTone:'warn', bar:4/7}), NAMED,
+      question({header:'Timeout behaviour', sub:'Dev’s task asks: when an upload times out, should the client retry once or fail fast? It keeps working on the rest meanwhile.',
+        opts:[{label:'Retry once, then fail', rec:true, d:'Matches how the photo upload behaves'},{label:'Fail fast', d:'Shows the error at once'}]})]},
+  paused:{label:'4 · Paused by you', team:'default', src:'job.status paused (Fleet’s “Paused by you”)',
+    msgs:[...OPENING, card({kind:'paused', title:T.title, project:T.project, status:'Paused by you', tone:'', steps:'3/7', elapsed:'12m ago', branch:T.branch, model:T.model,
+      headline:'Running the upload test 20 times to catch the failure', bar:3/7}), NAMED,
+      note('<b>Resume</b> stays in Fleet (as today). The card only reports the state.')]},
+  readonly:{label:'5 · Running read-only (no branch)', team:'run', src:'isolation "none" / branch null → “read-only”',
+    msgs:[you('Why does the Ronda invite API return 500 on an expired invite?'), card({kind:'running', title:'Find why expired invites return 500', project:'Ronda', status:'In progress', steps:'1/3', elapsed:'1m', branch:null, model:T.model,
+      headline:'Reading the invite handler', bar:1/3}),
+      agent('I’m looking into this in <b>Ronda</b>, read-only: I won’t change any files. I’ll report what I find.')]},
+  uncertain:{label:'6 · Couldn’t confirm it started', team:'default', src:'launchState "uncertain" (existing words)',
+    msgs:[...OPENING, card({kind:'uncertain', title:T.title, project:T.project, status:'Couldn’t confirm this started — open the session to check', tone:'warn', branch:T.branch}), NAMED]},
+  done:{label:'7 · Done: the result comes back', team:'ok', src:'background-result part (replaces the running card) + the agent’s report',
+    msgs:[...OPENING, NAMED, card({kind:'done', result:true, title:T.title, project:T.project, status:'Done', tone:'ok', branch:T.branch, model:T.model,
+      result:'<p>The upload test shared one temp folder between runs, so two runs could delete each other’s file. Each run now gets its own folder. The test passed 20 runs in a row on the branch.</p><p>Changed: tests/upload.test.ts, test/helpers/tmp.ts.</p>'}),
+      agent('Done in <b>Ronda</b>: the test shared a temp folder between runs, so two runs could delete each other’s file. Each run now gets its own, and it passed 20 runs in a row.','Next: review and merge <span class="mono">agent/dev/fix-flaky-upload-test</span>.')]},
+  decision:{label:'8 · Ended needing a decision', team:'att', src:'endedBlocked → “Needs a decision”; agent asks ONE question, then continueJob',
+    msgs:[...OPENING, NAMED, card({kind:'done', result:true, title:T.title, project:T.project, status:'Needs a decision', tone:'warn', branch:T.branch, model:T.model,
+      result:'<p>The flake comes from the shared upload bucket in CI. Fixing it needs either a bucket per run (costs a little more) or mocking the bucket in this test.</p>'}),
+      question({header:'How should Dev fix it?', sub:'The task stopped at a choice: the flake comes from the shared upload bucket in CI.',
+        opts:[{label:'Mock the bucket in this test', rec:true, d:'No extra cost; the real upload is covered by the end-to-end test'},{label:'A bucket per CI run', d:'Closer to production, a little more cost'}]}),
+      note('After your answer the agent continues the <b>same task</b> (same card, same branch): the result card is replaced by a running card again.')]},
+  didnt:{label:'9 · Didn’t finish / Stopped by you', team:'ok', src:'part.state failed → “Didn’t finish” · stopped → “Stopped by you” (Fleet’s outcome words)',
+    msgs:[...OPENING, NAMED, card({kind:'done', result:true, title:T.title, project:T.project, status:'Didn’t finish', tone:'bad', branch:T.branch, model:T.model,
+      result:'<p>The test suite couldn’t start: the database container didn’t come up (port 5432 was already in use). Nothing was changed.</p>'}),
+      agent('That didn’t finish in <b>Ronda</b>: the test database couldn’t start because port 5432 was already in use. Nothing was changed. Want me to try again?'),
+      card({kind:'done', result:true, title:'Rename the upload helper', project:'MantaUI', status:'Stopped by you', tone:'', branch:'agent/dev/rename-upload-helper', model:T.model,
+      result:'<p>Stopped before it finished. It had renamed 3 of 8 call sites on its branch.</p>'})]},
+  refused:{label:'10 · Refused (nothing started)', team:'default', src:'agent_start_task returned “Not started: <error>” — no job, no card',
+    msgs:[you('Fix the retry bug in the billing service.'),
+      refused('Fix the billing retry bug','No project with that id; call agent_projects and use an id from its list'),
+      agent('I can’t find a project called “billing service” on this box. If it’s one of yours, open it in Manta once and I’ll be able to work there. Did you mean <b>Ronda</b>’s billing page?'),
+      you('No, the pairing fix in Atlas.'),
+      refused('Fix the pairing error message','Atlas has no folder on this box'),
+      agent('<b>Atlas</b> is known here but has no folder on this box, so I can’t work in it. Open it in Manta on this box and ask again.'),
+      you('Then do the Ronda one.'),
+      refused('Fix the billing page totals','The user declined the task'),
+      agent('You declined the task, so nothing was started in <b>Ronda</b>. Tell me if you want it with different access.'),
+      note('Other refusals read the same way, each with its own sentence: hand off turned off, code changes turned off, the box’s running limit full, a model that can’t run tasks, “Couldn’t attach Ronda’s notes to the task; nothing was sent to it”.')]},
+  long:{label:'11 · Long content (stress)', team:'run', src:'80-char title, long project name, long branch',
+    msgs:[you('Clean up the old invoice export and make sure the totals match the ledger for every currency.'),
+      card({kind:'running', title:'Make invoice export totals match the ledger for every currency, including JPY and BHD', project:'Customer Portal — Billing (legacy, read by finance)', status:'In progress', steps:'12/31', elapsed:'1h 42m', questions:2, branch:'agent/dev/make-invoice-export-totals-match-the-ledger-for-every-currency', model:'GPT-6 Sol',
+        headline:'Comparing 4,812 exported invoices with the ledger, currency by currency, and writing down every mismatch', bar:12/31, seat:'Added @dev to Customer Portal — Billing (legacy, read by finance)'}),
+      agent('I’ll do this in <b>Customer Portal — Billing (legacy, read by finance)</b>. I haven’t worked there before, so I’ve added myself to it.')]},
+  needsyou:{label:'12 · Needs you: question from a conversation', team:'att', screen:'needs', src:'needsYou().chatQuestions → item; Open conversation selects Dev’s conversation'},
+  clear:{label:'13 · Clear conversation refused', team:'run', dialog:true, src:'clearChat refusal (AC-10.3) in the existing confirm dialog',
+    msgs:[...OPENING, card({kind:'running', title:T.title, project:T.project, status:'In progress', steps:'3/7', elapsed:'4m', branch:T.branch, model:T.model, headline:'Running the upload test 20 times to catch the failure', bar:3/7}), NAMED]},
+  clearok:{label:'13b · Clear conversation allowed', team:'default', dialog:true, src:'existing confirm dialog, no task running',
+    msgs:[...OPENING, NAMED]},
+  fleet:{label:'14 · Fleet row (no new design)', team:'run', screen:'fleet', src:'Fleet v10 running row, project from job.project'},
+};
+
+// ---------- views ----------
+const state = { s:'running', theme:'light', w:'1280' };
+
+function sidebar(team){
+  const dot = {run:['run','Working · 1 task'],att:['att','Asking you something — click to answer'],ok:['ok','Done — click to view'],default:['','Idle']}[team];
+  return `<nav class="sb" aria-label="Sidebar"><div class="sb-h">Workspace</div>
+    <div class="sb-p">MantaUI</div>
+    <div class="srow"><span class="st"></span><span class="t">main</span><span class="age">3m</span></div>
+    <div class="srow"><span class="st ok"></span><span class="t">fix-ci</span><span class="age">1h</span></div>
+    <div class="sb-p">Ronda</div>
+    <div class="srow"><span class="st"></span><span class="t">main</span><span class="age">5h</span></div>
+    <div class="sb-p" style="margin-top:12px">Team</div>
+    <button type="button" class="srow ${STATES[state.s].screen?'':'on'}" title="Dev · ${dot[1]}"><span class="st ${dot[0]}"><span class="sr">${dot[1]}</span></span><span class="t">Dev</span><span class="age">now</span></button>
+    <button type="button" class="srow" title="Product Designer · Idle"><span class="st"></span><span class="t">Product Designer</span><span class="age">2d</span></button>
+    <div class="sb-p" style="margin-top:12px">Agents</div>
+    <button type="button" class="srow ${STATES[state.s].screen==='needs'?'on':''}"><span class="st" style="visibility:hidden"></span><span class="t">Needs you</span>${team==='att'?`<span class="badge">${state.s==='needsyou'?2:1}</span>`:''}</button>
+    <button type="button" class="srow ${STATES[state.s].screen==='fleet'?'on':''}"><span class="st" style="visibility:hidden"></span><span class="t">Fleet</span></button>
+  </nav>`;
+}
+
+function chat(st){
+  return `<div class="main">
+    <div class="shead"><span class="crumb"><span class="mut">Team</span><span class="slash">/</span>Dev</span>
+      <span class="sp"><button type="button" class="btn ghost sm">Profile</button>
+      <button type="button" class="ibtn" id="menubtn" popovertarget="cmenu" aria-label="Conversation actions">${ic('dots','s14')}</button>
+      <div popover id="cmenu" class="menu" role="menu"><button type="button" role="menuitem">Summarize earlier messages now</button><button type="button" role="menuitem" data-act="clear">${ic('ban','s14')}Clear conversation…<span class="t-meta">keeps what it learned</span></button></div></span></div>
+    <div class="scroller"><div class="msgs">
+      <p class="remem">Dev remembers its instructions, skills, 4 learned preferences and each project’s notes. Recent messages stay in full; older ones are summarized.</p>
+      ${st.msgs.join('')}
+    </div></div>
+    <div class="composer"><div class="comp-in"><div class="cbox"><span class="ta">${st.team==='att'?'Answer above, or message Dev…':'Message Dev…'}</span><button type="button" class="send" aria-label="Send">${ic('send','s14')}</button></div></div></div>
+  </div>`;
+}
+
+function needs(){
+  return `<div class="main"><div class="shead"><span class="crumb">Needs you</span><span class="sp" style="font-size:12px;color:var(--tx3)">1 decision · 1 optional question</span></div>
+  <div class="scroller"><div class="page">
+    <section aria-labelledby="g-team"><h2 id="g-team">Team</h2><ul class="ny">
+      <li data-kind="chat-question">
+        <div class="top"><span class="lab">${ic('alert','s12')}Waiting on you</span><span class="ago">2 min ago</span></div>
+        <h3 id="nyq1">Which project is the flaky upload test in? MantaUI and Ronda both have one, and nothing earlier in our conversation says which.</h3>
+        <div class="who"><span class="av" style="background:#7BA0FF">D</span><b>Dev</b><span>in your conversation</span></div>
+        <p class="lead">Dev is waiting for your answer before it starts anything. Options: Ronda (recommended), MantaUI.</p>
+        <div class="acts"><button type="button" class="btn" data-act="openconv" aria-describedby="nyq1">Open conversation</button></div>
+      </li></ul></section>
+    <section aria-labelledby="g-ronda"><h2 id="g-ronda">Ronda</h2><ul class="ny">
+      <li class="q"><div class="top"><span class="lab q">${ic('help','s12')}Open question · keeps working</span><span class="ago">6 min ago</span></div>
+        <h3>When an upload times out, should the client retry once or fail fast?</h3>
+        <div class="who"><span class="av" style="background:#7BA0FF">D</span><b>Dev</b><span>on “Fix the flaky upload test”</span></div>
+        <p class="lead" style="color:var(--tx3)">(Existing task-question item, unchanged: it answers in place and shows the task’s project.)</p></li>
+    </ul></section>
+    <div style="margin-top:32px">${note('<b>Mock:</b> Open conversation selects Dev’s conversation window (Team / Dev) with the question card at the end. If it can’t be opened, the item shows the reason under the button (role=alert), e.g. “Couldn’t open Dev’s conversation; try again”.')}</div>
+  </div></div></div>`;
+}
+
+function fleet(){
+  return `<div class="main"><div class="shead"><span class="crumb">Fleet</span></div>
+  <div class="scroller"><div class="page">
+    <section aria-labelledby="fr"><h2 id="fr">Running · Ronda</h2>
+      <div class="frow"><span class="tt">Fix the flaky upload test</span><span class="fw"><span class="av" style="background:#7BA0FF">D</span>Dev</span><span class="fs">In progress</span><span class="fa"><button class="btn sm ghost" type="button">Pause</button><button class="lnk acc" type="button">Open session</button></span></div>
+      <div class="frow"><span class="tt">Tidy the invite emails</span><span class="fw"><span class="av" style="background:#E8A0C0">P</span>Product Designer</span><span class="fs">In progress</span><span class="fa"><button class="btn sm ghost" type="button">Pause</button><button class="lnk acc" type="button">Open session</button></span></div>
+    </section>
+    <section aria-labelledby="fm" style="margin-top:32px"><h2 id="fm">Dev’s conversation</h2>
+      <p style="font-size:13px;color:var(--tx3);margin:0">Dev’s conversation itself is not a row here unless the conversation is busy (AC-10.1). The task above never appears under it, and never under “Box”.</p>
+    </section>
+    <div style="margin-top:24px">${note('<b>No new design.</b> It is the existing v10 running row with the task’s own project. One gap, not a row change: the Details panel’s “Asked by” needs a value for these tasks — recommended “Dev, in your conversation”.')}</div>
+  </div></div></div>`;
+}
+
+function render(){
+  const st = STATES[state.s];
+  document.documentElement.dataset.theme = state.theme;
+  $('#app').style.setProperty('--frame-w', state.w+'px');
+  $('#app').innerHTML = sidebar(st.team) + (st.screen==='needs' ? needs() : st.screen==='fleet' ? fleet() : chat(st));
+  $('#src').textContent = 'Data: ' + st.src;
+  const d = $('#clear'); if (d.open) d.close();
+  if (st.dialog) openClear(state.s==='clear');
+  const u = new URL(location); u.searchParams.set('state',state.s); u.searchParams.set('theme',state.theme); u.searchParams.set('w',state.w); history.replaceState(null,'',u);
+}
+
+function openClear(refuse){
+  const d = $('#clear');
+  d.innerHTML = refuse ? `<div class="dl"><h2 id="clear-t">Clear your conversation with Dev?</h2>
+      <div class="alert" role="alert">${ic('alert','s14')}<span>Dev has 1 task running from this conversation; wait for it or stop it first.</span></div>
+      <ul aria-label="Tasks started from this conversation"><li><span class="spin" aria-hidden="true"></span><span class="t">Fix the flaky upload test</span><span class="s">Ronda · In progress</span></li></ul>
+      <p>Its result comes back to this conversation, so clearing now would lose it. Stop a task from Fleet.</p>
+      <div class="row"><button type="button" class="btn" data-act="fleet">Open Fleet</button><button type="button" class="btn primary" data-act="close" autofocus>Close</button></div></div>`
+    : `<div class="dl"><h2 id="clear-t">Clear your conversation with Dev?</h2>
+      <p>The messages are removed and a fresh conversation starts. Dev keeps its instructions, skills, learned preferences and project notes.</p>
+      <div class="row"><button type="button" class="btn" data-act="close" autofocus>Cancel</button><button type="button" class="btn danger" data-act="close">Clear conversation</button></div></div>`;
+  d.showModal();
+}
+
+function toast(t){ const el=$('#toast'); el.textContent=t; el.classList.add('on'); clearTimeout(toast.h); toast.h=setTimeout(()=>el.classList.remove('on'),1800); }
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const a = b.dataset.act;
+  if (a==='more'){ const body = document.getElementById(b.getAttribute('aria-controls')); const open = b.getAttribute('aria-expanded')!=='true'; body.classList.toggle('clamp', !open); b.setAttribute('aria-expanded', open); b.textContent = open?'Show less':'Show more'; }
+  else if (a==='clear'){ $('#cmenu')?.hidePopover?.(); openClear(['running','question','starting','approval','clear','long','readonly','paused'].includes(state.s)); }
+  else if (a==='close'){ $('#clear').close(); }
+  else if (a==='submit' && state.s==='ambiguous'){ state.s='running'; $('#sel-state').value='running'; render(); }
+  else if (a==='openconv'){ state.s='ambiguous'; $('#sel-state').value='ambiguous'; render(); }
+  else toast({open:'Mock: selects the task’s session window', details:'Mock: opens the task side panel', fleet:'Mock: opens Fleet', submit:'Mock: answer sent', dismiss:'Mock: question dismissed'}[a] || 'Mock');
+});
+
+// controls
+const sel = $('#sel-state');
+sel.innerHTML = Object.entries(STATES).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('');
+const p = new URLSearchParams(location.search);
+if (STATES[p.get('state')]) state.s = p.get('state');
+if (['light','dark'].includes(p.get('theme'))) state.theme = p.get('theme');
+if (['420','900','1280'].includes(p.get('w'))) state.w = p.get('w');
+sel.value = state.s; $('#sel-theme').value = state.theme; $('#sel-w').value = state.w;
+sel.onchange = () => { state.s = sel.value; render(); };
+$('#sel-theme').onchange = (e) => { state.theme = e.target.value; render(); };
+$('#sel-w').onchange = (e) => { state.w = e.target.value; render(); };
+render();
+</script>
+</body>
+</html>
