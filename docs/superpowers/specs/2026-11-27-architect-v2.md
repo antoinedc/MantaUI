@@ -95,6 +95,12 @@ update after install (`follow-ups.md`).
 - **Lead charter** (`agentTemplates/manta/agent.md`, `buildLeadBrief`): the charter quotes the user's request
   verbatim under "The user's words" and states the problem it solves; a role name the user used is reported as part of
   their words, not as a decision. (Guard test applies.)
+- **Isolation default** (lead template, `buildLeadBrief`, `agent_change`'s `isolation` description, the Architect template
+  and its authoring skill): agents work on their own branch and can edit files by default (isolation `worktree`), so they
+  can deliver finished work such as mockups, docs, specs and code. Read-only (`none`) only when the job is purely advisory
+  and the user asked for that. (This replaced "read-only unless it must change code".) A create carries its isolation
+  explicitly and is released by the user's level like any create; an update that raises `none` → `worktree` still waits
+  for a click (`isolation`).
 - **Architect step 1** (template, process only): work out the problem, who has it and the outcome wanted; list the
   shapes that could solve it (one may be "change an existing agent" or "no change"); pick one. When two shapes would
   produce materially different agents and neither the charter nor research settles it, ask before researching that
@@ -521,6 +527,12 @@ Plugin tools (`docs/opencode-plugins-v2/manta/tools/agents.ts`): `agent_trial`, 
   registered projects' folders.
 - `skills find` runs a pinned local install, argv only, `queryRefusal`, output parsed and never executed.
 - Template upgrades never overwrite a user-edited file without a clean merge; conflicts wait for a click.
+- **An agent's own home folder** (`~/.manta/agents/<slug>/home/`) is its workspace: its tasks may read, search, write and edit
+  there (`jobRules`; its shell reaches it through the folder check), so even a read-only agent can leave a mockup or notes.
+  Everything else under `~/.manta` stays protected: other agents' folders, its own `agent.md`, compiled prompt and skills
+  (they change only through proposals), the learned store, settings and credentials; a path with `..` in it is denied. Its
+  OpenCode block allows `edit` / `write` in its folder only under `home/`. The Architect's task and trials keep their own
+  explicit denies after these rules, so neither writes there.
 
 ## 8. Libraries considered
 

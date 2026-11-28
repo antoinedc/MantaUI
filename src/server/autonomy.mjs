@@ -325,8 +325,8 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [], session
   }
   // (see above: a search / read outside the working folder is checked per FOLDER)
   for (const t of writeTrees) deny("external_directory", `${t}/*`);
-  const agentFolder = typeof agentDir === "string" ? agentDir.replace(/\/+$/, "") : "";
-  const keepAgentFolder = agentFolder && writeTrees.some((t) => agentFolder.startsWith(`${t}/`));
+  const agentFolder = ownAgentFolder(agentDir, home);
+  const keepAgentFolder = agentFolder !== "";
   for (const fragment of PROTECTED_BASH_OTHER) deny("bash", `*${fragment}*`);
 
   // Manta's own server, opencode and anything else listening on the box answer only to the box: a task never fetches them
@@ -350,8 +350,37 @@ export function jobRules(policy, { home, agentDir, projectPatterns = [], session
     const level = decide(p.kind, policy);
     if (level === "ask" || level === "never") deny("bash", p.pattern);
   }
-  if (keepAgentFolder) rules.push({ permission: "external_directory", pattern: `${agentFolder}/**`, action: "allow" });
+  if (keepAgentFolder) {
+    // the agent's own home folder: its workspace, where it may read, write and edit (a mockup, notes, drafts). Its
+    // agent.md, compiled prompt, skills and learned store stay denied above: they change only through proposals.
+    const agentHome = `${agentFolder}/${AGENT_HOME}`;
+    for (const permission of FILE_PERMISSIONS) {
+      allow(permission, agentHome);
+      allow(permission, `${agentHome}/**`);
+    }
+    // …but never a path that climbs out of it (`home/../agent.md`)
+    for (const permission of FILE_PERMISSIONS) deny(permission, `${agentHome}/*..*`);
+    rules.push({ permission: "external_directory", pattern: `${agentFolder}/**`, action: "allow" });
+  }
   return rules;
+}
+
+// The agent's own workspace folder, `~/.manta/agents/<slug>/home` (agents.mjs creates it).
+const AGENT_HOME = "home";
+
+/** The agent's folder when it sits under `~/.manta` (the only place it needs granting back), else "". */
+function ownAgentFolder(agentDir, home) {
+  const folder = typeof agentDir === "string" ? agentDir.replace(/\/+$/, "") : "";
+  if (!folder || folder.split("/").includes("..")) return "";
+  return protectedPaths(home).writeTrees.some((t) => folder.startsWith(`${t}/`)) ? folder : "";
+}
+
+/** Is `abs` inside the agent's own home folder (no `..` anywhere in it)? */
+function insideAgentHome(abs, agentDir, home) {
+  const folder = ownAgentFolder(agentDir, home);
+  if (!folder || abs.split("/").includes("..")) return false;
+  const agentHome = `${folder}/${AGENT_HOME}`;
+  return abs === agentHome || abs.startsWith(`${agentHome}/`);
 }
 
 // ---- matching a finished tool call against the same patterns (spec §5) ----
@@ -399,7 +428,7 @@ function touchesProtectedSecret(command, segments, sessionID) {
  * is matched per part of a compound command; a tool by its name; a file tool by its path. `summary` is a FIXED label
  * (the matched pattern's command words, the tool name, or "Manta settings or credentials"), never the arguments.
  */
-export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionID } = {}) {
+export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionID, agentDir } = {}) {
   const tool = String(toolPart?.tool ?? "");
   const input = toolPart?.state?.input ?? {};
   const found = [];
@@ -430,7 +459,7 @@ export function matchKinds(toolPart, { home = "", projectPatterns = [], sessionI
       const abs = expandHome(raw, home);
       const writes = tool === "edit" || tool === "write" || tool === "apply_patch";
       const under = (dir) => abs === dir || abs.startsWith(`${dir}/`);
-      if (files.includes(abs) || trees.some(under) || (writes && writeTrees.some(under))) add("protected", PROTECTED_SUMMARY);
+      if (files.includes(abs) || trees.some(under) || (writes && writeTrees.some(under) && !insideAgentHome(abs, agentDir, home))) add("protected", PROTECTED_SUMMARY);
     }
   }
   return found;
@@ -635,7 +664,7 @@ export function parseSelfReport(text) {
  * - `selfReport`: "present" | "none" | "missing".
  * Entries are `{ kind, level?, summary, source? }` with a FIXED summary for commands, at most 10 each, de-duplicated.
  */
-export function extractActions({ messages, afterMessageId, continuation = false, policy, home = "", projectPatterns = [], resultText = null, sessionID }) {
+export function extractActions({ messages, afterMessageId, continuation = false, policy, home = "", projectPatterns = [], resultText = null, sessionID, agentDir }) {
   const list = Array.isArray(messages) ? messages : [];
   let from = 0;
   if (afterMessageId) {
@@ -657,7 +686,7 @@ export function extractActions({ messages, afterMessageId, continuation = false,
       if (part?.type !== "tool") continue;
       const status = part.state?.status;
       if (status !== "completed" && status !== "error") continue;
-      const matches = matchKinds(part, { home, projectPatterns, sessionID });
+      const matches = matchKinds(part, { home, projectPatterns, sessionID, agentDir });
       if (matches.length === 0) continue;
       if (status === "completed") {
         for (const { kind, summary } of matches) {

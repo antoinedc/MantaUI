@@ -10,6 +10,7 @@ import {
   createAgentsEngine,
   parseAgentMd,
   buildAgentBlock,
+  AGENT_BLOCK_PERMISSION,
   isArchitect,
   buildArchitectContext,
   ARCHITECT_BLOCK_PERMISSION,
@@ -328,7 +329,7 @@ test("the compiled Architect block denies everything first, then allows only the
   assert.deepEqual(Object.keys(block.permission.external_directory), [`${dir}/**`, "/h/.local/share/opencode/tool-output/*"]);
   assert.deepEqual(ARCHITECT_BLOCK_PERMISSION("/x", "/h")["*"], "deny");
   // an ordinary agent is unchanged
-  assert.deepEqual(buildAgentBlock({ dir, meta: { description: "D", model: null, role: "specialist" } }).permission, { external_directory: { [`${dir}/**`]: "allow" } });
+  assert.deepEqual(buildAgentBlock({ dir, meta: { description: "D", model: null, role: "specialist" } }).permission, AGENT_BLOCK_PERMISSION(dir));
 });
 
 test("sync rewrites a block whose permission rules are only reordered (rule order is meaning)", async () => {
